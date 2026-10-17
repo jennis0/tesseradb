@@ -658,8 +658,8 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view, deleting the items it leaves in no view. Its key may be created again, as a
-    /// new incarnation with none of the dropped view's rows or artifacts.
+    /// Drop a view, deleting the items it leaves in no view and its artifacts. Its key may be
+    /// created again, as a new incarnation with none of the dropped view's rows or artifacts.
     pub fn drop_view(
         &self,
         group: String,

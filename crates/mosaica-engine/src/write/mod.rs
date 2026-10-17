@@ -37,7 +37,7 @@ pub(crate) use schema::*;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
@@ -284,20 +284,28 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
     }
 }
 
-/// Remove every artifact of a group-scoped layer whose view is not at the incarnation it was
-/// published under, returning the levels it changed. A view drop calls this, and so does an open,
-/// over records packed before a drop or replayed from before it.
-pub(crate) fn retire_dead_view_artifacts(
+/// Every artifact of a group-scoped layer whose view `live` rejects, asked `(group, key,
+/// incarnation)`, as a deletion target. The records are not changed: a view drop deletes these,
+/// and an open marks them deleted over records packed or replayed from before a drop that named
+/// them.
+pub(crate) fn dead_view_artifacts(
     registry: &LayerRegistry,
-    store: &mut ArtifactStore,
-    manifest: &mosaica_store::manifest::Manifest,
-) -> Vec<(String, u32)> {
-    store.retire_dead_views(|layer, key, incarnation| {
-        match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
-            Some(group) => manifest.incarnation_of_key(group, key) == Some(incarnation),
-            None => true,
-        }
-    })
+    store: &ArtifactStore,
+    live: impl Fn(&str, &str, mosaica_types::view::ViewIncarnation) -> bool,
+) -> Vec<Target> {
+    store
+        .dead_view_artifacts(|layer, key, incarnation| {
+            match registry
+                .get(layer)
+                .and_then(|held| held.declaration.scope.group())
+            {
+                Some(group) => live(group, key, incarnation),
+                None => true,
+            }
+        })
+        .into_iter()
+        .map(|(space, entity)| Target::Artifact(space, entity))
+        .collect()
 }
 
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.

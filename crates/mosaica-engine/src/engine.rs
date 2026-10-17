@@ -1226,7 +1226,7 @@ impl Engine {
 
         let mut readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
-            deny,
+            mut deny,
             buffers,
             mut state,
             vocabularies,
@@ -1251,11 +1251,25 @@ impl Engine {
             &readers.prefix_dir,
         )?;
         let bundle = served_bundle(bundle, &state, &vocabularies);
-        crate::write::retire_dead_view_artifacts(
+        // A dropped view's artifacts are deleted, with their keys free, wherever the log or the
+        // deny state does not already hold the deletion.
+        let dead = crate::write::dead_view_artifacts(
             &state.registry,
-            &mut state.artifacts,
-            &bundle.manifest,
+            &state.artifacts,
+            |group, key, incarnation| {
+                bundle.manifest.incarnation_of_key(group, key) == Some(incarnation)
+            },
         );
+        for target in dead {
+            let mosaica_types::Target::Artifact(space, entity) = target else {
+                continue;
+            };
+            let deny = deny.spaces.entry(space).or_default();
+            deny.apply(entity, mosaica_lifecycle::ChangeOp::Delete);
+            if let Some((name, level, ordinal)) = state.registry.locate_in(space, entity) {
+                state.artifacts.release_key(name, level, ordinal);
+            }
+        }
         // The suggestion indexes go in the engine's own cache directory, never in the bundle:
         // they are derived, and rebuilt every open.
         let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);

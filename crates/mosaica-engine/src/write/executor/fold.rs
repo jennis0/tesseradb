@@ -1521,6 +1521,9 @@ impl Executor {
                     self.compactions.ended.insert(last, ended);
                 }
                 self.compactions.last = Some(shard_id);
+                self.health
+                    .compaction_shard
+                    .store(shard_id.raw(), Ordering::SeqCst);
                 if let Some(now) = unix_now() {
                     self.compactions.started.insert(shard_id, now);
                 }

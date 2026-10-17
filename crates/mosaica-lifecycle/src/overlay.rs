@@ -446,8 +446,9 @@ impl<'a> Replay<'a> {
             // rows it discards and the rows the recreate takes, and it is the one and only place
             // the two sets can be told apart.
             //
-            // The items the drop left in no view are deleted here as a `ChangeBatch` delete is,
-            // and retire at the fold like any other deletion.
+            // The items the drop left in no view and the artifacts of the incarnation it killed
+            // are deleted here as a `ChangeBatch` delete is, and retire at the fold like any
+            // other deletion.
             WalRecord::ViewDrop { view, deleted } => {
                 // **Every id the key resolves to, not just the owner's.** A key is one view of the
                 // group that owns it *and* one of every group sharing its views (`views.md` §3.3),

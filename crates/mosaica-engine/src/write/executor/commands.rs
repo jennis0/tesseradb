@@ -1331,7 +1331,8 @@ impl Executor {
     }
 
     /// `DELETE /control/views/{group}/{key}`: drop a view, freeing its key and killing its
-    /// incarnation, and delete every item the drop leaves with a row in no view.
+    /// incarnation, and delete every item the drop leaves with a row in no view and every
+    /// artifact of the dropped incarnation, whose keys are free from the acknowledgement.
     ///
     /// The deletions are ordinary ones: they enter the overlay and retire at the fold that
     /// executes them. They travel in the drop's own record, so no log holds the drop without them,
@@ -1365,9 +1366,23 @@ impl Executor {
                     .map(|entity| Target::Item(shard.id(), entity))
             })
             .collect();
+        // The artifacts the key's live incarnation holds, in the owner's view and every sharing
+        // group's, and every artifact attached to one of them.
+        let manifest = &generation.bundle.manifest;
+        let mut artifacts = self.live.with_publication_state(|registry, store| {
+            crate::write::dead_view_artifacts(registry, store, |group, view, incarnation| {
+                view != key
+                    || manifest.owner_of_group(group) != owner
+                    || manifest.incarnation_of_key(group, view) != Some(incarnation)
+            })
+        });
+        artifacts.extend(self.live.dependents_of(&artifacts));
+        let deleted = dangling.len() as u64;
+        let mut targets = dangling;
+        targets.extend(artifacts.iter().copied());
         let prepared = self
             .live
-            .with_roster(|roster| roster.prepare_drop(&owner, &key, dangling.clone()));
+            .with_roster(|roster| roster.prepare_drop(&owner, &key, targets.clone()));
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
@@ -1381,25 +1396,22 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         self.publish_roster(&generation, started, &ids);
-        let served = self.generation.load_full();
-        let retired = self.live.with_publication_state(|registry, store| {
-            crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
-        });
-        for (layer, _) in &retired {
-            self.pending_forms.retain(|(held, _, _), _| held != layer);
-            self.deps.artifact_projections.forget(layer);
-            self.deps.lineages.forget(layer);
-            self.deps.level_contents.forget(layer);
-        }
-        let deleted = dangling.len() as u64;
-        if !dangling.is_empty() {
+        if !targets.is_empty() {
             self.apply_changes(
-                dangling
+                targets
                     .into_iter()
                     .map(|target| (target, mosaica_lifecycle::ChangeOp::Delete))
                     .collect(),
             );
         }
+        let artifacts: Vec<(LayerSpace, EntityId)> = artifacts
+            .into_iter()
+            .filter_map(|target| match target {
+                Target::Artifact(space, entity) => Some((space, entity)),
+                Target::Item(..) => None,
+            })
+            .collect();
+        self.live.release_artifact_keys(&artifacts);
         self.side_manifests.behind_live = true;
         reply.ack(ViewDropped { deleted });
     }

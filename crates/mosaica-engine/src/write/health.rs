@@ -149,6 +149,9 @@ pub struct ExecutorHealth {
     /// A compaction request awaiting the tick that dispatches it, or whose shards are not all
     /// compacted yet: true until the last of them publishes, is refused or fails.
     pub(crate) fold_requested: AtomicBool,
+    /// The shard of the running compaction, or of the last one when none runs: a value past
+    /// [`ShardId::LIMIT`] before the first since the executor started.
+    pub(crate) compaction_shard: AtomicU32,
     /// The request [`Self::fold_requested`] raised and no tick has taken yet.
     pub(crate) compaction_request: Mutex<Option<CompactionRequest>>,
     /// Folds that were asked for and `plan_fold` refused, one counter per gate
@@ -480,6 +483,9 @@ pub struct ExecutorStats {
     /// compaction it names publishes, is discarded or is refused. A request made while a
     /// compaction runs is held until that one lands.
     pub fold_requested: bool,
+    /// The shard of the running compaction, or of the last one when none runs; `None` before the
+    /// first since the executor started.
+    pub compaction_shard: Option<ShardId>,
     /// The sum of [`Self::fold_refusals_by_gate`].
     pub fold_refusals: u64,
     /// Refused folds by gate, indexed as [`FOLD_GATES`] names them.
@@ -622,6 +628,7 @@ impl ExecutorHealth {
             folds: AtomicU64::new(0),
             fold_failures: AtomicU64::new(0),
             fold_requested: AtomicBool::new(false),
+            compaction_shard: AtomicU32::new(u32::MAX),
             compaction_request: Mutex::new(None),
             fold_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
             last_fold_refusal: Mutex::new(None),
@@ -877,6 +884,7 @@ impl ExecutorHealth {
             folds: self.folds.load(Ordering::Relaxed),
             fold_failures: self.fold_failures.load(Ordering::Relaxed),
             fold_requested: self.fold_requested.load(Ordering::SeqCst),
+            compaction_shard: ShardId::new(self.compaction_shard.load(Ordering::SeqCst)).ok(),
             fold_refusals_by_gate,
             fold_refusals: fold_refusals_by_gate.iter().sum(),
             last_fold_refusal: *lock_recover(&self.last_fold_refusal),

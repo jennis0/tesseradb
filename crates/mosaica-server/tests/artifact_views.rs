@@ -1424,6 +1424,12 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
 
     recreate(&server, "q2").await;
+    let retirable = |status: serde_json::Value| status["layer_spaces"]["retirable"].clone();
+    assert_eq!(
+        retirable(control_status(&server).await),
+        3,
+        "the predecessor's three artifacts are deletions until a compaction removes them"
+    );
     let token = token_for(&server, &["0"]).await;
     assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
     assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
@@ -1431,6 +1437,7 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
 
     let server = restart(server, &tmp).await;
+    assert_eq!(retirable(control_status(&server).await), 3);
     let token = token_for(&server, &["0"]).await;
     assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
     assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
@@ -1455,6 +1462,7 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
 
     flush_and_fold(&server, Some("quarter:q1")).await;
+    assert_eq!(retirable(control_status(&server).await), 0);
     assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
     let server = restart(server, &tmp).await;

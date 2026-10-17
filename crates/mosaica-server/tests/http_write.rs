@@ -1855,6 +1855,18 @@ async fn control_compact_is_accepted_and_deferred() {
         compaction["last_rss_bytes"].is_u64() && compaction["passes"].is_array(),
         "the memory gauges are present before the first fold: {compaction}"
     );
+    assert_eq!(
+        compaction["shard"],
+        serde_json::Value::Null,
+        "no compaction has run"
+    );
+
+    flush_and_fold(&server, None).await;
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["compaction"]["shard"], 0,
+        "the one shard compacted: {status}"
+    );
 }
 
 /// **The stage barriers of `/control/status` move when their stages run** (contracts §3.4's
@@ -3610,6 +3622,7 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/compaction/passes/*/ms", "integer"),
     ("/compaction/passes/*/pass", "string"),
     ("/compaction/passes/*/rss_bytes", "integer"),
+    ("/compaction/shard", "integer|null"),
     ("/compute", "object"),
     ("/compute/admission", "integer"),
     ("/compute/in_flight", "integer"),

@@ -1162,7 +1162,7 @@ pub struct ArtifactRecord {
     /// The incarnation of `view` this artifact was published under, and
     /// [`mosaica_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
     /// created again under the same key is a new incarnation, and none of the old one's artifacts
-    /// belong to it ([`ArtifactStore::retire_dead_views`]).
+    /// belong to it ([`ArtifactStore::dead_view_artifacts`]).
     pub incarnation: mosaica_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]). In a store holding one point shard's
@@ -3757,61 +3757,29 @@ impl ArtifactStore {
             .and_then(|slots| slots.get_mut(ordinal as usize))
     }
 
-    /// Remove every artifact of a view incarnation that `live` rejects, leaving a hole at each.
-    /// `live` is asked `(layer, view, incarnation)` for each artifact that belongs to a view.
+    /// Every artifact of a view incarnation that `live` rejects, by space and entity. `live` is
+    /// asked `(layer, view, incarnation)` for each artifact that belongs to a view.
     ///
-    /// A view dropped and created again under the same key is a new incarnation, so this is what
-    /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
-    /// where it still names the removed artifact, since a republication into the new view may
-    /// hold it. An artifact attached to a removed one is removed by its own stamp: the
-    /// publication refused it unless its layer shares a view with its target's, so its view key
-    /// was dropped with its target's and its own incarnation is dead too. Returns the levels it
-    /// changed.
-    pub fn retire_dead_views(
-        &mut self,
+    /// A view dropped and created again under the same key is a new incarnation, so these are the
+    /// artifacts a drop deletes. An artifact attached to one of them is among them by its own
+    /// stamp: the publication refused it unless its layer shares a view with its target's, so its
+    /// view key was dropped with its target's and its own incarnation is dead too.
+    pub fn dead_view_artifacts(
+        &self,
         live: impl Fn(&str, &str, mosaica_types::view::ViewIncarnation) -> bool,
-    ) -> Vec<(String, u32)> {
-        let dead: Vec<(String, u32, u32)> = self
-            .levels
+    ) -> Vec<(LayerSpace, EntityId)> {
+        let live = &live;
+        self.levels
             .iter()
-            .flat_map(|((layer, level), slots)| {
-                slots.iter().enumerate().filter_map(|(ordinal, slot)| {
+            .flat_map(|((layer, _), slots)| {
+                let space = self.spaces[layer.as_str()];
+                slots.iter().filter_map(move |slot| {
                     let record = slot.as_ref()?;
                     let view = record.view.as_deref()?;
-                    (!live(layer, view, record.incarnation))
-                        .then(|| (layer.clone(), *level, ordinal as u32))
+                    (!live(layer, view, record.incarnation)).then_some((space, record.entity))
                 })
             })
-            .collect();
-        let mut moved: Vec<(String, u32)> = Vec::new();
-        for (layer, level, ordinal) in dead {
-            let Some(record) = self.slot_mut(&layer, level, ordinal).and_then(Option::take) else {
-                continue;
-            };
-            self.unkey(&layer, level, &record.view, record.key.as_deref(), ordinal);
-            if let Some(shape) = self
-                .shapes
-                .get_mut(layer.as_str())
-                .and_then(|levels| levels.get_mut(&level))
-                .and_then(|shapes| shapes.get_mut(ordinal as usize))
-            {
-                *shape = None;
-            }
-            self.content_pending
-                .remove(&(layer.clone(), level, ordinal));
-            let space = self.spaces[layer.as_str()];
-            self.forget_dependency(space, &record);
-            self.dependents.remove(&(space, record.entity));
-            self.clear_other_slices(&layer, level, ordinal);
-            if moved.last() != Some(&(layer.clone(), level)) {
-                moved.push((layer, level));
-            }
-        }
-        for (layer, level) in &moved {
-            self.bump(layer, *level);
-            self.bump_lineage(layer, *level);
-        }
-        moved
+            .collect()
     }
 
     /// The supplied content of every artifact not yet in a manifest, for its layer's space.
@@ -5063,11 +5031,11 @@ mod tests {
         assert_eq!(record.members, Bitmap::of(&[7]));
     }
 
-    /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
-    /// incarnation already holds again stays with it. Entity-scoped records are never asked about,
-    /// and a label in the dead view goes with the artifact it is attached to.
+    /// A dead incarnation's artifacts are named, with a label in the dead view on one of them,
+    /// and nothing is changed; entity-scoped records are never asked about. Releasing their keys
+    /// leaves a key the live incarnation holds again with it.
     #[test]
-    fn a_dead_views_artifacts_leave_holes_and_a_republished_key_stays() {
+    fn a_dead_views_artifacts_are_named_and_a_republished_key_stays() {
         let scoped = |entity: u64, key: &str, incarnation| ArtifactRecord {
             key: Some(key.into()),
             view: Some("q2".into()),
@@ -5089,17 +5057,16 @@ mod tests {
         store.put("labels/t", space("labels/t"), 0, 1, label(201, 102, 2, 2), None);
         let before = store.level_version("clusters/q", 0);
 
-        let retired = store.retire_dead_views(|_, _, incarnation| incarnation == 2);
-        assert_eq!(
-            retired,
-            vec![("clusters/q".to_string(), 0), ("labels/t".to_string(), 0)]
-        );
-        assert!(store.level_version("clusters/q", 0) > before);
-        let held: Vec<u32> = store
-            .level("clusters/q", 0)
-            .map(|(ordinal, _)| ordinal)
-            .collect();
-        assert_eq!(held, vec![2]);
+        let dead = store.dead_view_artifacts(|_, _, incarnation| incarnation == 2);
+        let mut dead: Vec<u64> = dead.iter().map(|(_, entity)| entity.raw()).collect();
+        dead.sort_unstable();
+        assert_eq!(dead, vec![100, 101, 200]);
+        assert_eq!(store.level_version("clusters/q", 0), before);
+        assert_eq!(store.level("clusters/q", 0).count(), 3);
+        assert_eq!(store.level("labels/t", 0).count(), 2);
+
+        store.release_key("clusters/q", 0, 0);
+        store.release_key("clusters/q", 0, 1);
         assert_eq!(
             store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"),
             Some(2)
@@ -5108,17 +5075,7 @@ mod tests {
             store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"),
             None
         );
-        assert_eq!(store.next_ordinal("clusters/q", 0), 3);
         assert_eq!(store.level("clusters/p", 0).count(), 1);
-        let labels: Vec<u32> = store
-            .level("labels/t", 0)
-            .map(|(ordinal, _)| ordinal)
-            .collect();
-        assert_eq!(labels, vec![1]);
-        assert!(store.cascade_from(&[at("clusters/q", 101)]).is_empty());
-        assert!(store
-            .retire_dead_views(|_, _, incarnation| incarnation == 2)
-            .is_empty());
     }
 
     #[test]

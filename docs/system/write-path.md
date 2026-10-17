@@ -396,8 +396,9 @@ queue to a 429.
 
 A view drop deletes the items it leaves with a row in no view, flushed or buffered. The drop's own
 WAL record lists their entity ids, so the log never holds the drop without its deletions, and they
-enter the overlay and leave it as any deletion does. The drop also removes from their layers the
-artifacts scoped to the dropped view, at once and without a deletion in any overlay.
+enter the overlay and leave it as any deletion does. The same record deletes the artifacts scoped
+to the dropped view, in their layer spaces' overlays. Their keys are free from the acknowledgement,
+and they leave at compaction as any artifact deletion does.
 
 ### The overlay: two stores
 

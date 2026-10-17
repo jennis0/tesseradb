@@ -955,6 +955,110 @@ fn a_view_drop_deletes_the_items_it_leaves_in_no_view_in_every_shard() {
     assert_eq!(served_to(&engine, &full_coverage_credential()), expected);
 }
 
+/// A scoped artifact with members in both shards, in a view dropped and created again, is a held
+/// deletion: its key publishes a new artifact in the recreated view, the only one served, and the
+/// old record is held until the compaction of the second shard listing it. A restart before any
+/// compaction and one after each agree.
+#[test]
+fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
+    use mosaica_lifecycle::ShardSets;
+    let several = grouped_fixture(Some(TWO_SHARD_SIZE));
+    let engine = several.open_writing();
+    let mut layer = flat_declaration("t");
+    layer.scope = mosaica_types::layer::LayerScope::Group("g".into());
+    layer.views = vec!["g:k".into()];
+    engine.register_layer(layer).unwrap();
+    let in_view = |members: Vec<Option<ItemAt>>| IncomingArtifact {
+        view: Some("k".into()),
+        members: ShardSets::of_items(members.into_iter().map(|item| item.expect("an item"))),
+        ..IncomingArtifact::from_entities(Some("c".into()), Vec::<EntityId>::new())
+    };
+    let members = items_by_id(&engine, GROUPED_FROM..GROUPED);
+    let shards: std::collections::BTreeSet<ShardId> =
+        members.iter().flatten().map(|item| item.shard).collect();
+    assert_eq!(
+        shards.len(),
+        2,
+        "the old artifact has members in both shards"
+    );
+    let old = engine
+        .publish_artifacts("t".into(), 0, vec![in_view(members)])
+        .unwrap()[0];
+    let old = artifact_target(&engine, old);
+    tick(&engine);
+
+    engine.drop_view("g".into(), "k".into()).unwrap();
+    engine
+        .create_view("g".into(), "k".into(), None, Default::default())
+        .unwrap();
+    let keys = ["new-0", "new-1"];
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: "recreated".to_string(),
+            body_hash: [7; 32],
+            view: Some("g:k".to_string()),
+            rows: keys
+                .iter()
+                .map(|key| mosaica_lifecycle::IngestRow {
+                    mosaica_id: None,
+                    labels: Some(vec![b"0".to_vec()]),
+                    position: Some((5.0, 5.0)),
+                    scalars: keyed(key),
+                    scoped: Vec::new(),
+                    omitted: Vec::new(),
+                })
+                .collect(),
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the insert is accepted");
+    publish_buffered(&engine);
+    let members = items_by_id(&engine, keys.iter().map(|key| key_id(key)));
+    let new = engine
+        .publish_artifacts("t".into(), 0, vec![in_view(members)])
+        .unwrap()[0];
+    tick(&engine);
+
+    let check = |engine: &Engine, held: bool, when: &str| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let request =
+            mosaica_engine::ViewportArtifactsRequest::new("g:k", 0, WHOLE_MAP, usize::MAX);
+        let served: Vec<MosaicaId> = engine
+            .viewport_artifacts(&session, request)
+            .unwrap()
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.mosaica_id)
+            .collect();
+        assert_eq!(served, vec![new], "{when}: only the new artifact is served");
+        assert_eq!(
+            engine.locate_artifact(old).and_then(|at| at.key).is_some(),
+            held,
+            "{when}: whether the old record is held"
+        );
+        assert_eq!(
+            engine.generation_status().layer_spaces.retirable,
+            u64::from(held),
+            "{when}"
+        );
+    };
+    check(&engine, true, "before any compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, true, "across a restart before any compaction");
+    compact(&engine, Some(shard(1)));
+    check(&engine, true, "after shard 1's compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, true, "across a restart after shard 1's compaction");
+    compact(&engine, Some(ShardId::ZERO));
+    check(&engine, false, "after shard 0's compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, false, "across a restart after both compactions");
+}
+
 /// A group-scoped column of a view created at a running service has a base only in the shard a
 /// flush wrote one in: the other shard holds the column empty, so a filter on it is admitted and
 /// answered in both shards. Each shard's compaction gives it a base, and the family leaves for

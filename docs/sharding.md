@@ -234,10 +234,9 @@ own slice of every artifact's membership and generating sets (§2.1).
 
 An artifact's id is never reused. A deleted artifact leaves a hole in its level's run. Its key is
 free from the deletion's acknowledgement, so a publication can give the key to a new artifact at
-once. Dropping a view retires the artifacts scoped to it directly, removing their records at once.
-Not built yet: deleting them in the space's overlay instead, which stage 5 needs so that each shard
-reconciles its slices at its own compaction. With one shard, retiring them directly removes every
-part of them in one publication.
+once. Dropping a view deletes the artifacts scoped to it in the space's overlay, with their keys
+free from the drop's acknowledgement, so each shard reconciles its slices at its own compaction as
+for any artifact deletion.
 
 Dropping a layer removes its space, and every shard's slices and row forms of it, from the next
 publication, and their files from the next compaction's prefix. Nothing of the layer is kept. Its
@@ -746,9 +745,8 @@ operator's seal is the same record as the seal at `shards.size`.
 
 `POST /control/compact` takes an optional shard and compacts that shard alone. Without one it
 compacts as §4.6 says. `/control/status`'s `compaction` block and the compaction's log line name the
-shard the last or running compaction is on. Not built yet: `POST /control/compact` names no shard,
-and `/control/status` does not name the shard a compaction is on. The compaction's log line names
-it.
+shard the last or running compaction is on, `null` before the first since the service started. Not
+built yet: `POST /control/compact` names no shard.
 
 A drop applies to every request that starts after it is acknowledged: the shard is left out of
 every request, and every identifier it issued answers as one naming nothing. Its items leave every
@@ -1023,7 +1021,7 @@ bumps `WAL_VERSION`.
 | 2 | `ShardId`; every per-entity and per-view structure moves under `shards/0/`; the manifest and side-manifest split; `shards.size` declared and recorded, reaching the HTTP API, both clients and the CLI's declaration file, and a size that would open a second shard refused on both paths, as is an insert that would, batch by batch, until stage 5; the compile-fail tests but the `LayerSpace` case; format bump | the whole suite on rebuilt bundles |
 | 3 | layer spaces: artifact records, supplied content, overlay and held shapes move out of the point space into one space per layer, and the point compaction writes each space it touches again; the two-region allocator and its low water go; artifact and layer identifiers take the kind bit and the layer space, and route by kind; a dropped layer leaves nothing and its name registers again; `/control/status` counts the layer spaces apart from the shard, on the HTTP API and both clients; the `LayerSpace` compile-fail case; format bump | the whole suite on rebuilt bundles; layer drop and kind routing fixtures |
 | 4 | `ShardedMask`; every route combined as §3.4 says, θ's occupied tiles merged; a shard's identity derived from the bundle's and the shard's number; caches and response keys over every shard (§3.6); projections shared by grant and refreshed per (grant, view, shard), and the threat model's fourth shared cache; the stored-order cursor carries the shard; status's corpus-wide figures summed across shards; a build writes several shards past `shards.size`, a containment expression carries the size of the set it was composed over so no shard's slice answers alone, and verification reads every shard; every write to a bundle of several shards is refused with `409`, its write executor runs no thread, and it is refused at open beside a log that holds records; format bump | the conformance suite's tests that write nothing, marked as such, in both modes, and the two modes fixture; §8.1's tile-index run on MedCPT and PaperSeek; §8.2 |
-| 5 | per-shard allocation, pool and target, with `REUSE_MIN_FREE` at max(1, `shards.size` >> 10); stage 2's size refusals removed: an insert past the size opens the next shard, and a lower size seals the open one; open and seal logged; edits in their shard, never refused for the size; denies resolved per shard (§4.4); flush per (view, shard), oldest WAL position first, and merge per shard; compaction per shard on a per-shard schedule, a request compacting every shard with something to reclaim, and bases tracked per shard, with empty bases for an opened shard; the log naming the compaction's shard (not built yet: the status naming it); a key filter on every unique run; layer publication per shard, with a records version per level and a slice version per (shard, level); an artifact's key free at its deletion, and its record held until every shard that lists it has compacted; the partition file as the commit point, naming each shard and space file by number and digest; `writes_nothing` deleted; WAL and format bumps | the whole conformance suite in both modes, and the two modes fixture with its write script; sealed shard, allocation, unique, build-equals-ingest, restart, stale identifier, commit point, runtime column and artifact delete fixtures; §8.3 and §8.4 at several shards |
+| 5 | per-shard allocation, pool and target, with `REUSE_MIN_FREE` at max(1, `shards.size` >> 10); stage 2's size refusals removed: an insert past the size opens the next shard, and a lower size seals the open one; open and seal logged; edits in their shard, never refused for the size; denies resolved per shard (§4.4); flush per (view, shard), oldest WAL position first, and merge per shard; compaction per shard on a per-shard schedule, a request compacting every shard with something to reclaim, and bases tracked per shard, with empty bases for an opened shard; the log and the status naming the compaction's shard; a key filter on every unique run; layer publication per shard, with a records version per level and a slice version per (shard, level); an artifact's key free at its deletion, and its record held until every shard that lists it has compacted; the partition file as the commit point, naming each shard and space file by number and digest; `writes_nothing` deleted; WAL and format bumps | the whole conformance suite in both modes, and the two modes fixture with its write script; sealed shard, allocation, unique, build-equals-ingest, restart, stale identifier, commit point, runtime column and artifact delete fixtures; §8.3 and §8.4 at several shards |
 | 6 | seal, drop, status and compaction of a named shard on all four surfaces, the CLI's first control-plane verbs; drop logged, and a drop reconciling generating sets; refuse at open; parallel verification and its record; format bump | dropped and corrupt shard fixtures; seal, drop, the shard list and a named shard's compaction through each surface |
 | 7 | §8.5 | the defaults written into the declaration's reference |
 

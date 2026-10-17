@@ -3130,6 +3130,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
+            "shard": executor.compaction_shard.map(|shard| shard.raw()),
             "fold_refusals": executor.fold_refusals,
             "fold_refusals_by_gate": mosaica_engine::FOLD_GATES
                 .iter()

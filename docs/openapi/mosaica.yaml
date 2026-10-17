@@ -7913,7 +7913,7 @@ components:
       type: object
       additionalProperties: false
       description: Compaction folds. Alarm on `fold_failures`, and on `fold_refusals` rising while `folds` does not.
-      required: [live_rows, folds, fold_failures, fold_requested, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
+      required: [live_rows, folds, fold_failures, fold_requested, shard, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
       properties:
         live_rows:
           type: integer
@@ -7927,6 +7927,10 @@ components:
         fold_requested:
           type: boolean
           description: True from a `POST /control/compact` until the last compaction it asked for publishes, is discarded or is refused.
+        shard:
+          type: [integer, "null"]
+          minimum: 0
+          description: The shard the running compaction is on, or the last one's when none runs; null before the first since the service started.
         fold_refusals:
           type: integer
           minimum: 0

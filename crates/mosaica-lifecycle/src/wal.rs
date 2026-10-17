@@ -331,12 +331,14 @@ pub enum WalRecord {
     /// rotation: a death that did not say which incarnation died could not be told apart from a
     /// death of the one created after it.
     ///
-    /// **It deletes the items it leaves in no view**, in the same record as the drop, so the log
-    /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
-    /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
+    /// **It deletes the items it leaves in no view and the dropped incarnation's artifacts**, in
+    /// the same record as the drop, so the log never holds a drop without its deletions. Each is
+    /// an ordinary deletion: replay applies it to the overlay as a `ChangeBatch` delete would be,
+    /// and the fold that executes it retires it.
     ViewDrop {
         view: mosaica_types::view::DeadIncarnation,
-        /// The items the drop left with a row in no view, flushed or buffered.
+        /// The items the drop left with a row in no view, flushed or buffered, and the artifacts
+        /// of the incarnation it kills.
         deleted: Vec<Target>,
     },
     /// An accepted layer drop. The name is freed; the space is never given again.

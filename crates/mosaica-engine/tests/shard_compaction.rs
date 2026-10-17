@@ -104,6 +104,10 @@ fn compacting_one_shard_leaves_the_other_standing() {
     );
 
     assert_eq!(compact(&engine, Some(shard(1))), 1);
+    assert_eq!(
+        engine.write_executor_stats().compaction_shard,
+        Some(shard(1))
+    );
     let after = records(&several.root);
     assert_eq!(after[0], before[0], "shard 0's identity and denies stand");
     assert_ne!(after[1].0, before[1].0, "shard 1's identity moves");
@@ -147,6 +151,12 @@ fn compacting_one_shard_leaves_the_other_standing() {
     let engine = several.open_writing();
     assert_eq!(served_to(&engine, &full_coverage_credential()), expected);
     assert_eq!(engine.retirable_deletions(), 1, "shard 0's deletion stands");
+
+    assert_eq!(compact(&engine, Some(shard(0))), 1);
+    assert_eq!(
+        engine.write_executor_stats().compaction_shard,
+        Some(shard(0))
+    );
 }
 
 /// A deletion in a sealed shard leaves its overlay only at that shard's compaction, and a
