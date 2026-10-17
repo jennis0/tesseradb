@@ -474,7 +474,8 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         assert_eq!(body["error"], "contract", "{part}: {body}");
     }
 
-    // A key repeated with a rank is refused: a withdrawal in one row moves the rank another names.
+    // A key repeated with a rank is refused: two pages of one set would each be read against the
+    // set the batch found.
     let (status, body) = patch(
         &server,
         TOPICS,
@@ -502,4 +503,90 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         served(&server, TOPICS).await.is_empty(),
         "an artifact with none of the content its layer declares is withheld whole"
     );
+}
+
+/// **A rank keeps its number after a lower one is withdrawn.** `near`, `wide` and `far` are ranks
+/// 0, 1 and 2; a page withdraws `near` and then one at rank 1 withdraws `wide`, so `far` is served
+/// and is still paged at rank 2, a withdrawn rank names no set to page, a `PUT` restating the
+/// original contents is a `409`, and the numbers hold across a restart.
+#[tokio::test]
+async fn a_rank_keeps_its_number_after_a_lower_one_is_withdrawn() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = declaration(TOPICS, true, "flat");
+    declaration["content"]["supplied"][0]["require_member_visibility"] = json!("all");
+    register(&server, declaration).await;
+    let contents = json!([
+        { "values": ["near"], "generated_from": members(0..5) },
+        { "values": ["wide"], "generated_from": members(0..20) },
+        { "values": ["far"], "generated_from": members(0..50) }
+    ]);
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": contents }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["artifacts"][0]["mosaica_id"]
+        .as_str()
+        .expect("an identifier")
+        .to_string();
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["near"]));
+
+    for (rank, leaving, next) in [(0, members(0..5), "wide"), (1, members(0..20), "far")] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "leaving": leaving }]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["artifacts"][0]["withdrawn"], rank, "{body}");
+        assert_eq!(drill(&server, &id).await.1["content"], json!([next]));
+    }
+
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 2, "members": members(50..60) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["joined"], 10, "{body}");
+    assert_eq!(
+        drill(&server, &id).await.1["content"],
+        json!(["far"]),
+        "the page joined `far`'s set, which this principal sees whole"
+    );
+    for rank in [0, 1] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "members": members(60..61) }]),
+        )
+        .await;
+        assert_eq!(status, 422, "rank {rank}: {body}");
+        assert_eq!(body["error"], "contract", "{body}");
+    }
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": contents }]),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "conflict", "{body}");
+
+    let server = restart(server, &tmp).await;
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["far"]));
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 2, "leaving": members(50..60) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["left"], 10, "{body}");
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["far"]));
 }

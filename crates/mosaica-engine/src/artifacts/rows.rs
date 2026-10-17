@@ -317,9 +317,23 @@ impl ArtifactRecords {
     /// Where the content this version of the record ranks at `rank` has its values in the
     /// artifact's content row.
     pub(crate) fn position(&self, ordinal: u32, rank: u32) -> u32 {
-        let withdrawn = self.withdrawn.get(ordinal as usize).map_or(&[][..], |w| w);
         // At most `u16::MAX` positions, so the sum fits.
-        mosaica_lifecycle::membership::content_position(withdrawn, rank as usize) as u32
+        mosaica_lifecycle::membership::content_position(self.withdrawn_at(ordinal), rank as usize)
+            as u32
+    }
+
+    /// The rank this version of the record gives the content at `position`, of `contents`, or
+    /// `None` where that position is withdrawn or past the last content.
+    pub(super) fn rank_at(&self, ordinal: u32, position: u16, contents: usize) -> Option<usize> {
+        mosaica_lifecycle::membership::rank_at(
+            self.withdrawn_at(ordinal),
+            contents,
+            usize::from(position),
+        )
+    }
+
+    fn withdrawn_at(&self, ordinal: u32) -> &[u16] {
+        self.withdrawn.get(ordinal as usize).map_or(&[][..], |w| w)
     }
 
     /// How many ordinals this level covers, holes included.

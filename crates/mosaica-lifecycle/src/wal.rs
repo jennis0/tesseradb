@@ -694,10 +694,11 @@ pub enum GrownSet {
     /// The membership (`rank: null` on the wire). Its size is derived from the set and never
     /// stored ([`crate::membership::ArtifactStore::declared_size`]).
     Membership,
-    /// The generating set of the content at `rank`, with the set's **stored cardinality** after
-    /// this delta (`ingest.md` §1.1): the number the executor publishes beside the set's row-space
-    /// operator at the tick, so that a containment test reads a pair derived together and never
-    /// a cardinality from one version of the set against an operator from another.
+    /// The generating set of the content at `rank`, its position in the artifact's content row,
+    /// which a withdrawal of another content does not move, with the set's **stored cardinality**
+    /// after this delta (`ingest.md` §1.1): the number the executor publishes beside the set's
+    /// row-space operator at the tick, so that a containment test reads a pair derived together
+    /// and never a cardinality from one version of the set against an operator from another.
     ///
     /// **The number is checked against the delta at replay.** The set the delta produces is
     /// recomputed from the record the growth names, and a cardinality that disagrees with it is
@@ -720,8 +721,9 @@ pub enum ArtifactPart {
     AttachedTo(PublishedAttachment),
     /// The canonical shapes, as [`PublishedArtifact::shape`] carries them.
     Shape(crate::membership::ArtifactShapes),
-    /// One content's values at `rank`, with their digest ([`PublishedContent::digest`]). The
-    /// content's generating set is a set part and travels as a growth at the same rank.
+    /// One content's values at `rank`, its position in the artifact's content row, with their
+    /// digest ([`PublishedContent::digest`]). The content's generating set is a set part and
+    /// travels as a growth at the same rank.
     Content {
         rank: u16,
         values: Vec<String>,
@@ -1105,7 +1107,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // drop's deletions, an artifact's members and generating sets, a growth's sets and a unique
 // declaration's runs; and the variant table gained `ShardOpen` and `ShardSeal`. A log at 37 is
 // refused.
-const WAL_VERSION: u16 = 38;
+// **39**: a content's rank in a growth or a fill is its position in the artifact's content row,
+// which a withdrawn content keeps. A log at 38 is refused.
+const WAL_VERSION: u16 = 39;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

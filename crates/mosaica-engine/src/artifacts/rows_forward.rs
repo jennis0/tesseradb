@@ -98,20 +98,21 @@ impl ArtifactRows {
 
     /// One generating set unioned with the entities a page joined to it — the fast arm of the
     /// tick's publication, for a page holding no leave. `false` where the ordinal is a hole or
-    /// holds no content at that rank.
+    /// this form's version of the record holds no content at that position.
     pub(super) fn grow_generating(
         &mut self,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         joining: &Bitmap,
         space: &RowSpace,
     ) -> bool {
         let Some(sets) = self.membership.generating.get_mut(ordinal as usize) else {
             return false;
         };
-        let Some(set) = sets.get_mut(rank as usize) else {
+        let Some(rank) = self.records.rank_at(ordinal, position, sets.len()) else {
             return false;
         };
+        let set = &mut sets[rank];
         set.or_inplace(&space.project(joining));
         true
     }

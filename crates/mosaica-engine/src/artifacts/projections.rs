@@ -177,7 +177,8 @@ pub enum DeltaKind {
 #[derive(Debug)]
 pub struct SetPage {
     pub ordinal: u32,
-    pub rank: u16,
+    /// The content's position in the artifact's content row.
+    pub position: u16,
     /// The entities joining. Unioned into the served operator where the page holds no leave.
     pub joining: Bitmap,
     /// Whether this page re-derives the artifact's operators whole from entity truth: a union

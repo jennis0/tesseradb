@@ -796,8 +796,8 @@ pub struct GrownMembership {
     pub filled: u64,
     /// How many of the leaving members a generating-set page took out of it.
     pub left: u64,
-    /// The rank this page emptied, where it emptied one: the content is withdrawn and the caller
-    /// supplies it again.
+    /// The rank this page emptied, where it emptied one: the content is withdrawn, its rank is
+    /// never taken again, and the caller supplies it again at a new one.
     pub withdrawn: Option<u16>,
 }
 

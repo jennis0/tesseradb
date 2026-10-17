@@ -302,7 +302,12 @@ impl ArtifactProjections {
                             continue;
                         }
                         // A join alone: the same set a projection would produce, by one union.
-                        if amended.grow_generating(page.ordinal, page.rank, &page.joining, space) {
+                        if amended.grow_generating(
+                            page.ordinal,
+                            page.position,
+                            &page.joining,
+                            space,
+                        ) {
                             applied.unions += 1;
                         }
                     }

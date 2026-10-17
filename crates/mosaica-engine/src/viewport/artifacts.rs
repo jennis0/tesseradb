@@ -344,6 +344,19 @@ impl Engine {
         else {
             return Ok(None);
         };
+        // A content withdrawn since the verdict's version of the record is not served, so the
+        // artifact it would be served with is not reached either: the test `supplied_values`
+        // makes before it reads a value.
+        if let Some(position) = position {
+            let held = self.write.live().with_artifacts(|store| {
+                store
+                    .get(&name, level, ordinal)
+                    .is_some_and(|record| record.rank_at(position as usize).is_some())
+            });
+            if !held {
+                return Ok(None);
+            }
+        }
         Ok(Some(GatedArtifact {
             name,
             level,

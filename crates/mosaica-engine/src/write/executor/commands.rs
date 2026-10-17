@@ -115,18 +115,19 @@ pub(super) fn growth_receipt(
                 .get(layer, level, ordinal)
                 .expect("a resolved ordinal names a record");
             // The set this row moves, which is the membership on a row with no rank and the
-            // content's generating set on a row with one, each shard's part counted against that
-            // shard's slice. A rank naming no content refused the batch in `prepare_grow` above,
-            // so the `unranked` branch answering nothing is unreachable, and does not panic on a
-            // thread that must acknowledge.
+            // generating set of the content at that position on a row with one, each shard's part
+            // counted against that shard's slice. A rank naming no content refused the batch in
+            // `prepare_grow` above, so the `unranked` branch answering nothing is unreachable, and
+            // does not panic on a thread that must acknowledge.
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
             // page took out. Both counts are taken from how much of a bitmap the set holds, so
             // neither the set nor the set after the joins is built.
-            let unranked = join
+            let rank = join
                 .rank
-                .is_some_and(|rank| record.contents.get(rank as usize).is_none());
+                .map(|position| record.rank_at(usize::from(position)));
+            let unranked = rank.is_some_and(|rank| rank.is_none());
             let shards: std::collections::BTreeSet<ShardId> = join
                 .joining
                 .iter()
@@ -143,12 +144,11 @@ pub(super) fn growth_receipt(
                         let slice = store
                             .slice(shard)
                             .and_then(|slice| slice.get(layer, level, ordinal));
-                        let held = |other: &croaring::Bitmap| match (slice, join.rank) {
+                        let held = |other: &croaring::Bitmap| match (slice, rank) {
                             (None, _) => 0,
                             (Some(slice), None) => slice.members.and_cardinality(other),
-                            (Some(slice), Some(rank)) => slice
-                                .contents
-                                .get(rank as usize)
+                            (Some(slice), Some(rank)) => rank
+                                .and_then(|rank| slice.contents.get(rank))
                                 .map_or(0, |content| content.generated_from.and_cardinality(other)),
                         };
                         let joining = join.joining.get(shard).unwrap_or(&nothing);
@@ -180,14 +180,17 @@ pub(super) fn growth_receipt(
 }
 
 /// The executor's refusal for a registry error: a differing fixed part is the caller's `409`
-/// (`ExecError::PartConflict`), and so is a layer space that has run out
-/// (`ExecError::LayerSpaceFull`); everything else is the `422` of a refused layer operation.
+/// (`ExecError::PartConflict`), and so are a content at a withdrawn rank and a layer space that
+/// has run out (`ExecError::LayerSpaceFull`); everything else is the `422` of a refused layer
+/// operation.
 pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
     match e {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
-        // complement it asks for is a different set from the one the artifact holds.
+        // complement it asks for is a different set from the one the artifact holds. A content at
+        // a withdrawn rank differs from the nothing the rank holds for good.
         mosaica_lifecycle::RegistryError::PartConflict { .. }
-        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
+        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. }
+        | mosaica_lifecycle::RegistryError::WithdrawnContent { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         mosaica_lifecycle::RegistryError::SpacesExhausted

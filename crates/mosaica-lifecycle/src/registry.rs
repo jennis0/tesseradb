@@ -266,13 +266,21 @@ pub enum RegistryError {
     /// and a second route would re-expose items a suppression or a deletion took out. The one set
     /// a page may shrink is a generating set, named by its rank.
     MembershipShrink { layer: String, key: String },
-    /// A page named a rank the artifact holds no content at (`ingest.md` §1.1). Ranks are
-    /// positions in the artifact's ranked contents, so a page past the last one names a content
-    /// between two that does not exist, or one a withdrawal removed.
+    /// A page named a rank the artifact holds no content at (`ingest.md` §1.1): past the last
+    /// content, or one withdrawn.
     NoSuchContent {
         layer: String,
         key: String,
         rank: u16,
+    },
+    /// A record supplied a content at a rank whose content was withdrawn. A withdrawn rank is
+    /// never taken again; `next` is the rank the next content takes.
+    WithdrawnContent {
+        layer: String,
+        level: u32,
+        key: String,
+        rank: u16,
+        next: usize,
     },
     /// One row carried a set page and a fixed part. A row moves one set or fills fixed parts; a
     /// content supplied beside its own set is a publication, which is the route that takes the two
@@ -654,10 +662,9 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{layer}: the key {key} appears more than once in this batch and a row of it \
                  carries a fixed part or pages a generating set. A fixed part is filled once, and \
-                 a page is read against the set as the batch found it while a withdrawal moves \
-                 the ranks above it — so name a key once per batch where it carries a parent, an \
-                 attachment, a content, a shape or a rank, and send a second page as a second \
-                 request"
+                 a page is read against the set as the batch found it, so name a key once per \
+                 batch where it carries a parent, an attachment, a content, a shape or a rank, \
+                 and send a second page as a second request"
             ),
             RegistryError::ViewIdentity {
                 layer,
@@ -697,6 +704,18 @@ impl std::fmt::Display for RegistryError {
                 "{layer}: the artifact keyed {key} holds no content at rank {rank}, so there is \
                  no generating set to page. A content is supplied at publication or filled by \
                  PATCH before its set is paged (ingest.md §1.5)"
+            ),
+            RegistryError::WithdrawnContent {
+                layer,
+                level,
+                key,
+                rank,
+                next,
+            } => write!(
+                f,
+                "{layer} level {level}: the content at rank {rank} of the artifact keyed {key} \
+                 was withdrawn, and a withdrawn rank is never taken again; supply the content at \
+                 rank {next}"
             ),
             RegistryError::SetBesidePart { layer, key } => write!(
                 f,
@@ -1273,7 +1292,7 @@ impl LayerRegistry {
             // content fill carries no set, and dropping one the caller supplied would serve the
             // content against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
-                match record.contents.get(rank) {
+                match record.rank_at(rank) {
                     Some(_)
                         if !store.set_is(
                             layer_name,
@@ -1513,8 +1532,9 @@ impl LayerRegistry {
             detail: format!("the artifact keyed {key}: {detail}"),
         };
         // Ranks fill in order within one record, so a record carrying two new ranks sees the
-        // first before it checks the second.
-        let mut next_rank = record.contents.len();
+        // first before it checks the second. A rank is a position in the artifact's content row,
+        // and a withdrawn one is never taken again.
+        let mut next_rank = record.next_position();
         let mut supplied: Vec<&(u16, Vec<String>)> = parts.contents.iter().collect();
         supplied.sort_by_key(|(rank, _)| *rank);
         for (rank, values) in supplied {
@@ -1537,11 +1557,20 @@ impl LayerRegistry {
                 )));
             }
             let digest = crate::membership::content_digest(values);
-            if let Some(held) = record.contents.get(rank) {
+            if let Some(held) = record.rank_at(rank).map(|held| &record.contents[held]) {
                 if held.digest != digest {
                     return Err(conflict(format!("content[{rank}]")));
                 }
                 continue;
+            }
+            if record.withdraws(rank) {
+                return Err(RegistryError::WithdrawnContent {
+                    layer: layer_name.to_string(),
+                    level,
+                    key: key.to_string(),
+                    rank: rank as u16,
+                    next: next_rank,
+                });
             }
             if rank != next_rank {
                 return Err(refuse_content(format!(
@@ -2267,15 +2296,9 @@ impl LayerRegistry {
         //
         // A page is checked against the set the store holds and the store applies the pages of one
         // record in order, so two rows against one artifact would each be prepared against the
-        // state before the batch. That is not merely a stale count: a page that empties a set
-        // withdraws its content and moves every rank above it down, so a second row's rank then
-        // names a different content than the caller wrote — and where the two sets happen to be
-        // the same size, the cardinality check that would otherwise catch it agrees by
-        // coincidence, leaving one content serving against its old set and another holding a
-        // member nobody declared for it. Modelling the shift instead would have to decide what
-        // the caller's second rank meant after the first row moved it, which is a question the
-        // design does not answer; a caller who wants two pages sends two requests, and each one's
-        // ranks are read against the state the previous acknowledgement reported.
+        // state before the batch: two pages of one set would each derive a cardinality from the
+        // set the other moves. A caller who wants two pages sends two requests, and each is read
+        // against the state the previous acknowledgement reported.
         //
         // Per `(view, key)`: on a group-scoped layer one key in two views is two artifacts.
         if let Some(key) = repeated_key_with_parts(incoming.iter().map(|join| {

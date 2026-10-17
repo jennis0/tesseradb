@@ -174,8 +174,8 @@ fn retained<'r>(
 /// [`ArtifactStore::degradations`], and the caller declares it again. An artifact left with no
 /// contents is withheld when its layer declares supplied content.
 ///
-/// Each withdrawn content's position joins [`ArtifactRecord::withdrawn`], so the contents ranked
-/// below it keep reading their own values.
+/// Each withdrawn content's position joins [`ArtifactRecord::withdrawn`], so every other content
+/// keeps its position, which is the rank a caller, the log and a report name it by.
 fn withdraw_ranks(record: &mut ArtifactRecord, withdrawn: &[usize]) {
     let positions: Vec<u16> = withdrawn
         .iter()
@@ -769,7 +769,8 @@ pub struct IncomingGrowth {
     /// non-empty set here with `rank` absent refuses the batch.
     pub leaving: ShardSets,
     /// Which of the artifact's sets this row moves: `None` the membership, `Some(k)` the
-    /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5).
+    /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5), its position in the
+    /// artifact's content row, which a withdrawal of another content does not move.
     ///
     /// **A row moves one set and fills no fixed part.** A set page and a fixed part in one row
     /// would be a content supplied beside its own set, which the publication route is the place
@@ -794,7 +795,8 @@ pub struct FixedParts {
     pub parent_keys: Vec<String>,
     /// The attachment, named by the target's key, on [`IncomingArtifact::attached_to`]'s terms.
     pub attached_to: Option<IncomingAttachment>,
-    /// Contents by rank: `(rank, values)`, the values positional to the layer's declared kinds.
+    /// Contents by rank: `(rank, values)`, the values positional to the layer's declared kinds,
+    /// each rank a position in the artifact's content row.
     pub contents: Vec<(u16, Vec<String>)>,
     /// The canonical shapes, on [`IncomingArtifact::shape`]'s terms.
     pub shape: Option<ArtifactShapes>,
@@ -1183,9 +1185,10 @@ pub struct ArtifactRecord {
     /// tested would pay that cost on every artifact of every viewport.
     pub contents: Vec<ContentSet>,
     /// The positions of the contents withdrawn from this artifact, ascending. A content's values
-    /// are stored at its position in the artifact's content row, which is its rank counting the
-    /// withdrawn positions as well ([`Self::content_position`]); a withdrawn position is never
-    /// served and never taken again.
+    /// are stored at its position in the artifact's content row, which is its index in
+    /// [`Self::contents`] counting the withdrawn positions as well ([`Self::content_position`]).
+    /// The position is the rank a caller, a log record and a fold's report name the content by; a
+    /// withdrawn position is never served and never taken again.
     pub withdrawn: Box<[u16]>,
     /// What this artifact exists as an attachment to, resolved at publication.
     ///
@@ -1317,6 +1320,17 @@ pub fn content_position(withdrawn: &[u16], rank: usize) -> usize {
     position
 }
 
+/// The rank of the content at `position`, given an artifact's withdrawn positions, ascending, and
+/// how many contents it holds: `None` where that position is withdrawn or past the last content.
+pub fn rank_at(withdrawn: &[u16], contents: usize, position: usize) -> Option<usize> {
+    let at = u16::try_from(position).ok()?;
+    if withdrawn.contains(&at) {
+        return None;
+    }
+    let rank = position - withdrawn.partition_point(|held| *held < at);
+    (rank < contents).then_some(rank)
+}
+
 /// The digest a content's values are stored with: SHA-256 over each value's UTF-8 bytes, each
 /// preceded by its length as a `u32` LE, so that two value lists that concatenate to the same
 /// bytes digest differently.
@@ -1344,13 +1358,17 @@ impl ArtifactRecord {
     /// The rank of the content at `position` in the artifact's content row, or `None` where that
     /// position is withdrawn or past the last content.
     pub fn rank_at(&self, position: usize) -> Option<usize> {
-        let withdrawn = u16::try_from(position).ok()?;
-        if self.withdrawn.contains(&withdrawn) {
-            return None;
-        }
-        let below = self.withdrawn.partition_point(|held| *held < withdrawn);
-        let rank = position - below;
-        (rank < self.contents.len()).then_some(rank)
+        rank_at(&self.withdrawn, self.contents.len(), position)
+    }
+
+    /// Whether the content at `position` has been withdrawn.
+    pub fn withdraws(&self, position: usize) -> bool {
+        u16::try_from(position).is_ok_and(|position| self.withdrawn.contains(&position))
+    }
+
+    /// The position the next content takes: one past every content and every withdrawn one.
+    pub fn next_position(&self) -> usize {
+        self.contents.len() + self.withdrawn.len()
     }
 
     /// One point shard's slice of this record: `members` and `sets` in that shard, and of the
@@ -1705,32 +1723,43 @@ impl ArtifactStore {
         out
     }
 
-    /// `shard`'s part of the generating set at `rank`, `None` where its slice holds no record of
-    /// the artifact or the rank names no content there.
+    /// `shard`'s part of the generating set ranked `rank`, `None` where its slice holds no record
+    /// of the artifact.
     fn held_set(
         &self,
         shard: ShardId,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        rank: usize,
     ) -> Option<&Bitmap> {
         self.slice(shard)?
             .get(layer, level, ordinal)?
             .contents
-            .get(rank as usize)
+            .get(rank)
             .map(|content| &content.generated_from)
     }
 
-    /// Whether the generating set at `rank` is `sets` in every shard.
+    /// The rank of the content at `position` of the artifact at `ordinal`, `None` where the
+    /// ordinal is a hole or the position names no content.
+    fn rank_of(&self, layer: &str, level: u32, ordinal: u32, position: u16) -> Option<usize> {
+        self.get(layer, level, ordinal)?
+            .rank_at(usize::from(position))
+    }
+
+    /// Whether the generating set at `position` is `sets` in every shard. `false` where the
+    /// position names no content.
     pub fn set_is(
         &self,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         sets: &ShardSets,
     ) -> bool {
+        let Some(rank) = self.rank_of(layer, level, ordinal, position) else {
+            return false;
+        };
         let held = |shard| self.held_set(shard, layer, level, ordinal, rank);
         sets.iter().all(|(shard, set)| held(shard) == Some(set))
             && self
@@ -1739,21 +1768,20 @@ impl ArtifactStore {
                 .all(|shard| held(shard).is_none_or(Bitmap::is_empty))
     }
 
-    /// The generating set at `rank` after a page joining `joining` and then leaving `leaving` in
-    /// each shard: whether the page changes it, and its cardinality over every shard after. Joins
-    /// apply before leaves. `None` where the ordinal is a hole or the rank names no content.
+    /// The generating set at `position` after a page joining `joining` and then leaving `leaving`
+    /// in each shard: whether the page changes it, and its cardinality over every shard after.
+    /// Joins apply before leaves. `None` where the ordinal is a hole or the position names no
+    /// content, which a withdrawn position does not.
     pub fn paged(
         &self,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         joining: &ShardSets,
         leaving: &ShardSets,
     ) -> Option<(bool, u64)> {
-        self.get(layer, level, ordinal)?
-            .contents
-            .get(rank as usize)?;
+        let rank = self.rank_of(layer, level, ordinal, position)?;
         let shards: std::collections::BTreeSet<ShardId> = self
             .shards()
             .chain(joining.iter().map(|(shard, _)| shard))
@@ -2420,8 +2448,9 @@ impl ArtifactStore {
                 if content_digest(values) != *digest {
                     return FillOutcome::Undecodable;
                 }
-                let rank = *rank as usize;
-                if let Some(held) = record.contents.get_mut(rank) {
+                let position = *rank as usize;
+                if let Some(rank) = record.rank_at(position) {
+                    let held = &mut record.contents[rank];
                     if held.digest != *digest {
                         return FillOutcome::Differs;
                     }
@@ -2430,10 +2459,15 @@ impl ArtifactStore {
                     }
                     return FillOutcome::Identical;
                 }
-                if rank != record.contents.len() {
-                    // Ranks are positions in a list, so a fill past the next one names a content
-                    // between two that does not exist. The live path refuses this before the
-                    // append; at replay it is damage.
+                // A fill the log carries for a position withdrawn since was filled and then
+                // withdrawn, and nothing is owed for it. The live path refuses one before the
+                // append.
+                if record.withdraws(position) {
+                    return FillOutcome::Identical;
+                }
+                if position != record.next_position() {
+                    // A fill past the next position names a content between two that does not
+                    // exist. The live path refuses this before the append; at replay it is damage.
                     return FillOutcome::Undecodable;
                 }
                 record.contents.push(ContentSet {
@@ -2750,12 +2784,12 @@ impl ArtifactStore {
     /// leaves the artifact's ranked list, and a content the caller wants back is supplied again.
     /// An empty set is contained in every mask, so a content retained on one would serve to every
     /// principal reaching the artifact — decision 0107's rule, re-made at the caller's door.
-    /// Withdrawal is [`withdraw_ranks`]' disposition and shifts the ranks
-    /// above it down, as the fold's does.
+    /// Withdrawal is [`withdraw_ranks`]' disposition, as the fold's is, and every other content
+    /// keeps its position.
     ///
-    /// **An ordinal naming no record, and a rank naming no content, change nothing** and are not
-    /// damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
-    /// content that same fold withdrew.
+    /// **An ordinal naming no record, and a position naming no content, change nothing** and are
+    /// not damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
+    /// content withdrawn since the page was logged.
     ///
     /// The cardinality is the set's over every shard, and each shard's part moves in that shard's
     /// slice, which takes a record of the artifact where the page joins it and it held none.
@@ -2765,18 +2799,20 @@ impl ArtifactStore {
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         joining: &ShardSets,
         leaving: &ShardSets,
         cardinality: u64,
     ) -> bool {
-        let Some((_, after)) = self.paged(layer, level, ordinal, rank, joining, leaving) else {
+        let Some((_, after)) = self.paged(layer, level, ordinal, position, joining, leaving) else {
             return true;
         };
         if after != cardinality {
             return false;
         }
-        let rank = rank as usize;
+        let Some(rank) = self.rank_of(layer, level, ordinal, position) else {
+            return true;
+        };
         if cardinality == 0 {
             self.each_held(layer, level, ordinal, |record| {
                 withdraw_ranks(record, &[rank])
@@ -3461,7 +3497,7 @@ impl ArtifactStore {
                 for (rank, content) in held.contents.iter().enumerate() {
                     let lost = content.generated_from.and_cardinality(points);
                     if lost > 0 {
-                        contents_lost.push((rank as u32, lost));
+                        contents_lost.push((held.content_position(rank) as u32, lost));
                     }
                 }
                 if members_lost == 0 && contents_lost.is_empty() {
@@ -4620,7 +4656,9 @@ impl ArtifactStore {
                     }
                     let (joining, leaving) = replaced(&content.generated_from);
                     let (joining, leaving) = (in_shard(joining), in_shard(leaving));
-                    let rank = rank as u16;
+                    let Ok(rank) = u16::try_from(record.content_position(rank)) else {
+                        continue;
+                    };
                     let Some((_, cardinality)) =
                         self.paged(layer, *level, ordinal, rank, &joining, &leaving)
                     else {
@@ -5735,7 +5773,8 @@ mod tests {
 
     /// A withdrawn content's position is kept and never taken again, whether a fold or a page
     /// withdrew it: each remaining content's values are written at its own position, the record
-    /// round-trips the positions, and a later fill takes a new one.
+    /// round-trips the positions, a later fill takes a new one, and a page, a fill and a set
+    /// comparison name a content by its position.
     #[test]
     fn a_withdrawn_contents_position_is_kept_and_never_taken_again() {
         let mut store = ArtifactStore::new();
@@ -5797,15 +5836,70 @@ mod tests {
         assert_eq!(positions(&store), vec![2]);
         assert_eq!(rows(&store), vec![(2, "c".into())]);
 
-        let values = vec!["d".to_string()];
-        let fill = crate::wal::ArtifactPart::Content {
-            rank: 1,
-            digest: content_digest(&values),
-            values,
+        let fill = |rank: u16, value: &str| crate::wal::ArtifactPart::Content {
+            rank,
+            digest: content_digest(&[value.to_string()]),
+            values: vec![value.to_string()],
         };
-        assert_eq!(store.fill("clusters/a", 0, 0, &fill), FillOutcome::Filled);
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(2, "d")),
+            FillOutcome::Differs,
+            "position 2 holds `c`"
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(4, "d")),
+            FillOutcome::Undecodable,
+            "a fill past the next position names nothing"
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(3, "d")),
+            FillOutcome::Filled
+        );
         assert_eq!(positions(&store), vec![2, 3]);
         assert_eq!(rows(&store), vec![(2, "c".into()), (3, "d".into())]);
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(1, "b")),
+            FillOutcome::Identical,
+            "a fill the log carries for a withdrawn position changes nothing and is not damage"
+        );
+        assert_eq!(positions(&store), vec![2, 3]);
+
+        let c = in_shards(&[(0, &[3])]);
+        let joining = in_shards(&[(0, &[9])]);
+        let none = ShardSets::default();
+        assert!(store.set_is("clusters/a", 0, 0, 2, &c));
+        assert!(!store.set_is("clusters/a", 0, 0, 0, &ShardSets::default()));
+        assert_eq!(
+            store.paged("clusters/a", 0, 0, 2, &joining, &none),
+            Some((true, 2))
+        );
+        for withdrawn in [0, 1] {
+            assert_eq!(
+                store.paged("clusters/a", 0, 0, withdrawn, &joining, &none),
+                None
+            );
+        }
+        let mut paged = page(0, &joining, &none, 2);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut paged {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 2,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(store.apply(&paged, 0), 0);
+        assert!(store.set_is("clusters/a", 0, 0, 2, &in_shards(&[(0, &[3, 9])])));
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut paged {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 1,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(
+            store.apply(&paged, 0),
+            0,
+            "a page the log carries for a withdrawn position changes nothing and is not damage"
+        );
+        assert!(store.set_is("clusters/a", 0, 0, 2, &in_shards(&[(0, &[3, 9])])));
     }
 
     #[test]

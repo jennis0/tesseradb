@@ -1213,7 +1213,7 @@ fn label_layer(name: &str) -> mosaica_types::layer::LayerDeclaration {
 /// items its `member_of` leaf matches.
 type ServedArtifact = (Option<String>, u64, Vec<String>, u64);
 
-/// What each credential is served of the layer `t`.
+/// What each credential is served of every layer.
 fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
     use mosaica_engine::filter::{FilterExpr, MemberOfLeaf};
     [full_coverage_credential(), subset_credential()]
@@ -1225,10 +1225,9 @@ fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
                 .map(|artifact| {
                     let request = ViewportRequest::new("s0", 0, WHOLE_MAP, TWO_SHARD_N as usize)
                         .filter(FilterExpr::MemberOf(MemberOfLeaf {
-                            layer: "t".to_string(),
+                            layer: artifact.layer.clone(),
                             artifact: artifact.mosaica_id,
-                        }),
-                    );
+                        }));
                     let out = engine.viewport(&session, request).unwrap();
                     let matched = out.tiles.iter().map(|tile| tile.matched).sum();
                     (
@@ -1450,6 +1449,127 @@ fn a_compaction_of_shard_one_retires_its_members_from_its_slice_alone() {
         expected,
         "after shard 0's compaction"
     );
+    drop(engine);
+    let engine = several.open_writing();
+    assert_eq!(served_layer(&engine), expected, "across a restart");
+}
+
+/// A content's rank is its position at two shards as at one. On a layer whose content requires
+/// every member visible, a page withdraws `near` and the deletion of a shard-1 item withdraws
+/// `wide`, which it generated; on a layer whose content serves on the artifact's own gate the
+/// deletion takes a member and withdraws nothing. Shard 0's compaction reports nothing, shard 1's
+/// reports `wide` at its position, 1, and the member each artifact lost, as one shard's
+/// compaction does, and a page of `far` at rank 2 then serves what one shard serves, before and
+/// after a restart.
+#[test]
+fn a_withdrawn_rank_keeps_its_position_at_the_compaction_of_the_shard_holding_its_set() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    use mosaica_types::layer::SuppliedRequirement;
+    let one = fixture_sized(TWO_SHARD_N, None);
+    let several = two_shards();
+    let (one_engine, engine) = (one.open(), several.open_writing());
+    let (zero, first) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
+    let gone = first[1];
+    let members = [zero[0], zero[1], zero[2], first[0], gone];
+    let sets_in = |engine: &Engine, ids: &[u64]| {
+        let items = items_by_id(engine, 0..TWO_SHARD_N);
+        ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()))
+    };
+    let write = |engine: &Engine| {
+        let sets = |ids: &[u64]| sets_in(engine, ids);
+        engine.register_layer(label_layer("t")).unwrap();
+        let mut permissive = label_layer("p");
+        permissive.content.supplied[0].require_member_visibility = SuppliedRequirement::Inherited;
+        engine.register_layer(permissive).unwrap();
+        let contents = ["near", "wide", "far"]
+            .map(|value| IncomingContent::new(vec![value.to_string()], Vec::new()))
+            .into();
+        let mut strict = IncomingArtifact::with_content(Some("a".into()), Vec::new(), contents);
+        strict.members = sets(&members);
+        strict.contents[0].generated_from = sets(&[zero[2]]);
+        strict.contents[1].generated_from = sets(&[zero[0], gone]);
+        strict.contents[2].generated_from = sets(&[zero[1], first[0]]);
+        let mut held = IncomingArtifact::with_content(
+            Some("b".into()),
+            Vec::new(),
+            vec![IncomingContent::new(vec!["note".to_string()], Vec::new())],
+        );
+        held.members = sets(&members);
+        engine
+            .publish_artifacts("t".into(), 0, vec![strict])
+            .unwrap();
+        engine.publish_artifacts("p".into(), 0, vec![held]).unwrap();
+        let mut page = IncomingGrowth::from_entities("a".into(), Vec::new());
+        page.rank = Some(0);
+        page.leaving = sets(&[zero[2]]);
+        let grown = engine.grow_memberships("t".into(), 0, vec![page]).unwrap();
+        assert_eq!(grown[0].withdrawn, Some(0));
+        let target = item_by_id(engine, gone).target();
+        engine
+            .accept_changes(vec![(target, ChangeOp::Delete)])
+            .unwrap();
+        tick(engine);
+    };
+    write(&one_engine);
+    write(&engine);
+    let reported = |engine: &Engine| {
+        let mut lost: Vec<_> = engine
+            .last_fold_report()
+            .into_iter()
+            .map(|lost| (lost.key, lost.members_lost, lost.contents_lost))
+            .collect();
+        lost.sort();
+        lost
+    };
+    fold(&one_engine);
+    let report = vec![
+        (Some("a".to_string()), 1, vec![(1, 1)]),
+        (Some("b".to_string()), 1, Vec::new()),
+    ];
+    assert_eq!(reported(&one_engine), report);
+    let expected = served_layer(&one_engine);
+    assert!(
+        expected[0]
+            .iter()
+            .any(|a| a.0.as_deref() == Some("a") && a.2 == ["far"]),
+        "`far` is served once `near` and `wide` are withdrawn: {expected:?}"
+    );
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(
+        reported(&engine),
+        Vec::new(),
+        "shard 0 holds nothing the deletion took"
+    );
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 0's compaction"
+    );
+    compact(&engine, Some(shard(1)));
+    assert_eq!(reported(&engine), report, "shard 1's compaction");
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 1's compaction"
+    );
+
+    let page = |engine: &Engine| {
+        let mut page = IncomingGrowth::from_entities("a".into(), Vec::new());
+        page.rank = Some(2);
+        page.joining = sets_in(engine, &[zero[0]]);
+        let grown = engine.grow_memberships("t".into(), 0, vec![page]).unwrap();
+        assert_eq!((grown[0].joined, grown[0].withdrawn), (1, None));
+        tick(engine);
+    };
+    page(&one_engine);
+    page(&engine);
+    let expected = served_layer(&one_engine);
+    assert_eq!(served_layer(&engine), expected, "after a page at rank 2");
     drop(engine);
     let engine = several.open_writing();
     assert_eq!(served_layer(&engine), expected, "across a restart");
