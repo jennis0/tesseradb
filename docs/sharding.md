@@ -697,7 +697,9 @@ other shard's record names, so no other shard's dead files are carried into it.
 A compaction frees ids into its shard's pool (§1.3). It reconciles every generating set, in every
 layer space, that names a removed entity of the shard. When a shard seals, one closing compaction is
 queued if any of its gauges is above zero. The closing compaction ignores the interval and the
-window, and obeys the memory and disc pre-flights. A sealed shard then stays unchanged on disc until
+window, and obeys the memory and disc pre-flights. The queue is held in memory: a restart before the
+closing compaction runs drops it, and the schedule compacts the shard when its gauges call for it.
+A sealed shard then stays unchanged on disc until
 an edit, a deletion, a suppression, a new item from its pool, a publication's slice, a level's new
 layout (§4.8) or a new view lands in it.
 
