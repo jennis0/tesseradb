@@ -81,11 +81,11 @@ impl Placing {
         self.placed.records()
     }
 
-    /// The window is durable: its seals stand and the shards it opened take writes. Answers the
-    /// shards it sealed.
+    /// The window is durable: its seals stand and the shards it opened take writes. Answers every
+    /// shard it sealed, in the order they sealed, those it opened among them.
     pub(super) fn commit(mut self, live: &LiveState) -> Vec<ShardId> {
         self.committed = true;
-        let sealed = self.sealed.iter().map(|shard| shard.id).collect();
+        let sealed = std::mem::take(&mut self.placed.sealed);
         let opened = std::mem::take(&mut self.placed.opened);
         live.add_shards(
             opened

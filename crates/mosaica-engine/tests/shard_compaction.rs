@@ -398,6 +398,38 @@ fn a_shard_sealed_with_its_rows_buffered_is_compacted_once_they_flush() {
     assert_eq!(engine.write_executor_stats().folds, 1, "and only once");
 }
 
+/// A window that fills shard 1, opens shard 2 and fills it too, then opens shard 3, queues a
+/// closing compaction for each shard it sealed, the one it opened among them.
+#[test]
+fn a_shard_opened_and_sealed_in_one_window_is_compacted_once() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    engine.set_fold_paused_for_test(true);
+    insert_keyed(&engine, "through", &[true; 36]);
+    tick_until(
+        &engine,
+        "the opened shards' publication",
+        Duration::from_secs(30),
+        || shards_of(&several.root).1.len() == 4,
+    );
+    let before = records(&several.root);
+    engine.set_fold_paused_for_test(false);
+    tick_until(
+        &engine,
+        "both closing compactions",
+        Duration::from_secs(60),
+        || engine.write_executor_stats().folds == 2,
+    );
+    let after = records(&several.root);
+    assert_ne!(after[1].0, before[1].0, "shard 1 is compacted");
+    assert_ne!(after[2].0, before[2].0, "shard 2 is compacted");
+    assert_eq!(after[3].0, before[3].0, "the open shard 3 is not");
+    for _ in 0..5 {
+        tick(&engine);
+    }
+    assert_eq!(engine.write_executor_stats().folds, 2, "and only once each");
+}
+
 /// Move an item of shard 0, found by its `id` value: an edit, whose row shard 0 buffers.
 fn edit_in_shard_zero(engine: &Engine) {
     let id = ids_in_shard(engine, TWO_SHARD_N, 0)[0];
