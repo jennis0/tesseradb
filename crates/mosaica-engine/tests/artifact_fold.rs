@@ -1872,46 +1872,10 @@ fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
     );
 }
 
-// ---- an artifact deletion two shards owe ----------------------------------------------------------
+// ---- an artifact deletion in two shards ---------------------------------------------------------
 
-/// Items the two-shard fixture builds, in shards of [`TWO_SIZE`] and the rest.
-const TWO_N: u64 = 40;
-const TWO_SIZE: u64 = 25;
 /// The deleted artifact's key: bytes no other file of the bundle holds.
 const ERASED: &str = "erased-cluster-7f3a9c";
-
-fn shard(id: u32) -> mosaica_types::ShardId {
-    mosaica_types::ShardId::new(id).unwrap()
-}
-
-/// An engine over the two-shard fixture that writes both shards.
-fn writing(fx: &Fixture) -> Engine {
-    let mut engine = Engine::open_writing_several_shards(&fx.root, &fx.cache, &fx.wal, config())
-        .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts");
-    engine
-}
-
-/// Each `id` of the fixture's items, as the item it names.
-fn items_by_id(engine: &Engine) -> Vec<mosaica_types::ItemAt> {
-    let table = mosaica_engine::AddressTable {
-        rows: TWO_N as usize,
-        mosaica_id: None,
-        columns: vec![(
-            "id".to_string(),
-            (0..TWO_N)
-                .map(|id| Some(mosaica_engine::AddressValue::Text(id.to_string())))
-                .collect(),
-        )],
-    };
-    engine
-        .name_items(&table)
-        .unwrap()
-        .verdicts
-        .into_iter()
-        .map(|verdict| verdict.expect("every id names an item"))
-        .collect()
-}
 
 /// One artifact as it is served: its key, masked count and content.
 type Served = (Option<String>, u64, Vec<String>);
@@ -1942,7 +1906,8 @@ fn routes(engine: &Engine, ids: &[mosaica_types::MosaicaId]) -> Routes {
     viewport.sort();
     let matched = |filter: FilterExpr| {
         let request =
-            mosaica_engine::ViewportRequest::new("s0", 0, WHOLE_MAP, TWO_N as usize).filter(filter);
+            mosaica_engine::ViewportRequest::new("s0", 0, WHOLE_MAP, TWO_SHARD_N as usize)
+                .filter(filter);
         let out = engine.viewport(&session, request).ok()?;
         Some(out.tiles.iter().map(|tile| tile.matched).sum())
     };
@@ -2036,17 +2001,8 @@ fn held_on_disc(
     space: mosaica_types::LayerSpace,
     entity: EntityId,
 ) -> (bool, bool, Vec<Vec<u32>>) {
-    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            match entry.path().is_dir() {
-                true => files(&entry.path(), out),
-                false => out.push(entry.path()),
-            }
-        }
-    }
     let prefix = root.join(current_prefix(root));
-    let mut all = Vec::new();
-    files(&prefix, &mut all);
+    let all = files_under(&prefix);
     let key = ERASED.as_bytes();
     let holds_key = all.iter().any(|path| {
         std::fs::read(path)
@@ -2093,8 +2049,8 @@ fn held_on_disc(
     (holds_key, holds_content, listed)
 }
 
-/// The shards the served side-manifest says owe `entity`'s deletion in `space`, and whether the
-/// space still holds the deletion.
+/// The shards the served side-manifest lists as yet to compact `entity`'s deletion in `space`,
+/// and whether the space still holds the deletion.
 fn owed(
     root: &std::path::Path,
     space: mosaica_types::LayerSpace,
@@ -2118,24 +2074,26 @@ fn owed(
 /// route from the acknowledgement; the compaction of the first shard takes it out of that shard's
 /// member pack and leaves its record, its content and the other shard's slice on the disc, still
 /// denied and still counted; the second's removes it from every file. A restart between the two,
-/// and one after, changes no answer. A deletion no shard owes leaves at the first compaction.
-fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
-    let fx = fixture_sized(TWO_N, Some(TWO_SIZE));
-    let engine = writing(&fx);
+/// and one after, changes no answer. A deletion no shard has to compact leaves at the first
+/// compaction.
+fn an_artifact_deletion_in_two_shards(first: u32, second: u32) {
+    let fx = two_shards();
+    let engine = fx.open_writing();
     engine.register_layer(content_layer()).unwrap();
     engine
         .register_layer(flat_declaration("clusters/b"))
         .unwrap();
-    let items = items_by_id(&engine);
-    let in_shard = |at: u32| -> Vec<u64> {
-        (0..TWO_N)
-            .filter(|id| items[*id as usize].shard == shard(at))
-            .collect()
-    };
-    let (zero, one) = (in_shard(0), in_shard(1));
+    let items = items_by_id(&engine, 0..TWO_SHARD_N);
+    let (zero, one) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
     assert!(zero.len() >= 4 && one.len() >= 4, "items in both shards");
     let sets = |ids: &[u64]| {
-        mosaica_lifecycle::ShardSets::of_items(ids.iter().map(|id| items[*id as usize]))
+        mosaica_lifecycle::ShardSets::of_items(
+            ids.iter()
+                .map(|id| items[*id as usize].expect("every id names an item")),
+        )
     };
     let artifact = |key: &str, members: Vec<u64>, from: Vec<u64>| {
         let mut artifact = IncomingArtifact::with_content(
@@ -2215,7 +2173,7 @@ fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
     assert_eq!(
         owed(&fx.root, empty_space, empty),
         (vec![], true),
-        "owed by no shard"
+        "listed for no shard"
     );
     let deleted = routes(&engine, &ids);
     assert_eq!(
@@ -2246,7 +2204,7 @@ fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
     assert_eq!(
         owed(&fx.root, empty_space, empty),
         (vec![], false),
-        "the deletion no shard owes leaves at the first compaction"
+        "the deletion no shard has to compact leaves at the first compaction"
     );
     assert_eq!(engine.generation_status().layer_spaces.retirable, 1);
     let mut listed = vec![vec![0, 1], vec![0, 1]];
@@ -2259,7 +2217,7 @@ fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
     );
 
     drop(engine);
-    let engine = writing(&fx);
+    let engine = fx.open_writing();
     assert_eq!(routes(&engine, &ids), deleted, "a restart changes nothing");
     assert_eq!(
         engine
@@ -2289,7 +2247,7 @@ fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
     );
 
     drop(engine);
-    let engine = writing(&fx);
+    let engine = fx.open_writing();
     assert_eq!(
         routes(&engine, &ids),
         deleted,
@@ -2299,11 +2257,11 @@ fn an_artifact_deletion_two_shards_owe(first: u32, second: u32) {
 }
 
 #[test]
-fn an_artifact_deletion_two_shards_owe_leaves_at_the_second_compaction() {
-    an_artifact_deletion_two_shards_owe(1, 0);
+fn an_artifact_deletion_in_two_shards_compacting_shard_zero_first() {
+    an_artifact_deletion_in_two_shards(0, 1);
 }
 
 #[test]
-fn an_artifact_deletion_leaves_the_write_shards_slice_before_the_other_shards() {
-    an_artifact_deletion_two_shards_owe(0, 1);
+fn an_artifact_deletion_in_two_shards_compacting_shard_one_first() {
+    an_artifact_deletion_in_two_shards(1, 0);
 }

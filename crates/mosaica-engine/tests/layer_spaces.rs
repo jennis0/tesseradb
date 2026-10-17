@@ -203,14 +203,11 @@ fn space_deny(fx: &Fixture, space: LayerSpace) -> (Vec<u32>, Vec<u32>) {
     let Some(record) = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space) else {
         return (Vec::new(), Vec::new());
     };
-    let ids = |set: &mosaica_store::manifest::EntitySet| {
-        set.entities().expect("decodes").iter().collect::<Vec<u32>>()
-    };
-    (ids(&record.tombstones), ids(&record.deny))
+    (entity_ids(&record.tombstones), entity_ids(&record.deny))
 }
 
-/// A deleted artifact is owed, in its space's record, by the shard holding its members, and one
-/// holding no member is owed by no shard.
+/// A deleted artifact's space record lists the shard holding its members as yet to compact the
+/// deletion, and lists no shard for one holding no member.
 #[test]
 fn a_deleted_artifact_is_owed_by_the_shard_holding_its_members() {
     let fx = fixture();
@@ -246,12 +243,7 @@ fn a_deleted_artifact_is_owed_by_the_shard_holding_its_members() {
     let owed: Vec<(ShardId, Vec<u32>)> = record
         .owed
         .iter()
-        .map(|owed| {
-            (
-                owed.shard,
-                owed.artifacts.entities().unwrap().iter().collect(),
-            )
-        })
+        .map(|owed| (owed.shard, entity_ids(&owed.artifacts)))
         .collect();
     assert_eq!(owed, vec![(ShardId::ZERO, vec![held.raw() as u32])]);
 }
@@ -780,7 +772,7 @@ fn a_corrupt_runtime_record_pack_steps_the_partition_down() {
                 .membership_extents
                 .is_empty()
         });
-        mosaica_store::open_bundle(&fx.root).unwrap().partitions[PARTITION].segments_n
+        served_n(&fx.root)
     };
     let manifest = side_manifest(&fx.root);
     let records = &manifest.layer_spaces[0].record_packs[0].path;

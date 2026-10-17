@@ -284,7 +284,7 @@ fn fixture_sized(
     std::fs::write(&config_path, edit(config_toml(&corpus, criterion))).unwrap();
     let config = mosaica_build::config::Config::parse(&config_path, &Default::default())
         .expect("the spatial fixture's declaration parses");
-    build_with_layers_sized(&root, &points, &pairs, &corpus, config, shard_size);
+    build_with_layers_sized(&root, &points, &pairs, corpus.extent(), config, shard_size);
     let cache = tmp.path().join("cache");
     let wal = tmp.path().join("wal");
     Fixture {
@@ -557,20 +557,12 @@ fn a_fold_leaves_a_boundarys_answers_unchanged() {
 }
 
 /// **Over two shards, a compaction of each in turn leaves every boundary's answers where they
-/// were**, the level's shape observed over both shards' rows and its layout chosen from the sum;
-/// and a restart after them serves the same.
+/// were**, and a restart after them serves the same.
 #[test]
 fn a_compaction_of_each_shard_leaves_a_boundarys_answers_unchanged() {
     let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
     let writing = || {
-        let mut engine = Engine::open_writing_several_shards(
-            &fx.root,
-            &fx.cache,
-            &fx.wal,
-            config_uncapped(),
-        )
-        .expect("the engine opens");
-        engine.start_write_executor(8).expect("the executor starts");
+        let engine = open_writing(&fx.root, &fx.cache, &fx.wal, config_uncapped());
         engine.set_background_refresh_for_test(false);
         engine
     };
@@ -588,7 +580,7 @@ fn a_compaction_of_each_shard_leaves_a_boundarys_answers_unchanged() {
 
     compact(&engine, Some(ShardId::ZERO));
     assert_eq!(answers(&engine), expected, "after shard 0's compaction");
-    compact(&engine, Some(ShardId::new(1).unwrap()));
+    compact(&engine, Some(shard(1)));
     assert_eq!(answers(&engine), expected, "after shard 1's compaction");
     drop(engine);
     assert_eq!(answers(&writing()), expected, "across a restart");
@@ -825,7 +817,7 @@ fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() 
     // A stale or torn file is refused and the segment resolved again — loudly, never served
     // short. Truncate the fold's row form and reopen: one level claimed (the column), one
     // resolved, every answer unchanged.
-    let forms: Vec<std::path::PathBuf> = walk(&fx.root)
+    let forms: Vec<std::path::PathBuf> = files_under(&fx.root)
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "tssr"))
         .collect();
@@ -1054,19 +1046,4 @@ fn a_maintained_boundary_form_equals_one_resolved_from_scratch() {
             );
         }
     }
-}
-
-fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                out.extend(walk(&path));
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    out
 }

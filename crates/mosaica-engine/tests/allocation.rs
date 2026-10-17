@@ -10,65 +10,14 @@ mod common;
 use common::*;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::wal::{Wal, WalRecord};
-use mosaica_store::manifest::SegmentsManifest;
 use mosaica_types::{MosaicaId, ShardId, ShardState, Target};
 
-/// Items the fixture builds.
-const N: u64 = 40;
-/// The size the fixture is built at: shard 0 sealed at 25 items, shard 1 open at 15.
-const SIZE: u64 = 25;
-
-fn shard(id: u32) -> ShardId {
-    ShardId::new(id).unwrap()
-}
-
-/// An engine over `built` that writes several shards, its executor running. A compaction a seal
-/// starts holds before it publishes, so what these tests read from the bundle is what allocation
-/// wrote, whenever they read it.
+/// [`Fixture::open_writing`], with a compaction a seal starts held before it publishes, so what
+/// these tests read from the bundle is what allocation wrote, whenever they read it.
 fn writing(built: &Fixture) -> Engine {
-    let mut engine =
-        Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
-            .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts");
+    let engine = built.open_writing();
     engine.set_fold_paused_for_test(true);
     engine
-}
-
-/// One batch of new items, one for each of `labelled`: the item holds the `id` of its key and the
-/// term every credential holds where it is labelled, and no term where it is not. The receipt's
-/// `mosaica_id`s, in row order.
-fn insert(engine: &Engine, batch: &str, labelled: &[bool]) -> Vec<MosaicaId> {
-    let rows = labelled
-        .iter()
-        .enumerate()
-        .map(|(at, labelled)| mosaica_lifecycle::IngestRow {
-            mosaica_id: None,
-            labels: Some(match labelled {
-                true => vec![b"0".to_vec()],
-                false => Vec::new(),
-            }),
-            position: Some((5.0, 5.0)),
-            scalars: keyed(&format!("{batch}-{at}")),
-            scoped: Vec::new(),
-            omitted: Vec::new(),
-        })
-        .collect();
-    let receipt = engine
-        .ingest(mosaica_engine::IngestRequest {
-            batch_id: batch.to_string(),
-            body_hash: [9; 32],
-            view: Some("s0".to_string()),
-            rows,
-            artifacts: Default::default(),
-            strict: true,
-            mosaica_id_column: false,
-        })
-        .expect("the batch is accepted");
-    receipt
-        .mosaica_ids
-        .into_iter()
-        .map(|id| id.expect("each row created an item"))
-        .collect()
 }
 
 /// Each `mosaica_id`'s shard, entity and tenancy.
@@ -85,54 +34,10 @@ fn placed(engine: &Engine, ids: &[MosaicaId]) -> Vec<(u32, u64, u16)> {
         .collect()
 }
 
-/// Each shard's state, high water, freed ids and held ids as the served side-manifest records
-/// them, and its `next_id`.
-type Recorded = (Vec<(u32, ShardState, u64, Vec<u32>, usize)>, u32);
-
-fn recorded(manifest: &SegmentsManifest) -> Recorded {
-    let shards = manifest
-        .shards
-        .records
-        .iter()
-        .map(|record| {
-            (
-                record.id.raw(),
-                record.state,
-                record.high_water,
-                record
-                    .free_entities
-                    .entities()
-                    .map(|ids| ids.iter().collect())
-                    .unwrap_or_default(),
-                record.held_entities.len(),
-            )
-        })
-        .collect();
-    (shards, manifest.shards.next_id)
-}
-
-/// Remove every partition file published after publication `n`, as a crash before those
-/// publications committed leaves the bundle.
-fn crash_back_to(root: &std::path::Path, n: u64) {
-    let dir = partition_dir(root, &current_prefix(root));
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let name = entry.unwrap().file_name();
-        let later = name
-            .to_str()
-            .and_then(|name| name.strip_prefix("SEGMENTS-"))
-            .and_then(|name| name.strip_suffix(".json"))
-            .and_then(|m| m.parse::<u64>().ok())
-            .is_some_and(|m| m > n);
-        if later {
-            std::fs::remove_file(dir.join(name)).unwrap();
-        }
-    }
-}
-
 /// The built fixture with shard 0's pool seeded: numbers 25 to 28 freed at tenancy 1, which new
 /// items take, and 29 and 30 at tenancy 0, which only shard 0's edits take.
 fn seeded() -> Fixture {
-    let built = fixture_sized(N, Some(SIZE));
+    let built = two_shards();
     seed_freed(
         &built.root,
         ShardId::ZERO,
@@ -151,16 +56,16 @@ fn new_items_take_the_sealed_pool_lowest_first_then_the_open_shard() {
     let built = seeded();
     let engine = writing(&built);
 
-    let first = insert(&engine, "a", &[true, true]);
+    let first = insert_keyed(&engine, "a", &[true, true]);
     assert_eq!(placed(&engine, &first), vec![(0, 25, 1), (0, 26, 1)]);
 
-    let straddling = insert(&engine, "b", &[true, false, true, false]);
+    let straddling = insert_keyed(&engine, "b", &[true, false, true, false]);
     assert_eq!(
         placed(&engine, &straddling),
         vec![(1, 15, 0), (0, 27, 1), (1, 16, 0), (0, 28, 1)]
     );
 
-    let after = insert(&engine, "c", &[false]);
+    let after = insert_keyed(&engine, "c", &[false]);
     assert_eq!(
         placed(&engine, &after),
         vec![(1, 17, 0)],
@@ -192,7 +97,7 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
     let first_window: Vec<bool> = (0..16).map(|at| at % 2 == 0).collect();
 
     let engine = writing(&restarted);
-    let first = insert(&engine, "a", &first_window);
+    let first = insert_keyed(&engine, "a", &first_window);
     let unlabelled = [(0, 25, 1), (0, 26, 1), (0, 27, 1), (0, 28, 1)]
         .into_iter()
         .chain((15..19).map(|entity| (1, entity, 0)));
@@ -241,12 +146,12 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
     assert_eq!(side_manifest(&restarted.root).shards.records.len(), 2);
     let engine = writing(&restarted);
     assert_eq!(placed(&engine, &first), placed_first);
-    let second = insert(&engine, "b", &[true, false, true]);
+    let second = insert_keyed(&engine, "b", &[true, false, true]);
 
     let other = writing(&unbroken);
-    let other_first = insert(&other, "a", &first_window);
+    let other_first = insert_keyed(&other, "a", &first_window);
     assert_eq!(placed(&other, &other_first), placed_first);
-    let other_second = insert(&other, "b", &[true, false, true]);
+    let other_second = insert_keyed(&other, "b", &[true, false, true]);
     assert_eq!(
         placed(&engine, &second),
         placed(&other, &other_second),
@@ -271,7 +176,7 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
     assert_eq!(recorded(&side_manifest(&unbroken.root)), wanted);
     let live_rows = engine.generation_status().live_rows;
     assert_eq!(live_rows, other.generation_status().live_rows);
-    assert_eq!(live_rows, N + 19);
+    assert_eq!(live_rows, TWO_SHARD_N + 19);
     drop(engine);
 
     // The manifest names shard 2 now.
@@ -279,8 +184,8 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
     assert_eq!(placed(&engine, &first), placed_first);
     assert_eq!(placed(&engine, &second), placed(&other, &other_second));
     assert_eq!(engine.generation_status().live_rows, live_rows);
-    let third = insert(&engine, "c", &[false]);
-    let other_third = insert(&other, "c", &[false]);
+    let third = insert_keyed(&engine, "c", &[false]);
+    let other_third = insert_keyed(&other, "c", &[false]);
     assert_eq!(placed(&engine, &third), vec![(2, 5, 0)]);
     assert_eq!(placed(&other, &other_third), vec![(2, 5, 0)]);
 }
@@ -290,14 +195,8 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
 /// failed window took are not issued again.
 #[test]
 fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
-    let built = fixture_sized(N, Some(SIZE));
-    let mut engine =
-        Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config())
-            .expect("the engine opens");
-    let faults = std::sync::Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new());
-    engine
-        .start_write_executor_with_faults(8, std::sync::Arc::clone(&faults))
-        .expect("the executor starts");
+    let built = two_shards();
+    let (engine, faults) = open_writing_faulted(&built.root, &built.cache, &built.wal, config());
     let twelve: Vec<bool> = vec![true; 12];
 
     faults.fail_next_fsyncs(1);
@@ -330,7 +229,7 @@ fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
         refused.err()
     );
 
-    let accepted = insert(&engine, "after", &twelve);
+    let accepted = insert_keyed(&engine, "after", &twelve);
     assert_eq!(
         placed(&engine, &accepted),
         (0..12).map(|entity| (2, entity, 0)).collect::<Vec<_>>(),

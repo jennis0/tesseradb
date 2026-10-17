@@ -262,13 +262,13 @@ fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<Entity
     try_ingest(engine, batch, rows).unwrap_or_else(|e| panic!("batch {batch} is accepted: {e}"))
 }
 
-fn is_taken(result: Result<Vec<EntityId>, AcceptError>) -> bool {
+fn is_taken<T>(result: Result<T, AcceptError>) -> bool {
     taken(&result)
 }
 
 /// A row naming one item and carrying a value another item holds names both, so the batch is
 /// refused.
-fn taken(result: &Result<Vec<EntityId>, AcceptError>) -> bool {
+fn taken<T>(result: &Result<T, AcceptError>) -> bool {
     matches!(result, Err(AcceptError::Conflict(_)))
 }
 
@@ -922,7 +922,7 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
     );
     assert_eq!(
         unique_holders(&engine, "doi", &[doi.to_string()]).unwrap(),
-        vec![Some(item)],
+        vec![Some(ItemAt::new(ShardId::ZERO, item))],
         "the value names its item"
     );
     assert_eq!(holders(&engine, doi), 1);
@@ -1561,13 +1561,13 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
 }
 
 /// The fixture built as two shards, of 50 and 40 items.
-fn two_shards(unique: bool) -> Fixture {
+fn two_shards_of(unique: bool) -> Fixture {
     fixture_sized_of(unique, &["s0"], Some(50))
 }
 
 /// [`engine_over`], writing both shards.
 fn writing_two(fx: &Fixture) -> Engine {
-    let mut engine = Engine::open_writing_several_shards(
+    let engine = open_writing(
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
@@ -1576,36 +1576,9 @@ fn writing_two(fx: &Fixture) -> Engine {
             flush_max_items: usize::MAX,
             ..config_uncapped()
         },
-    )
-    .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts");
+    );
     engine.set_background_refresh_for_test(false);
     engine
-}
-
-/// The item the build made of `source`, in its shard, `None` where it no longer holds its id.
-fn named_item(engine: &Engine, source: u64) -> Option<ItemAt> {
-    let table = mosaica_engine::AddressTable {
-        rows: 1,
-        mosaica_id: None,
-        columns: vec![(
-            "id".to_string(),
-            vec![Some(mosaica_engine::AddressValue::Text(source.to_string()))],
-        )],
-    };
-    engine.name_items(&table).unwrap().verdicts[0].clone().ok()
-}
-
-/// [`named_item`] of an item that holds its id.
-fn built_item(engine: &Engine, source: u64) -> ItemAt {
-    named_item(engine, source).expect("the built item holds its id")
-}
-
-/// A built source whose item is in `shard`.
-fn source_in(engine: &Engine, shard: u32) -> u64 {
-    (0..N)
-        .find(|source| built_item(engine, *source).shard == ShardId::new(shard).unwrap())
-        .expect("the shard holds a built item")
 }
 
 /// The `mosaica_id` of the item the build made of `source`.
@@ -1623,13 +1596,14 @@ fn built_id(engine: &Engine, source: u64) -> mosaica_types::MosaicaId {
 }
 
 /// One row naming the built item of `source` by its `mosaica_id` and giving it `doi` and `gid`.
+/// The item it names now, in its shard.
 fn giving_built(
     engine: &Engine,
     batch: &str,
     source: u64,
     doi: &str,
     gid: u64,
-) -> Result<Vec<EntityId>, AcceptError> {
+) -> Result<Vec<ItemAt>, AcceptError> {
     let r = row(engine, batch, b"0", doi, gid, 1_000 + (gid % 1_000) as i64);
     let receipt = engine.ingest(mosaica_engine::IngestRequest {
         batch_id: batch.to_string(),
@@ -1648,7 +1622,7 @@ fn giving_built(
         mosaica_id_column: false,
     })?;
     let ids: Vec<_> = receipt.mosaica_ids.iter().flatten().copied().collect();
-    Ok(items_of(engine, &ids).into_iter().flatten().collect())
+    Ok(items_at(engine, &ids).into_iter().flatten().collect())
 }
 
 /// **A value held in one shard refuses it to an item of another**: a row giving a shard-1 item a
@@ -1657,9 +1631,12 @@ fn giving_built(
 /// was decided.
 #[test]
 fn a_value_held_in_one_shard_is_refused_to_an_item_of_another() {
-    let fx = two_shards(true);
+    let fx = two_shards_of(true);
     let engine = writing_two(&fx);
-    let (zero, one) = (source_in(&engine, 0), source_in(&engine, 1));
+    let (zero, one) = (
+        ids_in_shard(&engine, N, 0)[0],
+        ids_in_shard(&engine, N, 1)[0],
+    );
     let give = |engine: &Engine, batch: &str, doi: &str, gid: u64| {
         giving_built(engine, batch, one, doi, gid)
     };
@@ -1683,7 +1660,7 @@ fn a_value_held_in_one_shard_is_refused_to_an_item_of_another() {
     );
 
     engine
-        .accept_changes(vec![(built_item(&engine, zero).target(), ChangeOp::Delete)])
+        .accept_changes(vec![(item_by_id(&engine, zero).target(), ChangeOp::Delete)])
         .unwrap();
     let holder = give(&engine, "freed", &doi_of(zero), BIG + 2_024).expect("the value is free")[0];
     assert_eq!(
@@ -1700,10 +1677,9 @@ fn a_value_held_in_one_shard_is_refused_to_an_item_of_another() {
         unique_holders(&engine, "doi", &[doi_of(zero)]).unwrap(),
         vec![Some(holder)]
     );
-    let other = (0..N)
-        .find(|source| {
-            *source != one && named_item(&engine, *source).is_some_and(|item| item.shard.raw() == 1)
-        })
+    let other = ids_in_shard(&engine, N, 1)
+        .into_iter()
+        .find(|source| *source != one)
         .unwrap();
     assert!(is_taken(giving_built(
         &engine,
@@ -1718,9 +1694,12 @@ fn a_value_held_in_one_shard_is_refused_to_an_item_of_another() {
 /// buffered or flushed; once it is deleted, the declaration holds and answers in both shards.
 #[test]
 fn a_declaration_over_a_value_held_in_two_shards_is_refused() {
-    let fx = two_shards(false);
+    let fx = two_shards_of(false);
     let engine = writing_two(&fx);
-    let (zero, one) = (source_in(&engine, 0), source_in(&engine, 1));
+    let (zero, one) = (
+        ids_in_shard(&engine, N, 0)[0],
+        ids_in_shard(&engine, N, 1)[0],
+    );
     let twin = ingest(
         &engine,
         "twin",
@@ -1739,7 +1718,7 @@ fn a_declaration_over_a_value_held_in_two_shards_is_refused() {
 
     engine
         .accept_changes(vec![(
-            ItemAt::new(ShardId::new(1).unwrap(), twin).target(),
+            ItemAt::new(shard(1), twin).target(),
             ChangeOp::Delete,
         )])
         .unwrap();
@@ -1774,13 +1753,13 @@ fn a_declaration_over_a_value_held_in_two_shards_is_refused() {
 /// not the shard the build was writing runs into.
 #[test]
 fn a_request_made_while_a_declaration_builds_compacts_only_what_has_something_to_reclaim() {
-    let fx = two_shards(false);
+    let fx = two_shards_of(false);
     let engine = Arc::new(writing_two(&fx));
-    compact(&engine, Some(ShardId::new(0).unwrap()));
-    compact(&engine, Some(ShardId::new(1).unwrap()));
+    compact(&engine, Some(ShardId::ZERO));
+    compact(&engine, Some(shard(1)));
     engine
         .accept_changes(vec![(
-            built_item(&engine, source_in(&engine, 1)).target(),
+            item_by_id(&engine, ids_in_shard(&engine, N, 1)[0]).target(),
             ChangeOp::Delete,
         )])
         .unwrap();

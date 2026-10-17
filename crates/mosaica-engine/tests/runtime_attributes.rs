@@ -1183,22 +1183,16 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
 /// The size the several-shard fixture is built at: shard 0 sealed at 70 items, shard 1 open at 50.
 const SIZE: u64 = 70;
 
-/// An engine over `fx` that writes several shards.
+/// An engine over `fx` that writes several shards, its background refresh off.
 fn several_over(fx: &Fixture) -> Engine {
-    let mut engine = Engine::open_writing_several_shards(
+    let engine = open_writing(
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
         config_uncapped(),
-    )
-    .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts");
+    );
     engine.set_background_refresh_for_test(false);
     engine
-}
-
-fn shard(id: u32) -> mosaica_types::ShardId {
-    mosaica_types::ShardId::new(id).unwrap()
 }
 
 /// One batch carrying `rank`: each row names the built item of its `id`, or with none creates an
@@ -1257,15 +1251,12 @@ fn ranks(engine: &Engine) -> Vec<(u64, Option<ScalarOut>)> {
 /// prefix's `MANIFEST.json` declares `rank`.
 fn stored(root: &Path) -> (Vec<Vec<String>>, Vec<String>, bool) {
     let side = side_manifest(root);
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(root.join(current_prefix(root)).join("MANIFEST.json")).unwrap(),
-    )
-    .unwrap();
-    let declared = manifest["declared_scalars"]
-        .as_array()
+    let declared = open_bundle(root)
         .unwrap()
+        .manifest
+        .declared_scalars
         .iter()
-        .any(|d| d["name"] == "rank");
+        .any(|d| d.name == "rank");
     (
         side.shards
             .records
@@ -1279,25 +1270,6 @@ fn stored(root: &Path) -> (Vec<Vec<String>>, Vec<String>, bool) {
             .collect(),
         declared,
     )
-}
-
-/// The first built item's `id` in `shard`.
-fn an_id_in(engine: &Engine, shard: mosaica_types::ShardId) -> u64 {
-    (0..N_ITEMS)
-        .find(|id| {
-            let table = mosaica_engine::AddressTable {
-                rows: 1,
-                mosaica_id: None,
-                columns: vec![(
-                    "id".to_string(),
-                    vec![Some(mosaica_engine::AddressValue::Text(id.to_string()))],
-                )],
-            };
-            engine.name_items(&table).unwrap().verdicts[0]
-                .as_ref()
-                .is_ok_and(|item| item.shard == shard)
-        })
-        .expect("the shard holds a built item")
 }
 
 fn rank_listed() -> Vec<String> {
@@ -1318,7 +1290,10 @@ fn a_runtime_column_leaves_for_the_bundle_manifest_once_every_shard_holds_its_ba
             ..request("rank", "f32")
         })
         .expect("the declaration is accepted");
-    let (zero, one) = (an_id_in(&engine, shard(0)), an_id_in(&engine, shard(1)));
+    let (zero, one) = (
+        ids_in_shard(&engine, N_ITEMS, 0)[0],
+        ids_in_shard(&engine, N_ITEMS, 1)[0],
+    );
     ranked(
         &engine,
         "ranked",
@@ -1382,7 +1357,7 @@ fn a_shard_opened_after_a_declaration_holds_its_base_from_its_opening() {
     publish_buffered(&engine);
     let expected = ranks(&engine);
     assert_eq!(expected.len(), rows.len());
-    // The batch fills shard 1 and seals it; lacking the base, it is owed a closing compaction.
+    // The batch fills shard 1 and seals it; lacking the base, it is due a closing compaction.
     tick_until(
         &engine,
         "the sealed shard's closing compaction",

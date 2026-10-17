@@ -192,7 +192,12 @@ fn built_entities(engine: &Engine) -> BTreeMap<u64, u64> {
     let found = unique_holders(engine, "gid", &gids).unwrap();
     (0..BUILT)
         .zip(found)
-        .map(|(source, entity)| (source, entity.expect("a built item holds its gid").raw()))
+        .map(|(source, item)| {
+            (
+                source,
+                item.expect("a built item holds its gid").entity.raw(),
+            )
+        })
         .collect()
 }
 

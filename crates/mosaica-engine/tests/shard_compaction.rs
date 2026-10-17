@@ -9,64 +9,9 @@ use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
 use common::*;
-use mosaica_engine::{CompactionSchedule, Engine, EngineConfig, RecordsOrder, ViewportRequest};
+use mosaica_engine::{CompactionSchedule, Engine, EngineConfig};
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_store::manifest::EntitySet;
-use mosaica_types::{EntityId, MosaicaId, ShardId, Target};
-
-/// Items the fixture builds.
-const N: u64 = 40;
-/// Shards of 25 and 15 items.
-const SIZE: u64 = 25;
-
-fn shard(id: u32) -> ShardId {
-    ShardId::new(id).unwrap()
-}
-
-fn item_in(shard_id: u32, entity: u64) -> Target {
-    Target::Item(shard(shard_id), EntityId::new(entity))
-}
-
-/// An engine over `built` that writes several shards, its executor running under `config`.
-fn writing_with(built: &Fixture, config: EngineConfig) -> Engine {
-    let mut engine =
-        Engine::open_writing_several_shards(&built.root, &built.cache, &built.wal, config)
-            .expect("the engine opens");
-    engine.start_write_executor(8).expect("the executor starts");
-    engine
-}
-
-fn writing(built: &Fixture) -> Engine {
-    writing_with(built, config())
-}
-
-/// What a viewer is served: every item's `id`, and each tile's visible count.
-fn served(engine: &Engine, credential: &[u8]) -> (Vec<u64>, Vec<(u64, u64)>) {
-    let session = engine.authorise(credential).unwrap();
-    let mut ids: Vec<u64> = read_items(engine, &session, &Items::new(RecordsOrder::Stored))
-        .rows_with_ids
-        .iter()
-        .map(|&(_, id)| id)
-        .collect();
-    ids.sort_unstable();
-    (ids, tiles(engine, &session))
-}
-
-fn tiles(engine: &Engine, session: &mosaica_engine::Session) -> Vec<(u64, u64)> {
-    let out = engine
-        .viewport(
-            session,
-            ViewportRequest::new("s0", 3, WHOLE_MAP, N as usize),
-        )
-        .expect("the viewport answers");
-    let mut counts: Vec<(u64, u64)> = out.tiles.iter().map(|t| (t.tile, t.visible)).collect();
-    counts.sort_unstable();
-    counts
-}
-
-fn ids_in(set: &EntitySet) -> Vec<u32> {
-    set.entities().expect("the set decodes").iter().collect()
-}
+use mosaica_types::{ShardId, Target};
 
 /// Each shard's `(identity, suppressed, deleted)` as the served side-manifest records them.
 fn records(root: &std::path::Path) -> Vec<([u8; 32], Vec<u32>, Vec<u32>)> {
@@ -77,8 +22,8 @@ fn records(root: &std::path::Path) -> Vec<([u8; 32], Vec<u32>, Vec<u32>)> {
         .map(|record| {
             (
                 record.identity,
-                ids_in(&record.deny),
-                ids_in(&record.tombstones),
+                entity_ids(&record.deny),
+                entity_ids(&record.tombstones),
             )
         })
         .collect()
@@ -86,39 +31,38 @@ fn records(root: &std::path::Path) -> Vec<([u8; 32], Vec<u32>, Vec<u32>)> {
 
 /// Every file under `shard`'s directory of the live prefix but its record files, with its inode.
 fn shard_files(root: &std::path::Path, shard: ShardId) -> Vec<(String, u64)> {
-    fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, u64)>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, base, out);
-            } else if !entry.file_name().to_string_lossy().starts_with("SEGMENTS-") {
-                let rel = path
-                    .strip_prefix(base)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                out.push((rel, entry.metadata().unwrap().ino()));
-            }
-        }
-    }
     let dir =
         mosaica_store::ShardLayout::new(PARTITION, shard).dir(&root.join(current_prefix(root)));
-    let mut out = Vec::new();
-    walk(&dir, &dir, &mut out);
+    let mut out: Vec<(String, u64)> = files_under(&dir)
+        .into_iter()
+        .filter(|path| {
+            !path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("SEGMENTS-")
+        })
+        .map(|path| {
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            let rel = path
+                .strip_prefix(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (rel, inode)
+        })
+        .collect();
     out.sort();
     out
 }
 
 /// The same deletions and suppression in a bundle of one shard, by its entities.
 fn one_shard_with(changes: &[(Target, ChangeOp)]) -> (Fixture, Engine) {
-    let one = fixture_sized(N, None);
+    let one = fixture_sized(TWO_SHARD_N, None);
     let engine = one.open();
     let renumbered = changes
         .iter()
-        .map(|(target, op)| match target {
-            Target::Item(at, entity) if at.raw() == 1 => (item_in(0, SIZE + entity.raw()), *op),
-            other => (*other, *op),
-        })
+        .map(|(target, op)| (as_one_shard(*target), *op))
         .collect();
     engine.accept_changes(renumbered).unwrap();
     (one, engine)
@@ -129,8 +73,8 @@ fn one_shard_with(changes: &[(Target, ChangeOp)]) -> (Fixture, Engine) {
 /// alone; what every viewer is served is what one shard serves, before and after a restart.
 #[test]
 fn compacting_one_shard_leaves_the_other_standing() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     engine.set_merge_for_test(false);
     let changes = [
         (item_in(0, 5), ChangeOp::Delete),
@@ -153,7 +97,7 @@ fn compacting_one_shard_leaves_the_other_standing() {
     let files = shard_files(&several.root, shard(0));
     assert!(!files.is_empty());
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    tiles(&engine, &session);
+    tile_counts(&engine, &session, 3);
     let (fragments, projections) = (
         engine.fragment_cache_rebuilds(),
         engine.full_projection_builds(),
@@ -175,7 +119,7 @@ fn compacting_one_shard_leaves_the_other_standing() {
     );
     assert_eq!(engine.retirable_deletions(), 1);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    tiles(&engine, &session);
+    tile_counts(&engine, &session, 3);
     assert_eq!(
         engine.fragment_cache_rebuilds(),
         fragments + 1,
@@ -186,16 +130,11 @@ fn compacting_one_shard_leaves_the_other_standing() {
         projections + 1,
         "shard 1's projection alone is rebuilt"
     );
-    for credential in [full_coverage_credential(), subset_credential()] {
-        assert_eq!(
-            served(&engine, &credential),
-            served(&one_engine, &credential)
-        );
-    }
+    assert_serves_as(&engine, &one_engine, "after the compaction");
 
     // The freed id is shard 1's own, issued there once the log no longer names it.
     reclaim_log(&engine);
-    let inserted = insert(&engine, "reused");
+    let inserted = insert_keyed(&engine, "reused", &[true])[0];
     assert_eq!(
         engine.resolve_targets(&[inserted]).unwrap(),
         vec![Some(item_in(1, 4))],
@@ -203,10 +142,10 @@ fn compacting_one_shard_leaves_the_other_standing() {
     );
     assert_ne!(tenancy_of(inserted), 0, "at the next tenancy");
 
-    let expected = served(&engine, &full_coverage_credential());
+    let expected = served_to(&engine, &full_coverage_credential());
     drop(engine);
-    let engine = writing(&several);
-    assert_eq!(served(&engine, &full_coverage_credential()), expected);
+    let engine = several.open_writing();
+    assert_eq!(served_to(&engine, &full_coverage_credential()), expected);
     assert_eq!(engine.retirable_deletions(), 1, "shard 0's deletion stands");
 }
 
@@ -214,8 +153,8 @@ fn compacting_one_shard_leaves_the_other_standing() {
 /// suppression there survives both shards' compactions and a restart.
 #[test]
 fn a_sealed_shards_deletion_leaves_only_at_its_own_compaction() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     let changes = [
         (item_in(0, 5), ChangeOp::Delete),
         (item_in(0, 2), ChangeOp::Suppress),
@@ -240,15 +179,10 @@ fn a_sealed_shards_deletion_leaves_only_at_its_own_compaction() {
     );
     let held = records(&several.root);
     assert_eq!((held[0].1.clone(), held[0].2.clone()), (vec![2], vec![]));
-    for credential in [full_coverage_credential(), subset_credential()] {
-        assert_eq!(
-            served(&engine, &credential),
-            served(&one_engine, &credential)
-        );
-    }
+    assert_serves_as(&engine, &one_engine, "after both compactions");
 
     drop(engine);
-    let engine = writing(&several);
+    let engine = several.open_writing();
     assert_eq!(
         engine.overlay_depth(),
         1,
@@ -257,8 +191,8 @@ fn a_sealed_shards_deletion_leaves_only_at_its_own_compaction() {
     let held = records(&several.root);
     assert_eq!((held[0].1.clone(), held[0].2.clone()), (vec![2], vec![]));
     assert_eq!(
-        served(&engine, &full_coverage_credential()),
-        served(&one_engine, &full_coverage_credential())
+        served_to(&engine, &full_coverage_credential()),
+        served_to(&one_engine, &full_coverage_credential())
     );
 }
 
@@ -266,8 +200,8 @@ fn a_sealed_shards_deletion_leaves_only_at_its_own_compaction() {
 /// until the last publishes.
 #[test]
 fn a_request_compacts_every_shard_with_something_to_reclaim() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     engine
         .accept_changes(vec![(item_in(1, 4), ChangeOp::Delete)])
         .unwrap();
@@ -308,8 +242,8 @@ fn a_request_compacts_every_shard_with_something_to_reclaim() {
 /// With nothing to reclaim anywhere, a request compacts the shard the schedule ranks first.
 #[test]
 fn a_request_with_nothing_to_reclaim_compacts_one_shard() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     compact(&engine, Some(shard(0)));
     compact(&engine, Some(shard(1)));
     assert_eq!(compact(&engine, None), 1);
@@ -319,9 +253,11 @@ fn a_request_with_nothing_to_reclaim_compacts_one_shard() {
 /// interval on its own: shard 1, just compacted, waits; shard 0 does not.
 #[test]
 fn the_schedule_compacts_each_shard_on_its_own_gauges_and_interval() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing_with(
-        &several,
+    let several = two_shards();
+    let engine = open_writing(
+        &several.root,
+        &several.cache,
+        &several.wal,
         EngineConfig {
             compaction: CompactionSchedule {
                 min_interval_secs: 86_400,
@@ -387,10 +323,10 @@ fn memory_between_one_shards_estimate_and_the_corpus_still_compacts() {
         assert_eq!(refusal.gate, "insufficient_memory");
         refusal.need_bytes.unwrap()
     };
-    let one = fixture_sized(N, None);
+    let one = fixture_sized(TWO_SHARD_N, None);
     let whole = need(&one.open(), None);
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     let shard_one = need(&engine, Some(shard(1)));
     assert!(shard_one < whole, "{shard_one} is below {whole}");
 
@@ -402,14 +338,21 @@ fn memory_between_one_shards_estimate_and_the_corpus_still_compacts() {
 /// and not again.
 #[test]
 fn a_shard_sealed_with_a_deletion_pending_is_compacted_once() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     engine
         .accept_changes(vec![(item_in(1, 4), ChangeOp::Delete)])
         .unwrap();
+    engine.set_fold_paused_for_test(true);
     seal_shard_one(&engine);
-    assert_eq!(shards_of(&several.root).1.len(), 3);
+    tick_until(
+        &engine,
+        "the opened shard's publication",
+        Duration::from_secs(30),
+        || shards_of(&several.root).1.len() == 3,
+    );
     let identity = records(&several.root)[1].0;
+    engine.set_fold_paused_for_test(false);
     tick_until(
         &engine,
         "the closing compaction",
@@ -433,8 +376,8 @@ fn a_shard_sealed_with_a_deletion_pending_is_compacted_once() {
 /// shard 1's rows.
 #[test]
 fn a_shard_sealed_with_its_rows_buffered_is_compacted_once_they_flush() {
-    let several = fixture_sized(N, Some(SIZE));
-    let engine = writing(&several);
+    let several = two_shards();
+    let engine = several.open_writing();
     edit_in_shard_zero(&engine);
     seal_shard_one(&engine);
     let identity = records(&several.root)[1].0;
@@ -457,86 +400,12 @@ fn a_shard_sealed_with_its_rows_buffered_is_compacted_once_they_flush() {
 
 /// Move an item of shard 0, found by its `id` value: an edit, whose row shard 0 buffers.
 fn edit_in_shard_zero(engine: &Engine) {
-    let named = |id: u64| {
-        let table = mosaica_engine::AddressTable {
-            rows: 1,
-            mosaica_id: None,
-            columns: vec![(
-                "id".to_string(),
-                vec![Some(mosaica_engine::AddressValue::Text(id.to_string()))],
-            )],
-        };
-        engine.name_items(&table).unwrap().verdicts[0]
-            .clone()
-            .expect("the value names an item")
-    };
-    let id = (0..N)
-        .find(|id| named(*id).shard == shard(0))
-        .expect("shard 0 holds an item");
-    engine
-        .ingest(mosaica_engine::IngestRequest {
-            batch_id: "edit".to_string(),
-            body_hash: [9; 32],
-            view: Some("s0".to_string()),
-            rows: vec![mosaica_lifecycle::IngestRow {
-                mosaica_id: None,
-                labels: Some(vec![b"0".to_vec()]),
-                position: Some((7.0, 7.0)),
-                scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(id)],
-                scoped: Vec::new(),
-                omitted: Vec::new(),
-            }],
-            artifacts: Default::default(),
-            strict: true,
-            mosaica_id_column: false,
-        })
-        .expect("the edit is accepted");
+    let id = ids_in_shard(engine, TWO_SHARD_N, 0)[0];
+    edit_by_id(engine, "edit", id).expect("the edit is accepted");
 }
 
 /// Ingest eleven rows: ten fill shard 1 to its size and the eleventh opens shard 2, sealing
 /// shard 1.
 fn seal_shard_one(engine: &Engine) {
-    let rows = (0..11)
-        .map(|at| mosaica_lifecycle::IngestRow {
-            mosaica_id: None,
-            labels: Some(vec![b"0".to_vec()]),
-            position: Some((5.0, 5.0)),
-            scalars: keyed(&format!("sealing-{at}")),
-            scoped: Vec::new(),
-            omitted: Vec::new(),
-        })
-        .collect();
-    engine
-        .ingest(mosaica_engine::IngestRequest {
-            batch_id: "sealing".to_string(),
-            body_hash: [8; 32],
-            view: Some("s0".to_string()),
-            rows,
-            artifacts: Default::default(),
-            strict: true,
-            mosaica_id_column: false,
-        })
-        .expect("the batch is accepted");
-}
-
-fn insert(engine: &Engine, key: &str) -> MosaicaId {
-    let receipt = engine
-        .ingest(mosaica_engine::IngestRequest {
-            batch_id: key.to_string(),
-            body_hash: [7; 32],
-            view: Some("s0".to_string()),
-            rows: vec![mosaica_lifecycle::IngestRow {
-                mosaica_id: None,
-                labels: Some(vec![b"0".to_vec()]),
-                position: Some((5.0, 5.0)),
-                scalars: keyed(key),
-                scoped: Vec::new(),
-                omitted: Vec::new(),
-            }],
-            artifacts: Default::default(),
-            strict: true,
-            mosaica_id_column: false,
-        })
-        .expect("the insert is accepted");
-    receipt.mosaica_ids[0].expect("the row created an item")
+    insert_keyed(engine, "sealing", &[true; 11]);
 }
