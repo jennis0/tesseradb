@@ -81,7 +81,7 @@ def test_a_compaction_reaches_every_shard_with_something_to_reclaim(world):
     assert status["compaction"]["shard"] == max(written), status["compaction"]
     assert status["overlay"]["retirable"] == 0, status["overlay"]
     w.check_served()
-    [(deleted, gone)] = w.deleted.items()
+    [(_, gone)] = w.deleted.items()
     assert w.card(gone).status_code == 404
     resp = w.server.changes([{"op": "delete", "match": {"mosaica_id": str(gone)}}], strict=True)
     assert resp.status_code != 200, resp.text

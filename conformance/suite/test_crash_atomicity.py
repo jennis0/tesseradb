@@ -253,6 +253,7 @@ class DeclareSize(Stage):
             timeout=30,
         )
         assert resp.status_code == 201, resp.text
+        resp.raise_for_status()
 
 
 @pytest.fixture(scope="module", params=[True, False], ids=["discarded", "kept"])

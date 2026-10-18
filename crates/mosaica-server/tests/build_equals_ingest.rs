@@ -845,6 +845,130 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
     out
 }
 
+/// Send the corpus `seed` draws to `ingested` one file at a time, in declaration order, and check
+/// each is refused where the build `report` refused it.
+async fn ingest_each_file(ingested: &TestServer, corpus: &Corpus, report: &BuildReport, seed: u64) {
+    let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
+    for (source, object, rows, view) in [
+        ("world", "view 'world'", &corpus.world, Some("world")),
+        ("near", "view 'g:near'", &corpus.near, Some("g:near")),
+        ("far", "view 'g:far'", &corpus.far, Some("g:far")),
+        ("notes", "attribute source 'notes'", &corpus.notes, None),
+    ] {
+        let refuses = !reported(report, object).is_empty();
+        let batch = format!("{seed}-{source}");
+        let body = rows.ingest_body();
+        trace(&format!("seed {seed}: ingest {batch}"));
+        let answer = send(
+            ingested,
+            reqwest::Method::POST,
+            "/control/ingest",
+            view,
+            &body,
+            refuses,
+            &batch,
+        )
+        .await;
+        let what = format!("seed {seed}: {source}");
+        assert_refused_alike(report, object, &listed(&answer, by_row), rows, &what);
+        trace(&format!("seed {seed}: tick"));
+        tick(ingested).await;
+    }
+
+    // The group-scoped attribute's file, each view's rows as one batch naming that view.
+    for key in GROUP_KEYS {
+        let view = format!("g:{key}");
+        let object = format!("attribute 'grade' in view '{view}'");
+        let (rows, file_rows) = corpus.grades.of_view(key);
+        let refuses = !reported(report, &object).is_empty();
+        trace(&format!("seed {seed}: ingest grades of {view}"));
+        let answer = send(
+            ingested,
+            reqwest::Method::POST,
+            "/control/ingest",
+            Some(&view),
+            &rows.ingest_body(),
+            refuses,
+            &format!("{seed}-grades-{key}"),
+        )
+        .await;
+        let of_file = |entry: &Value| vec![file_rows[entry["row"].as_u64().unwrap() as usize]];
+        let what = format!("seed {seed}: the grades of {view}");
+        assert_refused_alike(
+            report,
+            &object,
+            &listed(&answer, of_file),
+            &corpus.grades,
+            &what,
+        );
+        trace(&format!("seed {seed}: tick"));
+        tick(ingested).await;
+    }
+
+    // The access relation, one row per item naming it with its labels.
+    let object = "point_visibility";
+    let (body, rows_of) = corpus.relation.relation_body();
+    let refuses = !reported(report, object).is_empty();
+    let batch = format!("{seed}-access");
+    trace(&format!("seed {seed}: ingest {batch}"));
+    let answer = send(
+        ingested,
+        reqwest::Method::POST,
+        "/control/ingest",
+        None,
+        &body,
+        refuses,
+        &batch,
+    )
+    .await;
+    let of_item = |entry: &Value| rows_of[entry["row"].as_u64().unwrap() as usize].clone();
+    let what = format!("seed {seed}: the access relation");
+    assert_refused_alike(
+        report,
+        object,
+        &listed(&answer, of_item),
+        &corpus.relation,
+        &what,
+    );
+    trace(&format!("seed {seed}: tick"));
+    tick(ingested).await;
+
+    let object = format!("layer '{LAYER}' members");
+    let refuses = !reported(report, &object).is_empty();
+    trace(&format!("seed {seed}: publish members"));
+    let answer = send(
+        ingested,
+        reqwest::Method::PUT,
+        &format!("/control/layers/{LAYER}/artifacts"),
+        None,
+        &corpus.members.publish_body(),
+        refuses,
+        &format!("{seed}-members"),
+    )
+    .await;
+    let positions = corpus.members.member_positions();
+    let of_member = |entry: &Value| {
+        let at = (
+            entry["artifact"].as_u64().unwrap() as usize,
+            entry["row"].as_u64().unwrap() as usize,
+        );
+        vec![positions
+            .iter()
+            .position(|p| *p == at)
+            .expect("a member row")]
+    };
+    let what = format!("seed {seed}: the members");
+    assert_refused_alike(
+        report,
+        &object,
+        &listed(&answer, of_member),
+        &corpus.members,
+        &what,
+    );
+    trace(&format!("seed {seed}: tick"));
+    tick(ingested).await;
+}
+
 /// Compare the two paths over the corpus `seed` draws, declared in shards of a third of the items
 /// its build holds, rounded up, where `thirds`; answers the reasons the build refused rows for.
 async fn build_equals_ingest(seed: u64, thirds: bool) -> Vec<String> {
@@ -877,125 +1001,7 @@ async fn build_equals_ingest(seed: u64, thirds: bool) -> Vec<String> {
     let ingested = spawn_server(&empty_root, &empty.join("cache"), &empty.join("wal.log")).await;
     trace(&format!("seed {seed}: spawned"));
 
-    let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
-    for (source, object, rows, view) in [
-        ("world", "view 'world'", &corpus.world, Some("world")),
-        ("near", "view 'g:near'", &corpus.near, Some("g:near")),
-        ("far", "view 'g:far'", &corpus.far, Some("g:far")),
-        ("notes", "attribute source 'notes'", &corpus.notes, None),
-    ] {
-        let refuses = !reported(&report, object).is_empty();
-        let batch = format!("{seed}-{source}");
-        let body = rows.ingest_body();
-        trace(&format!("seed {seed}: ingest {batch}"));
-        let answer = send(
-            &ingested,
-            reqwest::Method::POST,
-            "/control/ingest",
-            view,
-            &body,
-            refuses,
-            &batch,
-        )
-        .await;
-        let what = format!("seed {seed}: {source}");
-        assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
-        trace(&format!("seed {seed}: tick"));
-        tick(&ingested).await;
-    }
-
-    // The group-scoped attribute's file, each view's rows as one batch naming that view.
-    for key in GROUP_KEYS {
-        let view = format!("g:{key}");
-        let object = format!("attribute 'grade' in view '{view}'");
-        let (rows, file_rows) = corpus.grades.of_view(key);
-        let refuses = !reported(&report, &object).is_empty();
-        trace(&format!("seed {seed}: ingest grades of {view}"));
-        let answer = send(
-            &ingested,
-            reqwest::Method::POST,
-            "/control/ingest",
-            Some(&view),
-            &rows.ingest_body(),
-            refuses,
-            &format!("{seed}-grades-{key}"),
-        )
-        .await;
-        let of_file = |entry: &Value| vec![file_rows[entry["row"].as_u64().unwrap() as usize]];
-        let what = format!("seed {seed}: the grades of {view}");
-        assert_refused_alike(
-            &report,
-            &object,
-            &listed(&answer, of_file),
-            &corpus.grades,
-            &what,
-        );
-        trace(&format!("seed {seed}: tick"));
-        tick(&ingested).await;
-    }
-
-    // The access relation, one row per item naming it with its labels.
-    let object = "point_visibility";
-    let (body, rows_of) = corpus.relation.relation_body();
-    let refuses = !reported(&report, object).is_empty();
-    let batch = format!("{seed}-access");
-    trace(&format!("seed {seed}: ingest {batch}"));
-    let answer = send(
-        &ingested,
-        reqwest::Method::POST,
-        "/control/ingest",
-        None,
-        &body,
-        refuses,
-        &batch,
-    )
-    .await;
-    let of_item = |entry: &Value| rows_of[entry["row"].as_u64().unwrap() as usize].clone();
-    let what = format!("seed {seed}: the access relation");
-    assert_refused_alike(
-        &report,
-        object,
-        &listed(&answer, of_item),
-        &corpus.relation,
-        &what,
-    );
-    trace(&format!("seed {seed}: tick"));
-    tick(&ingested).await;
-
-    let object = format!("layer '{LAYER}' members");
-    let refuses = !reported(&report, &object).is_empty();
-    trace(&format!("seed {seed}: publish members"));
-    let answer = send(
-        &ingested,
-        reqwest::Method::PUT,
-        &format!("/control/layers/{LAYER}/artifacts"),
-        None,
-        &corpus.members.publish_body(),
-        refuses,
-        &format!("{seed}-members"),
-    )
-    .await;
-    let positions = corpus.members.member_positions();
-    let of_member = |entry: &Value| {
-        let at = (
-            entry["artifact"].as_u64().unwrap() as usize,
-            entry["row"].as_u64().unwrap() as usize,
-        );
-        vec![positions
-            .iter()
-            .position(|p| *p == at)
-            .expect("a member row")]
-    };
-    let what = format!("seed {seed}: the members");
-    assert_refused_alike(
-        &report,
-        &object,
-        &listed(&answer, of_member),
-        &corpus.members,
-        &what,
-    );
-    trace(&format!("seed {seed}: tick"));
-    tick(&ingested).await;
+    ingest_each_file(&ingested, &corpus, &report, seed).await;
 
     // Compared as a restart replays it.
     trace(&format!("seed {seed}: shutdown"));

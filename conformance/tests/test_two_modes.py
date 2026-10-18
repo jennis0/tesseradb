@@ -180,7 +180,7 @@ class Corpus:
     servers: dict[str, dict]
     battery: Callable[["Side"], list[Request]]
     #: The write script (module doc).
-    writes: list["Write"]
+    writes: list[Write]
     #: Whether the many-shard build fills its last shard, so the script's new items open one.
     opens: bool
 
@@ -245,7 +245,7 @@ class Side:
         self._tokens.clear()
         self._members.clear()
 
-    def write(self, write: "Write") -> None:
+    def write(self, write: Write) -> None:
         """Send `write` to every server, and name the new items its receipts answer."""
         body = self.resolve(write.body)
         for name in self.servers:
@@ -261,6 +261,7 @@ class Side:
                 timeout=120,
             )
             assert resp.status_code in write.expect, f"{write.method} {write.path}: {resp.text}"
+            resp.raise_for_status()
             if write.path.startswith("/control/flush"):
                 assert resp.json()["visible"], resp.text
             if write.batch is not None:

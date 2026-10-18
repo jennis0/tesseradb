@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
+from pyarrow import ipc
 
 import declared_fixture as fx
 from declared_fixture import BBOX, PRINCIPALS, WORLD, Column, Corpus, Deployment
