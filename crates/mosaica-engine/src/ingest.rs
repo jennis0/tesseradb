@@ -44,6 +44,9 @@ use crate::Generation;
 /// An ingest batch as the caller sent it.
 #[derive(Debug, Clone)]
 pub struct IngestRequest {
+    /// The caller that sent the batch. A retry is matched by it and `batch_id` together, so two
+    /// callers' batches under one id are two batches.
+    pub principal: String,
     pub batch_id: String,
     pub body_hash: [u8; 32],
     /// The view the batch's positions and group-scoped values are in, resolved by the caller to
@@ -170,7 +173,11 @@ impl Engine {
         if self.any_partition_stepped_down() {
             return Err(AcceptError::SteppedDown);
         }
-        if let Some((held_hash, receipt)) = self.write.live().accepted_batch(&request.batch_id) {
+        if let Some((held_hash, receipt)) = self
+            .write
+            .live()
+            .accepted_batch(&request.principal, &request.batch_id)
+        {
             if held_hash == request.body_hash {
                 return Ok(IngestReceipt::of(&receipt, 0, 0, true));
             }
@@ -186,6 +193,7 @@ impl Engine {
                 self.switches.hold_write_check_if_wanted();
                 self.write.accept_ingest(
                     planned,
+                    request.principal.clone(),
                     request.batch_id.clone(),
                     request.body_hash,
                     unique_seq,

@@ -68,6 +68,7 @@ proptest! {
                     wal_records.push(WalRecord::IngestBatch {
                         edits: Vec::new(),
                         receipt: Vec::new(),
+                        principal: String::new(),
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
                         rows: vec![WalRow {
@@ -112,6 +113,7 @@ proptest! {
                 wal.push(WalRecord::IngestBatch {
                     edits: Vec::new(),
                     receipt: Vec::new(),
+                    principal: String::new(),
                     batch_id: format!("batch-{id}"),
                     body_hash: [0u8; 32],
                     rows: vec![WalRow {
@@ -411,6 +413,7 @@ fn row(id: u64) -> WalRecord {
     WalRecord::IngestBatch {
         edits: Vec::new(),
         receipt: Vec::new(),
+        principal: String::new(),
         batch_id: format!("batch-{id}"),
         body_hash: [0u8; 32],
         rows: vec![WalRow {

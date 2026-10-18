@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use mosaica_engine::{AddressTable, AddressValue, Stamp};
+use mosaica_engine::{AddressTable, AddressValue, NamedTarget, Stamp};
 use mosaica_lifecycle::resolve::Reason;
-use mosaica_types::{ItemAt, MosaicaId, Target};
+use mosaica_types::{ItemAt, MosaicaId};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;
@@ -205,7 +205,7 @@ impl Merged {
     pub(crate) fn name_targets(
         &self,
         state: &AppState,
-    ) -> Result<Names<Result<Target, Reason>>, ApiError> {
+    ) -> Result<Names<Result<NamedTarget, Reason>>, ApiError> {
         let named = state
             .engine
             .name_targets(&self.table)

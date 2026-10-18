@@ -718,6 +718,7 @@ impl WritePath {
     pub(crate) fn accept_ingest(
         &self,
         planned: crate::ingest::Planned,
+        principal: String,
         batch_id: String,
         body_hash: [u8; 32],
         unique_seq: u64,
@@ -736,6 +737,7 @@ impl WritePath {
             edits,
             slots,
             keys,
+            principal,
             batch_id,
             body_hash,
             artifacts,
@@ -899,7 +901,7 @@ impl WritePath {
     /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
     pub(crate) fn submit_changes(
         &self,
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(

@@ -19,11 +19,11 @@ use axum::{Json, Router};
 
 use sha2::{Digest, Sha256};
 
-use mosaica_engine::{MetaView, ScopedScalar};
+use mosaica_engine::{MetaView, NamedTarget, ScopedScalar};
 use mosaica_lifecycle::ChangeOp;
 
 use mosaica_types::view::ViewMetadataValue;
-use mosaica_types::{ItemAt, Target};
+use mosaica_types::ItemAt;
 
 use crate::address::Table;
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
@@ -424,9 +424,9 @@ struct IngestResp {
     /// Memberships this batch's membership columns added, to artifacts it created and to held
     /// ones alike.
     joined: u64,
-    /// This body was already accepted under this batch id. Every count is then 0, so a client
-    /// summing them over retried pages does not double-count; `mosaica_ids` is the first
-    /// acceptance's.
+    /// This body was already accepted from this caller under this batch id. Every count is then
+    /// 0, so a client summing them over retried pages does not double-count; `mosaica_ids` is the
+    /// first acceptance's.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replayed: bool,
     /// The cycle this batch's rows become visible in. A replay names the next cycle to open,
@@ -444,6 +444,7 @@ fn run_ingest(
     state: &AppState,
     encoding: BodyEncoding,
     body: &[u8],
+    principal: String,
     batch_id: String,
     view: Option<&str>,
     strict: bool,
@@ -569,6 +570,7 @@ fn run_ingest(
     let receipt = state
         .engine
         .ingest(mosaica_engine::IngestRequest {
+            principal,
             batch_id,
             body_hash,
             view: view_id,
@@ -624,6 +626,7 @@ fn run_ingest(
 async fn ingest(
     State(state): State<Arc<AppState>>,
     ApiQuery(query): ApiQuery<RowsQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -655,10 +658,19 @@ async fn ingest(
     // The permit moves into the closure: if the client disconnects, the closure still holds its
     // thread, and the permit must be held as long.
     let strict = query.strict;
+    let principal = caller.principal.write_key();
     let mut resp = state
         .blocking(move |state| {
             let _permit = permit;
-            run_ingest(state, encoding, &body, batch_id, view.as_deref(), strict)
+            run_ingest(
+                state,
+                encoding,
+                &body,
+                principal,
+                batch_id,
+                view.as_deref(),
+                strict,
+            )
         })
         .await?;
 
@@ -721,36 +733,36 @@ fn run_changes(
     }
     let merged = crate::address::Merged::of(tables)?;
 
-    let mut applied: Vec<ChangeOp> = Vec::new();
-    let answered = with_fresh_names(|| {
-        let crate::address::Names {
-            tables: named,
-            ignored,
-            at,
-        } = merged.name_targets(state)?;
-        let mut changes: Vec<(Target, ChangeOp)> = Vec::with_capacity(ops.len());
-        let mut refused = Vec::new();
-        for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
-            match named[0] {
-                Ok(target) => changes.push((target, *op)),
-                Err(reason) if strict => {
-                    return Err(crate::address::strict_refusal("the request", index, reason))
-                }
-                Err(reason) => refused.push(crate::address::refused_json(index, reason)),
+    let crate::address::Names {
+        tables: named,
+        ignored,
+        at,
+    } = merged.name_targets(state)?;
+    let mut changes: Vec<(NamedTarget, ChangeOp)> = Vec::with_capacity(ops.len());
+    let mut refused = Vec::new();
+    for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
+        match named[0] {
+            Ok(target) => changes.push((target, *op)),
+            Err(reason) if strict => {
+                return Err(crate::address::strict_refusal("the request", index, reason))
             }
+            Err(reason) => refused.push(crate::address::refused_json(index, reason)),
         }
-        let done = ChangesDone {
-            accepted: changes.len(),
-            refused,
-            ignored,
-        };
-        if changes.is_empty() {
-            return Ok(Ok(done));
-        }
-        applied = changes.iter().map(|(_, op)| *op).collect();
-        Ok(state.engine.accept_changes_at(changes, at).map(|()| done))
-    })?;
-    answered.map_err(|e| map_change_batch_error(&applied, e))
+    }
+    let done = ChangesDone {
+        accepted: changes.len(),
+        refused,
+        ignored,
+    };
+    if changes.is_empty() {
+        return Ok(done);
+    }
+    let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
+    state
+        .engine
+        .accept_changes_at(changes, at)
+        .map(|()| done)
+        .map_err(|e| map_change_batch_error(&applied, e))
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has

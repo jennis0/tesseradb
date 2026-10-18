@@ -17,9 +17,8 @@ pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) wal_pos: u64,
 }
 
-/// The `/control/ingest` idempotency index: batch id -> what was accepted
-/// under it.
-pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
+/// The `/control/ingest` idempotency index: (principal, batch id) -> what was accepted under it.
+pub(in crate::write) type AcceptedBatches = FxHashMap<(String, String), AcceptedBatch>;
 
 /// The descriptor resolver's detached extension state: interned novel descriptors, plus the next
 /// extension id to hand out.
@@ -895,10 +894,11 @@ impl LiveState {
 
     pub(crate) fn accepted_batch(
         &self,
+        principal: &str,
         batch_id: &str,
     ) -> Option<([u8; 32], Vec<mosaica_lifecycle::RowReceipt>)> {
         lock_recover(&self.accepted_batches)
-            .get(batch_id)
+            .get(&(principal.to_owned(), batch_id.to_owned()))
             .map(|held| (held.body_hash, held.receipt.clone()))
     }
 
@@ -942,17 +942,17 @@ impl LiveState {
 
     /// Index one accepted batch, at the position of the record that carries it.
     ///
-    /// The three arguments are [`mosaica_lifecycle::BatchIdentity`]'s three fields plus that
-    /// position.
+    /// The arguments are [`mosaica_lifecycle::BatchIdentity`]'s fields plus that position.
     pub(in crate::write) fn record_accepted_batch(
         &self,
+        principal: String,
         batch_id: String,
         body_hash: [u8; 32],
         receipt: Vec<mosaica_lifecycle::RowReceipt>,
         wal_pos: u64,
     ) {
         lock_recover(&self.accepted_batches).insert(
-            batch_id,
+            (principal, batch_id),
             AcceptedBatch {
                 body_hash,
                 receipt,

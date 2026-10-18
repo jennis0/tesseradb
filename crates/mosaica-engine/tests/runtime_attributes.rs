@@ -1216,6 +1216,7 @@ fn ranked(engine: &Engine, batch: &str, rows: &[(Option<u64>, f32)]) {
         .collect();
     engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: [3; 32],
             view: Some("s0".to_string()),

@@ -203,6 +203,106 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
+/// A service principal named `name` holding `write`, and an API key for it.
+fn writer(server: &TestServer, name: &str) -> String {
+    use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
+    let catalogue = &server.state.catalogue;
+    catalogue
+        .create_principal(name, PrincipalKind::Service)
+        .unwrap();
+    catalogue
+        .grant_permission(Grantee::Principal(name), Permission::Write)
+        .unwrap();
+    catalogue.create_api_key(name, None, None).unwrap().0.key
+}
+
+/// Post one ingest batch as the holder of `key`, and return its status and answer.
+async fn post_as(
+    server: &TestServer,
+    key: &str,
+    batch_id: &str,
+    body: Vec<u8>,
+) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(key)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// A batch id is its sender's: two principals sending one id and one body each have their write
+/// applied and are answered their own items, and each one's retry, before a restart and after it,
+/// is answered its own receipt.
+#[tokio::test]
+async fn two_principals_sending_one_batch_id_each_write_and_each_replay_their_own() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let (ann, bob) = (writer(&server, "ann"), writer(&server, "bob"));
+    let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
+
+    let ((a_status, a), (b_status, b)) = tokio::join!(
+        post_as(&server, &ann, "shared", body.clone()),
+        post_as(&server, &bob, "shared", body.clone()),
+    );
+    assert_eq!((a_status, b_status), (200, 200), "{a} {b}");
+    for answer in [&a, &b] {
+        assert_eq!(answer["created"], 2, "{answer}");
+        assert!(answer.get("replayed").is_none(), "{answer}");
+    }
+    let (ann_ids, bob_ids) = (ingested_ids(&a), ingested_ids(&b));
+    assert!(
+        ann_ids.iter().all(|id| !bob_ids.contains(id)),
+        "each is answered its own items: {ann_ids:?} {bob_ids:?}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(N_ITEMS + 4),
+        "both writes are applied"
+    );
+
+    let (status, again) = post_as(&server, &ann, "shared", body.clone()).await;
+    assert_eq!(
+        (status, again["replayed"].as_bool()),
+        (200, Some(true)),
+        "{again}"
+    );
+    assert_eq!(ingested_ids(&again), ann_ids);
+    let different = build_ingest_batch_labels(&[&["1"]]);
+    assert_eq!(
+        post_as(&server, &bob, "shared", different.clone()).await.0,
+        409
+    );
+
+    // The catalogue is not kept across this restart, so each principal is created again under
+    // its name.
+    let server = restart(server, &tmp).await;
+    let (ann, bob) = (writer(&server, "ann"), writer(&server, "bob"));
+    for (key, ids) in [(&ann, &ann_ids), (&bob, &bob_ids)] {
+        let (status, again) = post_as(&server, key, "shared", body.clone()).await;
+        assert_eq!(
+            (status, again["replayed"].as_bool()),
+            (200, Some(true)),
+            "{again}"
+        );
+        assert_eq!(&ingested_ids(&again), ids);
+    }
+    assert_eq!(post_as(&server, &ann, "shared", different).await.0, 409);
+    let carol = writer(&server, "carol");
+    let (status, fresh) = post_as(&server, &carol, "shared", body).await;
+    assert_eq!(
+        (status, fresh["created"].as_u64()),
+        (200, Some(2)),
+        "{fresh}"
+    );
+}
+
 /// A second row carrying the `id` of an item ingested at the running service edits that item: it
 /// keeps its `mosaica_id` and takes one new entity id.
 #[tokio::test]
@@ -448,6 +548,7 @@ fn concurrent_ingest_and_change_both_survive() {
         barrier_b.wait();
         let receipt = engine_b
             .ingest(mosaica_engine::IngestRequest {
+                principal: String::new(),
                 batch_id: "concurrent-batch".to_string(),
                 body_hash: [7u8; 32],
                 view: Some("s0".to_string()),

@@ -154,9 +154,9 @@ use mosaica_store::declaration::{
 pub use mosaica_store::manifest::VocabularyKind;
 pub use mosaica_store::vocabulary::VocabularyMinter;
 use mosaica_types::layer::{
-    ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
-    LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
-    ShapeDeclaration, ShapeKind, SuppliedContent, SuppliedRequirement,
+    require_gate, ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Gate, Hierarchy,
+    HierarchyKind, LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource,
+    ServingLayout, ShapeDeclaration, ShapeKind, SuppliedContent, SuppliedRequirement,
 };
 
 use crate::error::{BuildError, Result};
@@ -5052,19 +5052,11 @@ fn compile_layers(
         let membership = compile_membership(block, attributes)?;
 
         let hierarchy = compile_hierarchy(block)?;
-        let visibility = match block.visibility.as_deref() {
-            Some(label) => Some(label.to_string()),
-            None => {
-                return Err(declaration_error(format!(
-                    "layer '{}': `visibility` is required and has no default \
-                     (configuration.md §6). Write the access label a viewer must hold to know this \
-                     layer exists at all, or `public` to say every principal reaches it. There is \
-                     no default because the value an absent line would supply is `public` — the \
-                     widest one there is",
-                    block.name
-                )));
-            }
-        };
+        let visibility = Some(
+            require_gate(&block.name, Gate::Visibility, block.visibility.as_deref())
+                .map_err(|e| declaration_error(e.to_string()))?
+                .to_string(),
+        );
 
         let artifact = block.artifact_visibility.as_ref().ok_or_else(|| {
             declaration_error(format!(
@@ -5108,7 +5100,12 @@ fn compile_layers(
         };
 
         let require_member_visibility = compile_criterion(
-            block.require_member_visibility.as_ref(),
+            require_gate(
+                &block.name,
+                Gate::RequireMemberVisibility,
+                block.require_member_visibility.as_ref(),
+            )
+            .map_err(|e| declaration_error(e.to_string()))?,
             &block.name,
             "layer",
         )?;
@@ -5886,20 +5883,10 @@ fn compile_content(block: &LayerBlock) -> Result<ContentDeclaration> {
 /// it ⊘ breaks rollup, and it is refused on predicate membership, whose declared size is not a
 /// number to divide by.
 fn compile_criterion(
-    value: Option<&toml::Value>,
+    value: &toml::Value,
     object: &str,
     what: &str,
 ) -> Result<Option<ExistenceCriterion>> {
-    let Some(value) = value else {
-        return Err(declaration_error(format!(
-            "{what} '{object}': `require_member_visibility` is required and has no default \
-             (configuration.md §6). It says how much of this object's membership the viewer must \
-             already see: \"all\", \"any\", `{{ count = n }}`, `{{ fraction = p }}`, or \"none\" for \
-             no such rule. There is no default because the value an absent line would supply is \
-             \"none\", which serves the existence and count of every artifact down to a single \
-             member"
-        )));
-    };
     match value {
         toml::Value::String(word) => match word.as_str() {
             "none" => Ok(None),

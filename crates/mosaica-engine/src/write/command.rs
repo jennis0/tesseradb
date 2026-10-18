@@ -19,7 +19,6 @@ use mosaica_lifecycle::command::{
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use mosaica_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
-use mosaica_types::Target;
 
 use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
@@ -176,6 +175,8 @@ pub(crate) struct IngestSubmission {
     pub(crate) slots: Vec<mosaica_lifecycle::Slot>,
     /// The unique values the created rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
+    /// The caller that sent the batch, which a retry is matched by beside `batch_id`.
+    pub(crate) principal: String,
     pub(crate) batch_id: String,
     pub(crate) body_hash: [u8; 32],
     /// The artifacts the written rows name in a column named for a layer. Resolved and grown
@@ -198,8 +199,8 @@ pub(crate) struct SubmittedEdit {
 }
 
 pub(crate) enum Command {
-    /// An accepted `/control/ingest` batch, resolved by its handler. `batch_id` and `body_hash`
-    /// are the idempotency key. The answer is what each row of the request became.
+    /// An accepted `/control/ingest` batch, resolved by its handler. `principal`, `batch_id` and
+    /// `body_hash` are the idempotency key. The answer is what each row of the request became.
     Ingest {
         submission: IngestSubmission,
         reply: Reply<Ingested>,
@@ -207,7 +208,7 @@ pub(crate) enum Command {
     /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
     /// ([`Command::is_never_shed`]).
     Changes {
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
         stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
@@ -327,7 +328,13 @@ mod tests {
             );
             let cmd = Command::Changes {
                 changes: vec![(
-                    Target::Item(mosaica_types::ShardId::ZERO, mosaica_types::EntityId::new(1)),
+                    crate::edited::NamedTarget {
+                        target: mosaica_types::Target::Item(
+                            mosaica_types::ShardId::ZERO,
+                            mosaica_types::EntityId::new(1),
+                        ),
+                        item: None,
+                    },
                     op,
                 )],
                 stamp: Default::default(),
@@ -346,6 +353,7 @@ mod tests {
                 edits: Vec::new(),
                 slots: Vec::new(),
                 keys: Vec::new(),
+                principal: String::new(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
                 artifacts: Default::default(),

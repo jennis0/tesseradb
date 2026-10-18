@@ -561,6 +561,7 @@ fn a_quoted_term_with_spaces_at_its_ends_is_refused_as_a_points_label() {
         let mut body_hash = [0u8; 32];
         body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
         let outcome = engine.ingest(IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash,
             view: Some("s0".to_string()),
@@ -666,6 +667,7 @@ fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<M
         .collect();
     engine
         .ingest(IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash,
             view: Some("s0".to_string()),
@@ -705,6 +707,7 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
         ],
     );
     let refused = engine.ingest(IngestRequest {
+        principal: String::new(),
         batch_id: "refused".to_string(),
         body_hash: [1u8; 32],
         view: Some("s0".to_string()),

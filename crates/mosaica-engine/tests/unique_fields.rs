@@ -917,7 +917,7 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
 
     let engine = restart(&fx, engine);
     assert!(
-        engine.accepted_batch("join").is_none(),
+        engine.accepted_batch("", "join").is_none(),
         "the log rotated past the batches, so nothing but the stored value answers"
     );
     assert_eq!(
@@ -1347,6 +1347,7 @@ fn fill(
         .collect();
     engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: hash_of(batch),
             view: None,
@@ -1606,6 +1607,7 @@ fn giving_built(
 ) -> Result<Vec<ItemAt>, AcceptError> {
     let r = row(engine, batch, b"0", doi, gid, 1_000 + (gid % 1_000) as i64);
     let receipt = engine.ingest(mosaica_engine::IngestRequest {
+        principal: String::new(),
         batch_id: batch.to_string(),
         body_hash: hash_of(batch),
         view: Some("s0".to_string()),

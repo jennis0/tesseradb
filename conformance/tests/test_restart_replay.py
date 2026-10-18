@@ -104,8 +104,8 @@ behavioural checks, both HTTP-only:
    was observed right after the original ingest. Exact numeric equality across a from-scratch
    restart is therefore real (if partial) evidence the record survived, not just "no crash".
 2. **New in this fix:** re-posting the *same* batch id with a **different** body after restart
-   must return `409 Conflict`, not `200`. `control.rs`'s idempotency check is keyed on
-   `(batch_id, body_hash)` (`session.rs`'s `accepted_batches` map); a `409` is only possible if the
+   must return `409 Conflict`, not `200`. The server's idempotency index is keyed on the caller
+   and its batch id and holds the body hash; a `409` is only possible if the
    *original* body's hash specifically was recovered by replay, not merely a high-water checkpoint
    number. This closes exactly the gap the review named: an implementation that persists
    `entity_id_high_water` as an independent durable counter but drops the itemised WAL ingest

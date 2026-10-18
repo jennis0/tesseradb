@@ -1746,9 +1746,11 @@ paths:
         would take a shard's ids past their end. Each batch sent beside it is taken or refused on
         its own.
 
-        **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
-        id answer `200` with `replayed: true`, the first acceptance's `mosaica_ids` and `refused`,
-        and change nothing, whatever `strict` says; different bytes under a used id are `409`.
+        **Retries.** `x-mosaica-batch-id` names the batch among its caller's: another principal's
+        batch under the same id is another batch, written and answered on its own. The same bytes
+        sent again by the same caller under the same id answer `200` with `replayed: true`, the
+        first acceptance's `mosaica_ids` and `refused`, and change nothing, whatever `strict` says;
+        different bytes under an id the caller has used are `409`.
 
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
         `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
@@ -3838,7 +3840,7 @@ components:
       name: x-mosaica-batch-id
       in: header
       required: true
-      description: The batch's identity, chosen by the caller, for retries. The same body sent again under the same id is answered as it was and changes nothing; a different body under a used id is `409`. Missing, or not UTF-8, is `422`.
+      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. Missing, or not UTF-8, is `422`.
       schema:
         type: string
     WriteView:
@@ -6117,7 +6119,7 @@ components:
           description: Memberships the batch's layer columns added, to artifacts it created and to held ones alike. A row whose one change is placing its item in an artifact changes the artifact, not the item, and is counted in `unchanged`. `0` on a replay.
         replayed:
           const: true
-          description: Present only when this body was already accepted under this batch id. Nothing was written.
+          description: Present only when this body was already accepted from this caller under this batch id. Nothing was written.
         publication:
           type: integer
           minimum: 0
@@ -6645,7 +6647,7 @@ components:
     LayerDeclaration:
       type: object
       additionalProperties: false
-      required: [name, views, membership, artifact_visibility, hierarchy]
+      required: [name, views, membership, visibility, artifact_visibility, require_member_visibility, hierarchy]
       description: A corpus declaration's `[[layer]]` block.
       properties:
         name:
@@ -6675,7 +6677,7 @@ components:
           description: "`closed` refuses a key no artifact holds when a batch names it; `open` creates the artifact."
         visibility:
           type: [string, "null"]
-          description: The access label, an access expression, a viewer must satisfy to know the layer exists. Absent or `null`, every viewer may.
+          description: The access label, an access expression, a viewer must satisfy to know the layer exists. `public` or `null`, every viewer may.
         artifact_visibility:
           type: object
           additionalProperties: false
@@ -6697,7 +6699,7 @@ components:
                     label:
                       type: string
         require_member_visibility:
-          description: "How many of an artifact's members a viewer must see for the artifact to exist for them: `{\"count\": n}`, or `{\"fraction\": p}` of its declared members with `p` in (0, 1]. Absent or `null` is no such rule. A fraction is refused where the membership is `spatial` or an attribute."
+          description: "How many of an artifact's members a viewer must see for the artifact to exist for them: `{\"count\": n}`, or `{\"fraction\": p}` of its declared members with `p` in (0, 1]. `null` is no such rule. A fraction is refused where the membership is `spatial` or an attribute."
           oneOf:
             - type: "null"
             - type: object

@@ -28,11 +28,11 @@ use homes::Home;
 use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
 use mosaica_engine::{
     AcceptError, AddressTable, Engine, IngestReceipt, IngestRequest, ItemOut, NamedItems,
-    ScalarOut, Session,
+    NamedTargets, ScalarOut, Session,
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
-use mosaica_lifecycle::{ExecError, IngestRow};
+use mosaica_lifecycle::IngestRow;
 use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
@@ -48,6 +48,7 @@ fn ingest(
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
     engine.ingest(IngestRequest {
+        principal: String::new(),
         batch_id: batch.to_string(),
         body_hash,
         view: Some(view.to_string()),
@@ -1135,12 +1136,24 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
 }
 
 /// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
-fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedItems) {
-    let named = name_one(engine, tid);
-    let Ok(item) = named.verdicts[0] else {
+fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedTargets) {
+    let named = engine
+        .name_targets(&AddressTable {
+            rows: 1,
+            mosaica_id: Some(vec![Some(tid)]),
+            columns: Vec::new(),
+        })
+        .unwrap();
+    let Ok(target) = named.verdicts[0] else {
         panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
     };
-    (item.entity, named)
+    (target.target().entity(), named)
+}
+
+/// Apply `op` to the item `named` names, as resolved in the generation it was named in.
+fn change_named(engine: &Engine, named: &NamedTargets, op: ChangeOp) -> Result<(), AcceptError> {
+    let target = named.verdicts[0].clone().expect("the row names an item");
+    engine.accept_changes_at(vec![(target, op)], named.at)
 }
 
 /// An item in `s0` alone, as a new item will be, edited once and flushed, so the entity it holds
@@ -1154,15 +1167,22 @@ fn edited_item(engine: &Engine) -> MosaicaId {
     x
 }
 
-/// **A deletion resolved before its item moved and its entity was freed does not reach the item
-/// that took the entity.** The deletion is named; an edit moves the item, a fold frees the entity
-/// it named, and a new item takes it. Submitted with the generation it was named in, the deletion
-/// is refused as stale, and both items are served.
+/// Whether `tid` is served in `s0` to the principal `credential` authorises.
+fn is_served(engine: &Engine, credential: &[u8], tid: MosaicaId) -> bool {
+    let session = engine.authorise(credential).unwrap();
+    served(engine, &session, "s0", None).contains(&tid.raw())
+}
+
+/// **A deletion resolved before its item moved and its entity was freed reaches the item where it
+/// is now, and not the item that took the entity.** The deletion is named; an edit moves the item,
+/// a fold frees the entity it named, and a new item takes it. Submitted with the generation it was
+/// named in, the deletion is accepted: the item is gone and the new item is served, before and
+/// after a restart.
 #[test]
-fn a_deletion_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() {
+fn a_deletion_resolved_before_its_entity_was_freed_reaches_the_item_and_not_the_new_holder() {
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
-    let engine = open(tmp.path(), &root);
+    let mut engine = open(tmp.path(), &root);
     engine.set_merge_for_test(false);
     let x = edited_item(&engine);
     let (resolved, named) = named(&engine, x);
@@ -1179,33 +1199,34 @@ fn a_deletion_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at);
-    assert!(
-        matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
-        "the deletion is refused as stale: {answered:?}"
-    );
-    publish_buffered(&engine);
-    let subset = engine.authorise(&subset_credential()).unwrap();
-    let full = engine.authorise(&full_coverage_credential()).unwrap();
-    assert!(
-        served(&engine, &subset, "s0", None).contains(&z.raw()),
-        "z is served"
-    );
-    assert!(
-        served(&engine, &full, "s0", None).contains(&x.raw()),
-        "x is served"
-    );
+    change_named(&engine, &named, ChangeOp::Delete).expect("the deletion is accepted");
+    let check = |engine: &Engine, after: &str| {
+        assert!(
+            is_served(engine, &subset_credential(), z),
+            "z is served, after {after}"
+        );
+        assert!(
+            !is_served(engine, &full_coverage_credential(), x),
+            "x is deleted, after {after}"
+        );
+        names_nothing(engine, x, after);
+    };
+    check(&engine, "the deletion");
+    drop(engine);
+    engine = open(tmp.path(), &root);
+    check(&engine, "a restart");
 }
 
 /// **A suppression resolved before its item was deleted does not reach the item that took the
 /// entity.** No edit follows the suppression's naming: another request deletes the item, a fold
 /// frees its entity, and a new item takes it. Submitted with the generation it was named in, the
-/// suppression is refused as stale, and the new item is served.
+/// suppression is accepted and reaches nothing, since its item is gone, and the new item is
+/// served, before and after a restart.
 #[test]
 fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_holder() {
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
-    let engine = open(tmp.path(), &root);
+    let mut engine = open(tmp.path(), &root);
     engine.set_merge_for_test(false);
     let x = edited_item(&engine);
     let (resolved, named) = named(&engine, x);
@@ -1221,16 +1242,70 @@ fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_hol
     );
     publish_buffered(&engine);
 
-    let answered = engine.accept_changes_at(vec![(item(resolved), ChangeOp::Suppress)], named.at);
+    change_named(&engine, &named, ChangeOp::Suppress).expect("the suppression is accepted");
+    assert!(is_served(&engine, &subset_credential(), z), "z is served");
+    drop(engine);
+    engine = open(tmp.path(), &root);
     assert!(
-        matches!(answered, Err(AcceptError::Exec(ExecError::Stale))),
-        "the suppression is refused as stale: {answered:?}"
+        is_served(&engine, &subset_credential(), z),
+        "z is served after a restart"
     );
-    let subset = engine.authorise(&subset_credential()).unwrap();
-    assert!(
-        served(&engine, &subset, "s0", None).contains(&z.raw()),
-        "z is served"
+}
+
+/// **A suppression is accepted however often its item moves while it is on its way.** The
+/// suppression is named; then, three times, an edit moves the item and a fold frees the entity it
+/// left, so the names the suppression carries are stale each time, and a new item takes the
+/// entity it named. Submitted with the generation it was named in, the suppression is accepted
+/// and in force for the next request: the item is served to no one and the new item is served,
+/// before and after a restart.
+#[test]
+fn a_suppression_whose_item_keeps_moving_is_accepted_and_in_force_where_the_item_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let mut engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    let x = edited_item(&engine);
+    let (resolved, named) = named(&engine, x);
+
+    for round in 0..3 {
+        send(
+            &engine,
+            &format!("x{}", round + 2),
+            "s0",
+            vec![rescore(x, 502 + round)],
+        );
+        publish_buffered(&engine);
+        fold(&engine);
+        publish_buffered(&engine);
+    }
+    let z = send(&engine, "z", "s0", vec![create("1", (901.0, 902.0))])[0];
+    assert_eq!(
+        entity_of(&engine, z),
+        resolved,
+        "the new item takes the entity the suppression named"
     );
+    publish_buffered(&engine);
+
+    change_named(&engine, &named, ChangeOp::Suppress).expect("the suppression is accepted");
+    let check = |engine: &Engine, after: &str| {
+        assert!(
+            !is_served(engine, &full_coverage_credential(), x),
+            "x is suppressed, after {after}"
+        );
+        let full = engine.authorise(&full_coverage_credential()).unwrap();
+        assert!(
+            engine.item(&full, x).unwrap().is_none(),
+            "x has no card, after {after}"
+        );
+        assert!(
+            is_served(engine, &subset_credential(), z),
+            "z is served, after {after}"
+        );
+    };
+    check(&engine, "the suppression");
+    drop(engine);
+    engine = open(tmp.path(), &root);
+    check(&engine, "a restart");
 }
 
 /// **A deletion resolved before an edit moved its item reaches the item where it is now.**
@@ -1246,13 +1321,10 @@ fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
     send(&engine, "x2", "s0", vec![rescore(x, 502)]);
     publish_buffered(&engine);
     assert_ne!(entity_of(&engine, x), resolved, "the edit moved x");
-    engine
-        .accept_changes_at(vec![(item(resolved), ChangeOp::Delete)], named.at)
-        .unwrap();
+    change_named(&engine, &named, ChangeOp::Delete).unwrap();
     publish_buffered(&engine);
-    let full = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(
-        !served(&engine, &full, "s0", None).contains(&x.raw()),
+        !is_served(&engine, &full_coverage_credential(), x),
         "x is deleted"
     );
     names_nothing(&engine, x, "the deletion");

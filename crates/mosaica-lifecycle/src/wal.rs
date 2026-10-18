@@ -241,9 +241,10 @@ pub enum WalRecord {
         key: String,
         code: u32,
     },
-    /// An accepted `/control/ingest` batch. `body_hash` is the SHA-256 of the raw request body
-    /// (idempotency key material — a retried `batch_id` must match it, or the request is a
-    /// contract violation, never a silent overwrite).
+    /// An accepted `/control/ingest` batch. A retry is matched by `principal`, the caller that
+    /// sent the batch, and `batch_id`, the id it chose: two callers' batches under one id are two
+    /// batches. `body_hash` is the SHA-256 of the raw request body, which a retry must match, or
+    /// the request is a contract violation, never a silent overwrite.
     ///
     /// `rows` holds the rows the batch wrote: each item it created and each view it added an
     /// item to in place. `edits` holds each item the batch moved to a new entity, with everything
@@ -251,6 +252,7 @@ pub enum WalRecord {
     /// row of the request, in request order, including the rows that changed nothing and wrote no
     /// row, so a replay of the batch id answers the `mosaica_id`s the first acceptance did.
     IngestBatch {
+        principal: String,
         batch_id: String,
         body_hash: [u8; 32],
         rows: Vec<WalRow>,
@@ -560,11 +562,11 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
     }
 }
 
-/// What a record carries of the request that produced it: the id the client chose, the hash of the
-/// bytes it sent, and what the request did to each of its rows.
-///
+/// What a record carries of the request that produced it: the caller that sent it, the id it
+/// chose, the hash of the bytes it sent, and what the request did to each of its rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchIdentity<'a> {
+    pub principal: &'a str,
     pub batch_id: &'a str,
     pub body_hash: [u8; 32],
     pub receipt: &'a [RowReceipt],
@@ -632,11 +634,13 @@ pub struct WalEdit {
 pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
     match record {
         WalRecord::IngestBatch {
+            principal,
             batch_id,
             body_hash,
             receipt,
             ..
         } => Some(BatchIdentity {
+            principal,
             batch_id,
             body_hash: *body_hash,
             receipt,
@@ -1113,7 +1117,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // **39**: a content's rank in a growth or a fill is its position in the artifact's content row,
 // which a withdrawn content keeps, and a content fill carries the generating set the content
 // starts with. A log at 38 is refused.
-const WAL_VERSION: u16 = 39;
+// **40**: an `IngestBatch` carries the principal that sent it, which a retry is matched by beside
+// its batch id. A log at 39 is refused.
+const WAL_VERSION: u16 = 40;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1511,6 +1517,7 @@ fn ingest_batch_tag() -> u32 {
     static TAG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *TAG.get_or_init(|| {
         let empty = WalRecord::IngestBatch {
+            principal: String::new(),
             batch_id: String::new(),
             body_hash: [0; 32],
             rows: Vec::new(),
@@ -2565,6 +2572,7 @@ mod tests {
         let batch = WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
+            principal: String::new(),
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
             rows: vec![WalRow {
@@ -2893,6 +2901,7 @@ mod tests {
                 }),
             },
             WalRecord::IngestBatch {
+                principal: String::new(),
                 batch_id: "sentiment-0".into(),
                 body_hash: [9u8; 32],
                 rows: Vec::new(),
@@ -3069,6 +3078,7 @@ mod tests {
             scoped: Vec::new(),
         };
         let edit = |rows: u32| WalRecord::IngestBatch {
+            principal: String::new(),
             batch_id: "b".into(),
             body_hash: [0; 32],
             rows: Vec::new(),

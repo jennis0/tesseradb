@@ -7,7 +7,7 @@ use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
 use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId};
 
-use crate::edited::Stamp;
+use crate::edited::{NamedTarget, Stamp};
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
 use crate::Generation;
@@ -80,6 +80,17 @@ impl Engine {
                 (Err(_), None) => Err(resolve::Refusal::UnknownMosaicaId { row }),
             };
         }
+        let targets: Vec<Target> = verdicts
+            .iter()
+            .filter_map(|verdict| verdict.as_ref().ok().copied())
+            .collect();
+        let mut named_targets = NamedTarget::all(&self.identity_key, &generation, &targets)
+            .map_err(crate::EngineError::Store)?
+            .into_iter();
+        let verdicts = verdicts
+            .into_iter()
+            .map(|verdict| verdict.map(|_| named_targets.next().expect("one per target")))
+            .collect();
         Ok(NamedTargets {
             verdicts,
             ignored: named.ignored,
@@ -92,7 +103,7 @@ impl Engine {
 /// columns it ignored; and the generation it resolved them against.
 #[derive(Debug, Clone)]
 pub struct NamedTargets {
-    pub verdicts: Vec<std::result::Result<Target, resolve::Refusal>>,
+    pub verdicts: Vec<std::result::Result<NamedTarget, resolve::Refusal>>,
     pub ignored: Vec<String>,
     pub at: Stamp,
 }
@@ -401,12 +412,13 @@ impl Engine {
         flushed_terms_of(self.generation().only_shard(), entity)
     }
 
-    /// The body hash a batch id was accepted with, if it was: a batch replayed with the same
-    /// bytes is reported as a replay. The executor decides the same question again, race-free.
-    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
+    /// The body hash `principal`'s batch id was accepted with, if it was: a batch replayed with
+    /// the same bytes is reported as a replay. The executor decides the same question again,
+    /// race-free.
+    pub fn accepted_batch(&self, principal: &str, batch_id: &str) -> Option<[u8; 32]> {
         self.write
             .live()
-            .accepted_batch(batch_id)
+            .accepted_batch(principal, batch_id)
             .map(|(hash, _)| hash)
     }
 
@@ -478,7 +490,7 @@ impl Engine {
         &self,
         changes: Vec<(Target, ChangeOp)>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.accept_changes_at(changes, self.stamp_now())
+        self.submit_changes(changes)?.wait()
     }
 
     /// Apply one `/control/changes` request whose entities were resolved at `at`, and wait for its
@@ -487,7 +499,7 @@ impl Engine {
     /// applied all the same. See `ExecError::Wal`.
     pub fn accept_changes_at(
         &self,
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(NamedTarget, ChangeOp)>,
         at: Stamp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
         self.submit_changes_at(changes, at)?.wait()
@@ -498,29 +510,37 @@ impl Engine {
         &self,
         changes: Vec<(Target, ChangeOp)>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        self.submit_changes_at(changes, self.stamp_now())
+        let generation = self.generation.load_full();
+        let (targets, ops): (Vec<Target>, Vec<ChangeOp>) = changes.into_iter().unzip();
+        let named = NamedTarget::all(&self.identity_key, &generation, &targets).map_err(|e| {
+            crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::Store {
+                detail: e.to_string(),
+            })
+        })?;
+        self.submit_changes_at(named.into_iter().zip(ops).collect(), Stamp::of(&generation))
     }
 
     /// Enqueue one `/control/changes` request whose entities were resolved at `at`, without
     /// waiting, so requests from several callers reach the deny lane together and share one
-    /// fsync. A change naming an entity an edit has moved an item away from since `at` also
-    /// reaches the item where it is now; a request stale by [`Stamp`]'s rule is answered with
-    /// `ExecError::Stale`. Read `PendingChange::wait` before treating either half's `Err` as
-    /// "nothing happened".
+    /// fsync. A change to an item reaches the item where it is when the change applies, however
+    /// edits and folds have moved it since `at`, and none where the item is gone. Read
+    /// `PendingChange::wait` before treating either half's `Err` as "nothing happened".
     ///
     /// A deletion of a layer's own entity is refused, and the request with it, before anything
     /// is applied: a layer is removed by dropping it.
     pub fn submit_changes_at(
         &self,
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(NamedTarget, ChangeOp)>,
         at: Stamp,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        let layer_deleted = changes.iter().find_map(|(target, op)| match (target, op) {
-            (Target::Artifact(space, entity), ChangeOp::Delete) => {
-                self.write.live().layer_of_own_entity(*space, *entity)
-            }
-            _ => None,
-        });
+        let layer_deleted = changes
+            .iter()
+            .find_map(|(named, op)| match (named.target(), op) {
+                (Target::Artifact(space, entity), ChangeOp::Delete) => {
+                    self.write.live().layer_of_own_entity(space, entity)
+                }
+                _ => None,
+            });
         if let Some(name) = layer_deleted {
             return Err(crate::write::AcceptError::Exec(
                 mosaica_lifecycle::ExecError::LayerRefused {
