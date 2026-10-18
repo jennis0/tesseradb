@@ -1065,6 +1065,21 @@ fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
 /// `MANIFEST.json` at the second; the view serves the same at every step and after each restart.
 #[test]
 fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
+    scoped_column_through_each_compaction(true);
+}
+
+/// As above with no restart between the compactions: the second shard's compaction reads the
+/// family's views from the generation the first one published, and a restart after both serves
+/// the same.
+#[test]
+fn a_scoped_column_serves_through_each_shards_compaction_without_a_restart() {
+    scoped_column_through_each_compaction(false);
+}
+
+/// A group, a group-scoped column of it and a view under it, all declared at a running service,
+/// with one value flushed into shard 1, through the compaction of shard 0 and then shard 1,
+/// restarting after each where `restart`, and after both.
+fn scoped_column_through_each_compaction(restart: bool) {
     let several = two_shards();
     let engine = several.open_writing();
     engine
@@ -1165,10 +1180,17 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
             .collect()
     };
     let k = || vec!["g:k".to_string()];
+    let reopened = |engine: Engine| match restart {
+        true => {
+            drop(engine);
+            let engine = several.open_writing();
+            assert_eq!(in_view(&engine), (1, 1));
+            engine
+        }
+        false => engine,
+    };
     assert_eq!(in_view(&engine), (1, 1));
-    drop(engine);
-    let engine = several.open_writing();
-    assert_eq!(in_view(&engine), (1, 1));
+    let engine = reopened(engine);
 
     compact(&engine, Some(ShardId::ZERO));
     assert_eq!(
@@ -1177,9 +1199,7 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
         "shard 0 holds the column's base now, and shard 1 not the family's"
     );
     assert_eq!(in_view(&engine), (1, 1));
-    drop(engine);
-    let engine = several.open_writing();
-    assert_eq!(in_view(&engine), (1, 1));
+    let engine = reopened(engine);
 
     compact(&engine, Some(shard(1)));
     assert_eq!(
