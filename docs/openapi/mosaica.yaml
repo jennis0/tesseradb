@@ -6645,7 +6645,7 @@ components:
     LayerDeclaration:
       type: object
       additionalProperties: false
-      required: [name, views, membership, artifact_visibility, hierarchy]
+      required: [name, views, membership, visibility, artifact_visibility, require_member_visibility, hierarchy]
       description: A corpus declaration's `[[layer]]` block.
       properties:
         name:
@@ -6675,7 +6675,7 @@ components:
           description: "`closed` refuses a key no artifact holds when a batch names it; `open` creates the artifact."
         visibility:
           type: [string, "null"]
-          description: The access label, an access expression, a viewer must satisfy to know the layer exists. Absent or `null`, every viewer may.
+          description: The access label, an access expression, a viewer must satisfy to know the layer exists. `public` or `null`, every viewer may.
         artifact_visibility:
           type: object
           additionalProperties: false
@@ -6697,7 +6697,7 @@ components:
                     label:
                       type: string
         require_member_visibility:
-          description: "How many of an artifact's members a viewer must see for the artifact to exist for them: `{\"count\": n}`, or `{\"fraction\": p}` of its declared members with `p` in (0, 1]. Absent or `null` is no such rule. A fraction is refused where the membership is `spatial` or an attribute."
+          description: "How many of an artifact's members a viewer must see for the artifact to exist for them: `{\"count\": n}`, or `{\"fraction\": p}` of its declared members with `p` in (0, 1]. `null` is no such rule. A fraction is refused where the membership is `spatial` or an attribute."
           oneOf:
             - type: "null"
             - type: object

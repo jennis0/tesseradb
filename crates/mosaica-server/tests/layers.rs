@@ -143,6 +143,29 @@ async fn an_incoherent_declaration_is_refused() {
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 }
 
+/// A declaration states both gates, as at a build: one that leaves either out is refused and
+/// declares nothing, and one stating them, `null` included, is declared.
+#[tokio::test]
+async fn a_declaration_without_either_gate_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_standard(&tmp).await;
+
+    for gate in ["visibility", "require_member_visibility"] {
+        let mut omitted = declaration("clusters/a", None);
+        omitted.as_object_mut().unwrap().remove(gate);
+        let (status, body) = put_layer(&server, omitted).await;
+        assert_eq!(status, 422, "without `{gate}`: {body}");
+        assert_eq!(body["error"], "contract", "{body}");
+        assert!(meta_layers(&server, &["0"]).await.is_empty());
+    }
+
+    let mut stated = declaration("clusters/a", None);
+    stated["require_member_visibility"] = json!(null);
+    let (status, body) = put_layer(&server, stated).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
+}
+
 /// A drop takes the name out of `/v1/meta`, and the name registers again as a new layer, with an
 /// identifier of its own.
 #[tokio::test]

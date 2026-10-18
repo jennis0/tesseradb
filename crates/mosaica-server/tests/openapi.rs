@@ -3275,7 +3275,9 @@ async fn layers_and_artifacts_match_the_description() {
         "name": NAME,
         "views": ["s0"],
         "membership": "enumerated",
+        "visibility": null,
         "artifact_visibility": { "default": "inherited" },
+        "require_member_visibility": null,
         "hierarchy": { "kind": "flat" },
     });
     assert_valid(&doc, "LayerDeclaration", &declaration);
@@ -3445,7 +3447,9 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         "views": ["s0"],
         "membership": "spatial",
         "shape": { "kind": "bbox" },
+        "visibility": null,
         "artifact_visibility": { "default": "inherited" },
+        "require_member_visibility": null,
         "hierarchy": { "kind": "flat" },
     });
     assert_valid(&doc, "LayerDeclaration", &boxes);
@@ -3486,7 +3490,9 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         "name": "outlines/a",
         "views": ["s0"],
         "membership": "enumerated",
+        "visibility": null,
         "artifact_visibility": { "default": "inherited" },
+        "require_member_visibility": null,
         "hierarchy": { "kind": "flat" },
         "content": { "supplied": [{ "name": "outline", "type": "circle",
                                     "require_member_visibility": "inherited" }] },
@@ -3524,7 +3530,9 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         "name": "topics/a",
         "views": ["s0"],
         "membership": "enumerated",
+        "visibility": null,
         "artifact_visibility": { "default": "inherited" },
+        "require_member_visibility": null,
         "hierarchy": { "kind": "flat" },
         "content": { "supplied": [{ "name": "topic", "type": "text",
                                     "require_member_visibility": "all" }] },

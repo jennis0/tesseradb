@@ -616,7 +616,7 @@ pub struct LevelDeclaration {
 
 /// A caller's complete layer registration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ReadDeclaration")]
 pub struct LayerDeclaration {
     /// The layer's name, unique among registered layers. A dropped layer's name can be registered
     /// again, as a new layer in a new space.
@@ -642,7 +642,6 @@ pub struct LayerDeclaration {
     /// permanent object rather than failing, which is the trade the declaration makes knowingly; the
     /// mitigation is that the number is reported — in the build's own report, and in the 200 that
     /// accepted the batch.
-    #[serde(default)]
     pub value_set: ValueSet,
     /// The access label a viewer must hold to know this layer exists at all, independent of any
     /// member. `None` is the config's `visibility = "public"` — reachable by every principal.
@@ -661,7 +660,6 @@ pub struct LayerDeclaration {
     /// `None` declares *no such rule*, which is a statement rather than an omission.
     pub require_member_visibility: Option<ExistenceCriterion>,
     pub hierarchy: Hierarchy,
-    #[serde(default)]
     pub content: ContentDeclaration,
     // ⊘ **`withdraw_on_member_deletion` on the *layer* is not a field here**, and its absence is
     // the point (`annotation-write-cycle.md` §6.1, decision 0013). It would drop the whole
@@ -671,10 +669,8 @@ pub struct LayerDeclaration {
     // carrying it is refused by name (`ContentDeclaration`'s `Deserialize`).
     /// The layers this one's edges point into. A layer named here needs keys, because an
     /// edge names its target and at publish time the caller has no `mosaica_id` for it.
-    #[serde(default)]
     pub depends_on: Vec<String>,
     /// Empty for a treed or flat layer.
-    #[serde(default)]
     pub levels: Vec<LevelDeclaration>,
     /// The layout pin: serve every level of this layer in the named form, at the build and at
     /// every fold after it. `None` is the automatic pick: a column for a layer with stored
@@ -684,7 +680,6 @@ pub struct LayerDeclaration {
     /// Defaults to `None`: both forms compute the same quantities from inside the viewer's visible
     /// set and no request or response names one, so a declaration that omits it says nothing about
     /// access. A fold never overturns a pin; it records the observations beside it.
-    #[serde(default)]
     pub layout: Option<ServingLayout>,
     /// **What kind of shape a `membership = "spatial"` layer's artifacts carry.**
     ///
@@ -695,7 +690,6 @@ pub struct LayerDeclaration {
     /// **`#[serde(default)]` on [`LayerDeclaration::layout`]'s argument, and it is not a
     /// disclosure control.** The membership is `spatial` either way; what this adds is the shape,
     /// and a layer without it serves nothing rather than serving something wider.
-    #[serde(default)]
     pub shape: Option<ShapeDeclaration>,
     /// **Which artifact set this layer carries over the views it names** (`views.md` §3.5,
     /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)):
@@ -708,8 +702,91 @@ pub struct LayerDeclaration {
     /// on every view. `#[serde(default)]` is entity scope, which is a complete statement and not
     /// an unfilled one: it says *one set, every view*, which is what a layer that mentions no
     /// group means.
-    #[serde(default)]
     pub scope: LayerScope,
+}
+
+/// A layer's two gates. A declaration states both, at a build and at a running service alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Visibility,
+    RequireMemberVisibility,
+}
+
+/// The value `layer` states for `gate`, or the refusal of a declaration that states none. The
+/// build and [`LayerDeclaration`]'s `Deserialize` both call it.
+pub fn require_gate<T>(layer: &str, gate: Gate, value: Option<T>) -> Result<T, DeclarationError> {
+    value.ok_or_else(|| DeclarationError::Undeclared {
+        layer: layer.to_string(),
+        gate,
+    })
+}
+
+/// [`LayerDeclaration`] as read, where a gate absent from the text is told apart from one written
+/// as `null`. A positional encoding writes every field, so it reads the bytes the derived form
+/// would.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadDeclaration {
+    name: String,
+    title: Option<String>,
+    views: Vec<String>,
+    membership: MembershipSource,
+    #[serde(default)]
+    value_set: ValueSet,
+    #[serde(default, deserialize_with = "stated")]
+    visibility: Option<Option<String>>,
+    artifact_visibility: ArtifactVisibility,
+    #[serde(default, deserialize_with = "stated")]
+    require_member_visibility: Option<Option<ExistenceCriterion>>,
+    hierarchy: Hierarchy,
+    #[serde(default)]
+    content: ContentDeclaration,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    levels: Vec<LevelDeclaration>,
+    #[serde(default)]
+    layout: Option<ServingLayout>,
+    #[serde(default)]
+    shape: Option<ShapeDeclaration>,
+    #[serde(default)]
+    scope: LayerScope,
+}
+
+fn stated<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+impl TryFrom<ReadDeclaration> for LayerDeclaration {
+    type Error = DeclarationError;
+
+    fn try_from(read: ReadDeclaration) -> Result<Self, DeclarationError> {
+        Ok(LayerDeclaration {
+            visibility: require_gate(&read.name, Gate::Visibility, read.visibility)?,
+            require_member_visibility: require_gate(
+                &read.name,
+                Gate::RequireMemberVisibility,
+                read.require_member_visibility,
+            )?,
+            name: read.name,
+            title: read.title,
+            views: read.views,
+            membership: read.membership,
+            value_set: read.value_set,
+            artifact_visibility: read.artifact_visibility,
+            hierarchy: read.hierarchy,
+            content: read.content,
+            depends_on: read.depends_on,
+            levels: read.levels,
+            layout: read.layout,
+            shape: read.shape,
+            scope: read.scope,
+        })
+    }
 }
 
 /// What a layer's artifacts are per (`views.md` §3.5).
@@ -1177,6 +1254,11 @@ pub enum DeclarationError {
     /// A layer's `visibility`, `artifact_visibility.default` or `artifact_visibility.field` is not
     /// a word that can be read. Carries the refusal.
     Label(String),
+    /// A layer that does not state one of its two gates.
+    Undeclared {
+        layer: String,
+        gate: Gate,
+    },
     /// A layer naming itself in `depends_on`.
     SelfDependency,
     /// A layer named `all`, which a viewport request's `layers` field reserves for every layer the
@@ -1245,6 +1327,23 @@ impl std::fmt::Display for DeclarationError {
                  hull, a membership shape and an authored shape content"
             ),
             DeclarationError::Label(detail) => write!(f, "{detail}"),
+            DeclarationError::Undeclared {
+                layer,
+                gate: Gate::Visibility,
+            } => write!(
+                f,
+                "layer '{layer}': `visibility` is required and has no default; write the access \
+                 label a viewer must hold to know the layer exists, or `public` for every viewer"
+            ),
+            DeclarationError::Undeclared {
+                layer,
+                gate: Gate::RequireMemberVisibility,
+            } => write!(
+                f,
+                "layer '{layer}': `require_member_visibility` is required and has no default; \
+                 write how many of an artifact's members a viewer must see for it to exist for \
+                 them, or `none` (`null` in JSON) for no such rule"
+            ),
             DeclarationError::PredicateDeclares(what) => write!(
                 f,
                 "a layer whose membership is a predicate declares {what}, which its artifacts \
@@ -2365,6 +2464,29 @@ mod tests {
             "content": { "supplied": [{ "name": "topic", "type": "text" }] }
         });
         assert!(serde_json::from_value::<LayerDeclaration>(missing_provenance).is_err());
+    }
+
+    #[test]
+    fn a_declaration_states_both_gates_and_null_is_a_statement() {
+        let complete = serde_json::json!({
+            "name": "l", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat" }
+        });
+        let read = serde_json::from_value::<LayerDeclaration>(complete.clone()).unwrap();
+        assert_eq!(read.visibility, None);
+        assert_eq!(read.require_member_visibility, None);
+
+        for gate in ["visibility", "require_member_visibility"] {
+            let mut omitted = complete.clone();
+            omitted.as_object_mut().unwrap().remove(gate);
+            assert!(
+                serde_json::from_value::<LayerDeclaration>(omitted).is_err(),
+                "a declaration without `{gate}` must be refused"
+            );
+        }
     }
 
     #[test]
