@@ -722,12 +722,15 @@ pub enum ArtifactPart {
     /// The canonical shapes, as [`PublishedArtifact::shape`] carries them.
     Shape(crate::membership::ArtifactShapes),
     /// One content's values at `rank`, its position in the artifact's content row, with their
-    /// digest ([`PublishedContent::digest`]). The content's generating set is a set part and
-    /// travels as a growth at the same rank.
+    /// digest ([`PublishedContent::digest`]) and the generating set it starts with, by shard. The
+    /// set is empty on a fill a `PATCH` supplied, whose set moves afterwards by a growth at the
+    /// same rank, and is the caller's own on a content a publication supplied at a withdrawn
+    /// position, which this fill gives the next one.
     Content {
         rank: u16,
         values: Vec<String>,
         digest: [u8; 32],
+        generated_from: Vec<WalShardSet>,
     },
     /// The access label, as descriptors in [`crate::membership::canonical_access`]'s order.
     Access(Vec<Vec<u8>>),
@@ -1108,7 +1111,8 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // declaration's runs; and the variant table gained `ShardOpen` and `ShardSeal`. A log at 37 is
 // refused.
 // **39**: a content's rank in a growth or a fill is its position in the artifact's content row,
-// which a withdrawn content keeps. A log at 38 is refused.
+// which a withdrawn content keeps, and a content fill carries the generating set the content
+// starts with. A log at 38 is refused.
 const WAL_VERSION: u16 = 39;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
@@ -2853,6 +2857,7 @@ mod tests {
                     rank: 0,
                     values: values.clone(),
                     digest: content_digest(&values),
+                    generated_from: ShardSets::in_shard(ShardId::ZERO, Bitmap::of(&[2])).to_wal(),
                 },
             },
             WalRecord::ArtifactFill {

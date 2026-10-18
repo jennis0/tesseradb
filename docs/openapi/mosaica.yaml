@@ -2724,8 +2724,9 @@ paths:
         added to the held membership, and a part it lacks (its parents, attachment, contents,
         shape or access labels) is filled. A part it holds with a different value is `409`, and the
         detail never names the held value. A content is filled at its position in `content`, which
-        is its rank. A content whose rank was withdrawn is `409`, naming the next free rank, since
-        a withdrawn rank is never taken again. A deleted artifact's key is held by no artifact, so
+        is its rank. A content at a withdrawn rank is a new content at the next free rank, with
+        the generating set it was sent with, since a withdrawn rank is never taken again. A
+        deleted artifact's key is held by no artifact, so
         a publication under it creates a new one. The answer is `201` if the batch created an
         artifact, and `200` if every key was held.
 
@@ -2776,7 +2777,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, a content at a withdrawn rank, which the detail answers with the next free rank, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
           content:
             application/json:
               schema:
@@ -2817,8 +2818,9 @@ paths:
         at that rank instead, and a page that empties the set withdraws the content, reported as
         `withdrawn`. A rank is a content's position, and keeps its number when a content before it
         is withdrawn; a withdrawn rank names no content, and a page naming one is `422`. A part the
-        artifact lacks is filled; one it holds with a different value is `409`, and so is a
-        content at a withdrawn rank, naming the next free rank. The batch commits whole. Only an
+        artifact lacks is filled; one it holds with a different value is `409`. A content at a
+        withdrawn rank is filled as a new content at the next free rank. The batch commits whole.
+        Only an
         `enumerated` layer's artifacts can be grown; a `spatial` or attribute layer is `422`.
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
@@ -2879,7 +2881,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An artifact holds a part with a different value, or a content at a withdrawn rank, which the detail answers with the next free rank; or with `strict=true` a member names two items. Nothing was written.
+          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written.
           content:
             application/json:
               schema:
@@ -7111,7 +7113,7 @@ components:
         content:
           type: array
           default: []
-          description: Contents by rank, each filled where the artifact lacks it. A rank is a position among the artifact's contents, and a content at a withdrawn rank is `409`, naming the next free rank. A content here carries no generating set.
+          description: Contents by rank, each filled where the artifact lacks it. A rank is a position among the artifact's contents, and a content at a withdrawn rank is a new content at the next free rank. A content here carries no generating set.
           items:
             type: object
             additionalProperties: false

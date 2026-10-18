@@ -546,7 +546,8 @@ compaction removes the deleted point from the generating set, and the content re
 viewers who can see every point that remains, unless the deletion took the last of them, in which
 case it is dropped exactly as under strict. A content's rank is its position among the artifact's
 contents. A dropped content's rank is withdrawn: no later content takes it, and the contents after
-it keep their ranks.
+it keep their ranks. A content supplied again at a withdrawn rank is a new content at the next free
+rank.
 
 ## Dropping a layer
 

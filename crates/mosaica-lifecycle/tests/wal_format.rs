@@ -169,8 +169,9 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// holding a conjunction, which a 33 reader would evaluate as one conjunction. **33** is the
 /// version whose magic was `TWAL`. **34** is the version before the variant table gained
 /// `ShardsDeclare`. **37** is the version before records named a shard. **38** is the version
-/// whose content ranks in a growth and a fill counted only the contents held: read at 39, a 38
-/// page's rank names another content wherever one ranked before it had been withdrawn.
+/// whose content ranks in a growth and a fill counted only the contents held, and whose content
+/// fill carried no generating set: read at 39, a 38 page's rank names another content wherever one
+/// ranked before it had been withdrawn, and a 38 fill takes the next record's bytes for its set.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();

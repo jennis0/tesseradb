@@ -2279,7 +2279,8 @@ impl ArtifactStore {
 
     /// What a fill of the record at `ordinal` changes in the other shards' slices: an attachment
     /// reaches each slice's record, and the artifact everywhere where it now borrows; a content
-    /// reaches each slice's record with nothing in its set.
+    /// reaches each slice's record with that shard's part of its set, and a slice holding no
+    /// record of the artifact takes one where its part is not empty.
     fn fill_slices(
         &mut self,
         layer: &str,
@@ -2307,15 +2308,28 @@ impl ArtifactStore {
                     self.hold_borrowed_everywhere(layer, level, ordinal);
                 }
             }
-            ArtifactPart::Content { .. } => {
-                for (_, slice) in &mut self.slices.others {
-                    if let Some(held) = slice.record_mut(layer, level, ordinal) {
-                        held.contents.push(ContentSet {
+            ArtifactPart::Content { generated_from, .. } => {
+                let sets = ShardSets::from_wal(generated_from).unwrap_or_default();
+                let cardinality = sets.cardinality();
+                let nothing = record.slice_holding_nothing();
+                let space = self.spaces[layer];
+                for (shard, slice) in &mut self.slices.others {
+                    let part = sets.get(*shard).cloned().unwrap_or_default();
+                    match slice.record_mut(layer, level, ordinal) {
+                        Some(held) => held.contents.push(ContentSet {
                             values: None,
                             digest: [0; 32],
-                            generated_from: Bitmap::new(),
-                            cardinality: 0,
-                        });
+                            generated_from: part,
+                            cardinality,
+                        }),
+                        None if !part.is_empty() => {
+                            let mut held = nothing.clone();
+                            if let Some(content) = held.contents.last_mut() {
+                                content.generated_from = part;
+                            }
+                            slice.put(layer, space, level, ordinal, held, None);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -2355,6 +2369,16 @@ impl ArtifactStore {
         part: &crate::wal::ArtifactPart,
     ) -> FillOutcome {
         use crate::wal::ArtifactPart;
+        let generated_from = match part {
+            ArtifactPart::Content { generated_from, .. } => {
+                match self.held_shards(generated_from) {
+                    Some(sets) => Some(sets),
+                    None => return FillOutcome::Undecodable,
+                }
+            }
+            _ => None,
+        };
+        let own = self.slices.own;
         let key = (layer.to_string(), level);
         let Some(record) = self
             .levels
@@ -2444,6 +2468,7 @@ impl ArtifactStore {
                 rank,
                 values,
                 digest,
+                ..
             } => {
                 if content_digest(values) != *digest {
                     return FillOutcome::Undecodable;
@@ -2460,8 +2485,8 @@ impl ArtifactStore {
                     return FillOutcome::Identical;
                 }
                 // A fill the log carries for a position withdrawn since was filled and then
-                // withdrawn, and nothing is owed for it. The live path refuses one before the
-                // append.
+                // withdrawn, and nothing is owed for it. The live path gives a content supplied
+                // at a withdrawn position the next one before the append.
                 if record.withdraws(position) {
                     return FillOutcome::Identical;
                 }
@@ -2470,11 +2495,12 @@ impl ArtifactStore {
                     // exist. The live path refuses this before the append; at replay it is damage.
                     return FillOutcome::Undecodable;
                 }
+                let sets = generated_from.unwrap_or_default();
                 record.contents.push(ContentSet {
                     values: Some(values.clone()),
                     digest: *digest,
-                    generated_from: Bitmap::new(),
-                    cardinality: 0,
+                    generated_from: sets.get(own).cloned().unwrap_or_default(),
+                    cardinality: sets.cardinality(),
                 });
                 self.content_pending
                     .insert((layer.to_string(), level, ordinal));
@@ -5840,6 +5866,7 @@ mod tests {
             rank,
             digest: content_digest(&[value.to_string()]),
             values: vec![value.to_string()],
+            generated_from: Vec::new(),
         };
         assert_eq!(
             store.fill("clusters/a", 0, 0, &fill(2, "d")),
@@ -6466,6 +6493,7 @@ mod tests {
                     rank: 0,
                     values: values.clone(),
                     digest: content_digest(&values),
+                    generated_from: Vec::new(),
                 },
             ),
             fill_record(
@@ -6544,6 +6572,7 @@ mod tests {
                         rank: 0,
                         values: other.clone(),
                         digest: content_digest(&other),
+                        generated_from: Vec::new(),
                     }
                 ),
                 72
@@ -6634,6 +6663,7 @@ mod tests {
                         rank: 0,
                         values: content.clone(),
                         digest: content_digest(&content),
+                        generated_from: Vec::new(),
                     }
                 ),
                 24
@@ -6694,6 +6724,7 @@ mod tests {
                         rank: 0,
                         values: values.clone(),
                         digest: content_digest(&values),
+                        generated_from: Vec::new(),
                     }
                 ),
                 40
@@ -7299,6 +7330,7 @@ mod tests {
             rank: 0,
             digest: content_digest(&values),
             values,
+            generated_from: Vec::new(),
         };
         assert_eq!(store.apply(&fill_record("clusters/a", 0, content), 0), 0);
         let pending = store.unpublished();
@@ -7322,6 +7354,26 @@ mod tests {
             .collect();
         assert!(slices_hold_their_sets(&slices.iter().collect::<Vec<_>>()));
         assert!(slices.iter().all(|slice| slice.contents.len() == 1));
+
+        // A content filled with a set reaches each slice with that shard's part of it.
+        let values = vec!["another topic".to_string()];
+        let content = ArtifactPart::Content {
+            rank: 1,
+            digest: content_digest(&values),
+            values,
+            generated_from: in_shards(&[(0, &[1]), (1, &[2])]).to_wal(),
+        };
+        assert_eq!(store.apply(&fill_record("clusters/a", 0, content), 0), 0);
+        for (at, member) in [(0, 1), (1, 2)] {
+            let held = store
+                .slice(shard(at))
+                .unwrap()
+                .get("clusters/a", 0, 0)
+                .unwrap();
+            let content = &held.contents[1];
+            assert_eq!(content.generated_from.to_vec(), vec![member]);
+            assert_eq!(content.cardinality, 2);
+        }
 
         let attachment = ArtifactPart::AttachedTo(PublishedAttachment {
             layer: "clusters/a".to_string(),

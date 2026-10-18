@@ -180,17 +180,14 @@ pub(super) fn growth_receipt(
 }
 
 /// The executor's refusal for a registry error: a differing fixed part is the caller's `409`
-/// (`ExecError::PartConflict`), and so are a content at a withdrawn rank and a layer space that
-/// has run out (`ExecError::LayerSpaceFull`); everything else is the `422` of a refused layer
-/// operation.
+/// (`ExecError::PartConflict`), and so is a layer space that has run out
+/// (`ExecError::LayerSpaceFull`); everything else is the `422` of a refused layer operation.
 pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
     match e {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
-        // complement it asks for is a different set from the one the artifact holds. A content at
-        // a withdrawn rank differs from the nothing the rank holds for good.
+        // complement it asks for is a different set from the one the artifact holds.
         mosaica_lifecycle::RegistryError::PartConflict { .. }
-        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. }
-        | mosaica_lifecycle::RegistryError::WithdrawnContent { .. } => ExecError::PartConflict {
+        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         mosaica_lifecycle::RegistryError::SpacesExhausted

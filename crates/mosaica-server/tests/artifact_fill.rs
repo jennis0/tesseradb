@@ -124,7 +124,16 @@ async fn served(server: &TestServer, layer: &str) -> Vec<(String, u64)> {
 
 /// The drill-down's body for one artifact, or its status where it is withheld.
 async fn drill(server: &TestServer, mosaica_id: &str) -> (u16, serde_json::Value) {
-    let auth = authorise(server, &["0"]).await;
+    drill_as(server, mosaica_id, &["0"]).await
+}
+
+/// [`drill`] for a principal holding `terms`.
+async fn drill_as(
+    server: &TestServer,
+    mosaica_id: &str,
+    terms: &[&str],
+) -> (u16, serde_json::Value) {
+    let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
@@ -505,10 +514,24 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     );
 }
 
-/// **A rank keeps its number after a lower one is withdrawn.** `near`, `wide` and `far` are ranks
-/// 0, 1 and 2; a page withdraws `near` and then one at rank 1 withdraws `wide`, so `far` is served
-/// and is still paged at rank 2, a withdrawn rank names no set to page, a `PUT` restating the
-/// original contents is a `409`, and the numbers hold across a restart.
+/// `content` is what the card serves a principal seeing every document, and a principal seeing
+/// a third of them is served nothing.
+async fn served_only_whole(server: &TestServer, id: &str, content: &str) {
+    assert_eq!(drill(server, id).await.1["content"], json!([content]));
+    assert_eq!(
+        drill_as(server, id, &["1"]).await.0,
+        404,
+        "a viewer who cannot see every document `{content}` was generated from"
+    );
+}
+
+/// **A rank keeps its number after a lower one is withdrawn, and a content restated at a withdrawn
+/// rank is a new content at the next free one.** `near`, `wide` and `far` are ranks 0, 1 and 2;
+/// pages withdraw `near` and then `wide`, so `far` is served and is still paged at rank 2, and a
+/// withdrawn rank names no set to page. Once a page withdraws `far` too, a `PUT` restating the
+/// original contents gives them positions 3, 4 and 5 with the sets they were sent with, and the
+/// card serves each in turn to a viewer who can see its set and nothing to one who cannot, across
+/// a restart too.
 #[tokio::test]
 async fn a_rank_keeps_its_number_after_a_lower_one_is_withdrawn() {
     let tmp = TempDir::new().unwrap();
@@ -569,24 +592,47 @@ async fn a_rank_keeps_its_number_after_a_lower_one_is_withdrawn() {
         assert_eq!(status, 422, "rank {rank}: {body}");
         assert_eq!(body["error"], "contract", "{body}");
     }
+
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 2, "leaving": members(0..60) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["withdrawn"], 2, "{body}");
+    assert_eq!(drill(&server, &id).await.0, 404);
+
     let (status, body) = put(
         &server,
         TOPICS,
         json!([{ "key": "t0", "members": members(0..100), "content": contents }]),
     )
     .await;
-    assert_eq!(status, 409, "{body}");
-    assert_eq!(body["error"], "conflict", "{body}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["filled"], 3, "{body}");
+    served_only_whole(&server, &id, "near").await;
 
     let server = restart(server, &tmp).await;
-    assert_eq!(drill(&server, &id).await.1["content"], json!(["far"]));
-    let (status, body) = patch(
-        &server,
-        TOPICS,
-        json!([{ "key": "t0", "rank": 2, "leaving": members(50..60) }]),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["artifacts"][0]["left"], 10, "{body}");
-    assert_eq!(drill(&server, &id).await.1["content"], json!(["far"]));
+    served_only_whole(&server, &id, "near").await;
+    for (rank, leaving, next) in [(3, members(0..5), "wide"), (4, members(0..20), "far")] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "leaving": leaving }]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["artifacts"][0]["withdrawn"], rank, "{body}");
+        served_only_whole(&server, &id, next).await;
+    }
+    for rank in [0, 1, 2] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "members": members(60..61) }]),
+        )
+        .await;
+        assert_eq!(status, 422, "rank {rank}: {body}");
+    }
 }

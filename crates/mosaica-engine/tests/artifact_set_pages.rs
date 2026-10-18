@@ -809,18 +809,34 @@ fn a_page_replayed_after_a_compaction_withdrew_a_lower_rank_moves_the_same_set()
     );
 }
 
-/// **A fill after a withdrawal takes the next position, and a fill at a withdrawn rank is a
-/// conflict.** On a layer whose content serves on the artifact's own gate, `x` and `y` are
-/// withdrawn by pages that join a document to each set and take it out again; a content filled at
-/// rank 0 is refused as the conflict a differing part is, one at rank 3 names a rank past the
-/// next, and one at rank 2 is taken and served, before and after a restart.
+/// **A fill after a withdrawal takes the next position, and a fill at a withdrawn rank is a new
+/// content at the next free one.** On a layer whose content serves on the artifact's own gate, `x`
+/// and `y` are withdrawn by pages that join a document to each set and take it out again. A
+/// content filled at rank 0 lands at position 2 and is served; one at rank 4 names a rank past the
+/// next; one at rank 1 lands at 3. Across a restart `z` is still served, and a page withdrawing
+/// position 2 withdraws `z` and leaves `w` served, which is where the log put each.
 #[test]
 fn a_fill_after_a_withdrawal_takes_the_next_position() {
     let fx = fixture();
-    let fill = |engine: &Engine, rank: u16| {
+    let fill = |engine: &Engine, rank: u16, value: &str| {
         let mut growth = IncomingGrowth::from_entities("t0".into(), Vec::new());
-        growth.parts.contents = vec![(rank, vec!["z".to_string()])];
+        growth.parts.contents = vec![(rank, vec![value.to_string()])];
         engine.grow_memberships(LAYER.into(), 0, vec![growth])
+    };
+    let paged = |engine: &Engine, rank: u16, joining, leaving| {
+        engine
+            .grow_memberships(
+                LAYER.into(),
+                0,
+                vec![IncomingGrowth::page_of_entities(
+                    "t0".into(),
+                    Some(rank),
+                    joining,
+                    leaving,
+                )],
+            )
+            .expect("a page")
+            .remove(0)
     };
     {
         let engine = fx.open();
@@ -842,34 +858,17 @@ fn a_fill_after_a_withdrawal_takes_the_next_position() {
             )
             .unwrap();
         for rank in [0, 1] {
-            let paged = |joining, leaving| {
-                engine
-                    .grow_memberships(
-                        LAYER.into(),
-                        0,
-                        vec![IncomingGrowth::page_of_entities(
-                            "t0".into(),
-                            Some(rank),
-                            joining,
-                            leaving,
-                        )],
-                    )
-                    .expect("a page")
-                    .remove(0)
-            };
-            paged(fx.members([0]), Vec::new());
-            assert_eq!(paged(Vec::new(), fx.members([0])).withdrawn, Some(rank));
+            paged(&engine, rank, fx.members([0]), Vec::new());
+            let receipt = paged(&engine, rank, Vec::new(), fx.members([0]));
+            assert_eq!(receipt.withdrawn, Some(rank));
         }
 
+        assert_eq!(fill(&engine, 0, "z").expect("a new content")[0].filled, 1);
         assert!(matches!(
-            fill(&engine, 0),
-            Err(AcceptError::Exec(ExecError::PartConflict { .. }))
-        ));
-        assert!(matches!(
-            fill(&engine, 3),
+            fill(&engine, 4, "v"),
             Err(AcceptError::Exec(ExecError::LayerRefused { .. }))
         ));
-        assert_eq!(fill(&engine, 2).expect("the next position")[0].filled, 1);
+        assert_eq!(fill(&engine, 1, "w").expect("a new content")[0].filled, 1);
         tick(&engine);
         assert_eq!(
             label_for(&engine, &subset_credential()).as_deref(),
@@ -881,5 +880,15 @@ fn a_fill_after_a_withdrawal_takes_the_next_position() {
         label_for(&engine, &subset_credential()).as_deref(),
         Some("z"),
         "across a restart"
+    );
+    paged(&engine, 2, fx.members([0]), Vec::new());
+    assert_eq!(
+        paged(&engine, 2, Vec::new(), fx.members([0])).withdrawn,
+        Some(2)
+    );
+    tick(&engine);
+    assert_eq!(
+        label_for(&engine, &subset_credential()).as_deref(),
+        Some("w")
     );
 }
