@@ -1803,6 +1803,11 @@ async fn control_flush_is_accepted_and_deferred() {
 async fn control_compact_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
+    assert_eq!(
+        control_status(&server).await["compaction"]["shard"],
+        serde_json::Value::Null,
+        "no compaction has run"
+    );
 
     let response = server
         .client
@@ -1854,11 +1859,6 @@ async fn control_compact_is_accepted_and_deferred() {
     assert!(
         compaction["last_rss_bytes"].is_u64() && compaction["passes"].is_array(),
         "the memory gauges are present before the first fold: {compaction}"
-    );
-    assert_eq!(
-        compaction["shard"],
-        serde_json::Value::Null,
-        "no compaction has run"
     );
 
     flush_and_fold(&server, None).await;
