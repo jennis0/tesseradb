@@ -40,6 +40,7 @@ from oracle.harness import (
     stop_server,
     write_deployment,
 )
+from oracle.identity import item_of_key
 from oracle.naming import INTEGER, KEYWORD, Creates, Holdings, Names, Refused
 from oracle.tenancy import HolderCount
 from oracle.wire import split_items_frames
@@ -1007,15 +1008,22 @@ def test_an_ingest_that_can_only_edit_and_names_items_by_no_column_is_malformed(
 
 
 def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_nothing(deployment):
-    """Three items are deleted, the first of them suppressed, and a compaction removes them. The
-    next batch's new items take their numbers, the lowest first, one tenancy higher, so no new
-    `mosaica_id` is a deleted item's. The deleted items' identifiers then name nothing on the item
-    card, in a change, in an ingest row or in a member table, and each new item holds only what its
-    row set."""
+    """Three items are deleted, the first of them suppressed, and a compaction removes them: from
+    one shard, or one from each of the first three where the bundle has several. The next batch's
+    new items take their numbers one tenancy higher, the lowest first, a tie between shards' freed
+    ids going to the lowest shard, so no new `mosaica_id` is a deleted item's. The deleted items'
+    identifiers then name nothing on the item card, in a change, in an ingest row or in a member
+    table, and each new item holds only what its row set."""
     dep = deployment
     numbers = dep.holdings.numbers
-    deleted = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:3]
-    freed = {numbers.item_of(t)[1] for t in deleted}
+    candidates: dict[int, list[int]] = {}
+    for t in sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v):
+        candidates.setdefault(item_of_key(numbers.item_of(t)[1])[0], []).append(t)
+    if len(candidates) == 1:
+        deleted = candidates[min(candidates)][:3]
+    else:
+        deleted = [candidates[shard][0] for shard in sorted(candidates)[:3]]
+    freed = sorted(numbers.item_of(t)[1] for t in deleted)
     check_changes(dep, [{"op": "suppress", "match": {"mosaica_id": str(deleted[0])}}])
     check_changes(dep, [{"op": "delete", "match": {"mosaica_id": str(t)}} for t in deleted])
     dep.server.compact()
@@ -1030,7 +1038,9 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     )
     at = {(v["x"], v["y"]): t for t, v in dep.holdings.items.items() if t not in before}
     made = [at[(row["x"], row["y"])] for row in rows]
-    assert numbers.item_of(made[0]) == (1, min(freed)), "the first takes the lowest freed number"
+    assert [numbers.item_of(t) for t in made] == [(1, item) for item in freed] + [
+        (0, numbers.item_of(made[-1])[1])
+    ], "the new items take the freed numbers lowest first, and the last a fresh one"
 
     for t in deleted:
         assert dep.server.item(dep.token, t).status_code == 404

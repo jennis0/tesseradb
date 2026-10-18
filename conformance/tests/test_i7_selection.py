@@ -51,8 +51,6 @@ from oracle import viewport as vp
 from oracle.bundle import Bundle
 from oracle.wire import decode_viewport
 
-pytestmark = pytest.mark.writes_nothing
-
 VIEW = cat.VIEW_ID
 
 # `(x0, y0, x1, y1)`, the request's bbox order — NOT `Bundle.extent`'s order for the same four

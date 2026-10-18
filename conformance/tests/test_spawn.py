@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import socket
 
-import pytest
 import requests
 from oracle import harness
-
-pytestmark = pytest.mark.writes_nothing
 
 
 def test_a_server_given_a_taken_port_is_started_on_fresh_ones(

@@ -206,13 +206,16 @@ class Corpus:
 
     `points` maps a source name to `(source ids, columns, position seed, frame)`. Every points
     file carries `fx`, `x`, `y` and `access`, and then the columns given for it. Every file names
-    its items by `fx`, which a deployment's blocks must declare unique ([`fx_column`]).
+    its items by `fx`, which a deployment's blocks must declare unique ([`fx_column`]). `items`
+    is how many items the deployment holds once its writes are in, which the many-shard mode
+    splits into shards; by default, the items the files hold.
     """
 
     blocks: list[str]
     points: dict[str, tuple[list[int], list[Column], int, tuple]] = field(default_factory=dict)
     vocabularies: list[Vocabulary] = field(default_factory=list)
     extra: dict[str, pa.Table] = field(default_factory=dict)
+    items: int | None = None
 
     def write(self, work: Path) -> Path:
         work.mkdir(parents=True, exist_ok=True)
@@ -243,7 +246,7 @@ class Corpus:
         text += "\n".join(self.blocks)
         if not any("[shards]" in block for block in self.blocks):
             built = set().union(*(ids for ids, _columns, _seed, _extent in self.points.values()))
-            text += shards_toml(len(built))
+            text += shards_toml(self.items or len(built))
         schema = work / "declaration.toml"
         schema.write_text(text)
         return schema

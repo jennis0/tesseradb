@@ -70,8 +70,6 @@ from test_shape_membership import (
     visible,
 )
 
-pytestmark = pytest.mark.writes_nothing
-
 CASES = ["full_100pct", "crossover_above", "sparse_0_01pct"]
 
 REGION = {"region": {"bbox": [0.0, 0.0, 30000.0, 65536.0]}}

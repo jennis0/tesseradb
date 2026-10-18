@@ -227,6 +227,25 @@ def test_a_new_item_on_a_deleted_items_number_takes_nothing_from_the_high_water(
     assert journal.ingests[0].required_high_water == 101
 
 
+def test_a_batch_over_several_shards_waits_for_their_high_waters_summed():
+    """The status figure sums the shards' high waters, so a batch that fills shard 1 and opens
+    shard 2 waits for one more in each, not for any number taken from an item's key."""
+
+    class TwoShards(_StubBundle):
+        shards = ({"id": 0, "high_water": 100}, {"id": 1, "high_water": 40})
+
+    server = _StubServer(high_water=140)
+    journal = AckedJournal(server, TwoShards())
+    ids = [str(item(40, shard=1)), str(item(0, shard=2))]
+    server.next_ingest = _Response(200, {"created": 2, "mosaica_ids": ids})
+
+    journal.ingest(b"arrow", "batch-1")
+
+    assert journal.ingests[0].required_high_water == 142
+    server.high_water = 142
+    assert journal.barrier(timeout=1.0, poll=0.05)["entity_id_high_water"] == 142
+
+
 @pytest.mark.parametrize(
     "issued",
     [

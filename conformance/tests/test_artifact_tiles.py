@@ -150,7 +150,6 @@ def assert_tiles_match(server, token: str, seen, zoom: int, at: str) -> dict[int
     return got
 
 
-@pytest.mark.writes_nothing
 def test_each_tile_is_the_oracles_under_a_quota_for_a_partial_and_a_whole_viewer(tiles_server):
     server, points = tiles_server
     for terms in (["1"], ["1", "2"]):

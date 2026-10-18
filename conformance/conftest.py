@@ -26,14 +26,8 @@ sys.path.insert(0, str(REPO_ROOT / "conformance"))
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "writes_nothing: the test and its fixtures make no write over HTTP: no ingest, change, "
-        "declaration, publication, drop, flush or compaction. Only these run in the many-shard "
-        "mode.",
-    )
-    config.addinivalue_line(
-        "markers",
-        "two_modes: the test builds its corpora in both modes itself, so the many-shard mode does "
-        "not run it again.",
+        "own_shards: the test sets the shard sizes of its corpora itself, so the many-shard mode "
+        "does not run it again.",
     )
 
 
@@ -42,8 +36,8 @@ def pytest_report_header(config):
 
     if many_shards():
         return (
-            f"{SHARDS_ENV}=many: every corpus over several shards; only tests marked "
-            "writes_nothing and not two_modes run"
+            f"{SHARDS_ENV}=many: every corpus over several shards; tests marked own_shards do "
+            "not run"
         )
     return None
 
@@ -53,17 +47,10 @@ def pytest_collection_modifyitems(config, items):
 
     if not many_shards():
         return
-
-    def runs(item) -> bool:
-        return (
-            item.get_closest_marker("writes_nothing") is not None
-            and item.get_closest_marker("two_modes") is None
-        )
-
-    left_out = [item for item in items if not runs(item)]
+    left_out = [item for item in items if item.get_closest_marker("own_shards") is not None]
     if left_out:
         config.hook.pytest_deselected(items=left_out)
-        items[:] = [item for item in items if runs(item)]
+        items[:] = [item for item in items if item.get_closest_marker("own_shards") is None]
 
 
 # **Every fixture in this suite is synthesised from a seed.** Nothing here reads the Phase 0

@@ -19,7 +19,8 @@ import pytest
 
 import declared_fixture as fx
 from declared_fixture import Column, Corpus, Deployment, Plan, Vocabulary
-from oracle.bundle import shard_records
+from oracle.bundle import Bundle, shard_records
+from oracle.identity import invert_item
 from oracle.layout import live_prefix_dir, newest_side_manifest
 
 STAGES = ("live", "restart", "fold", "fold-restart")
@@ -156,7 +157,7 @@ class EntityAttributes(Case):
 
     def live(self, work) -> Deployment:
         blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
-        d = Deployment(work, Corpus(blocks, _world(BUILT), [DEPT, GRADE]))
+        d = Deployment(work, Corpus(blocks, _world(BUILT), [DEPT, GRADE], items=fx.N_ITEMS))
         for column in self.columns:
             try:
                 d.control("PUT", "/control/attributes", json=column.payload(), expect=(201,))
@@ -229,7 +230,7 @@ class LiveVocabularies(Case):
 
     def live(self, work) -> Deployment:
         blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
-        d = Deployment(work, Corpus(blocks, _world(BUILT)))
+        d = Deployment(work, Corpus(blocks, _world(BUILT), items=fx.N_ITEMS))
         first = MOOD.payload()
         first["values"] = first["values"][:3]
         d.control("PUT", "/control/vocabularies/mood_v", json=first, expect=(201,))
@@ -868,16 +869,34 @@ def test_a_compaction_moves_each_live_declaration_into_the_bundle_manifest(walks
 TINY = 16
 
 
+def _placed(d: Deployment, key, ids, batch: str) -> list[tuple[int, int, int]]:
+    """Ingest new items `ids`, and answer the (shard, tenancy, number) each receipt id inverts to
+    under the bundle's identity `key`, in row order."""
+    resp = d.control(
+        "POST",
+        "/control/ingest",
+        expect=(200,),
+        headers={"x-mosaica-batch-id": batch, "content-type": "application/json"},
+        data=json.dumps(fx.point_rows(ids, [fx.fx_column()])),
+    )
+    receipt = resp.json()
+    assert receipt["created"] == len(ids)
+    return [invert_item(key, int(t)) for t in receipt["mosaica_ids"]]
+
+
+@pytest.mark.own_shards
 @pytest.mark.parametrize("path", ["built", "live"])
-def test_an_insert_past_the_shard_size_goes_in(tmp_path, path):
+def test_an_insert_past_the_shard_size_opens_a_shard_and_a_lower_size_seals(tmp_path, path):
     """Built at a size its corpus fills, or declared live below its high water, which seals the
-    shard, and then raised to it. Either way the insert opens a second shard."""
+    shard, and then raised to it. Either way the insert opens a second shard; a size at its high
+    water seals that one, and a restart keeps both."""
     Deployment.stop_all()
     held = list(range(TINY))
     blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
     if path == "built":
         blocks.insert(0, _shards_toml(TINY))
     d = Deployment(tmp_path / path, Corpus(blocks, _world(held)))
+    key = Bundle(d.bundle).identity_key
     try:
         if path == "live":
             d.control("PUT", "/control/shards", json={"size": TINY - 1}, expect=(201,))
@@ -885,11 +904,13 @@ def test_an_insert_past_the_shard_size_goes_in(tmp_path, path):
         status = d.server.status()
         assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY)
 
-        past = fx.point_rows([TINY, TINY + 1], [fx.fx_column()])
-        assert d.rows("/control/ingest", past, "past")["created"] == 2
+        assert _placed(d, key, [TINY, TINY + 1], "past") == [(1, 0, 0), (1, 0, 1)]
         assert d.server.status()["entity_id_high_water"] == TINY + 2
+        d.control("PUT", "/control/shards", json={"size": 2}, expect=(201,))
+        d.control("PUT", "/control/shards", json={"size": TINY}, expect=(201,))
         d.restart()
         status = d.server.status()
         assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY + 2)
+        assert _placed(d, key, [TINY + 2], "sealed") == [(2, 0, 0)]
     finally:
         d.stop()

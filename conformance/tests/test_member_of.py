@@ -96,7 +96,6 @@ def member_server(tmp_path_factory):
     stop_server(proc)
 
 
-@pytest.mark.writes_nothing
 def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
     server, points = member_server
     for terms in PRINCIPALS:
@@ -113,7 +112,6 @@ def test_the_leaf_is_the_artifacts_masked_count_and_the_oracles(member_server):
             assert got == expected, f"{artifact.layer}/{artifact.key}: served {got}, oracle {expected}"
 
 
-@pytest.mark.writes_nothing
 def test_it_composes_with_a_numeric_leaf_and_negates_within_the_visible_set(member_server):
     server, points = member_server
     numeric = NumericColumn({p[0]: p[0] for p in points})
@@ -176,7 +174,6 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
     assert matched_sum(server, broad, withheld) == before
 
 
-@pytest.mark.writes_nothing
 def test_an_unknown_layer_is_refused_where_an_unknown_artifact_is_not(member_server):
     server, _ = member_server
     token = server.authorise(["1", "2"])["token"]
@@ -191,7 +188,6 @@ def test_an_unknown_layer_is_refused_where_an_unknown_artifact_is_not(member_ser
         assert resp.status_code == 422, f"{body}: {resp.text}"
 
 
-@pytest.mark.writes_nothing
 def test_member_of_is_a_reserved_column_name(tmp_path):
     points = fixture_points()
     work = tmp_path / "reserved"

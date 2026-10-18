@@ -20,6 +20,11 @@ them:
 - **the merge's execution-to-publication gap** — the merged segment exists, its inputs stand,
   and the executor has committed to nothing.
 
+The side-manifest seam is driven a second time under a flush whose batch lands in two shards: a
+size declared one above the open shard's high water, so the batch's first new item fills that
+shard and its second opens the next. The flush publishes each shard on its own, and the kill
+lands at the first of them.
+
 ## The two limits, stated so nothing below reads as more than it is
 
 **A SIGKILL is not a power cut.** The page cache survives process death, so every byte the killed
@@ -52,8 +57,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from oracle import catalogue as cat
+from oracle.harness import OPERATOR_CREDENTIAL
+from oracle.identity import item_key
 
 from .driver import (
     Build,
@@ -94,7 +102,8 @@ def _harness(
 
 
 class FlushReplay(Stage):
-    """Pull the tick that flushes whatever WAL replay reinstated after the crash.
+    """Pull the ticks that flush whatever WAL replay reinstated after the crash, one a tick until
+    nothing is buffered: a tick publishes one shard of one view.
 
     Not a [`Write`]: the batch was ingested — and acked, so the WAL holds it durably — by the
     killed stage. This stage only completes the publication the kill interrupted; the composite
@@ -114,14 +123,20 @@ class FlushReplay(Stage):
             "refreshes": executor["flush"]["refreshes"],
         }
         h.pull_tick()
-
-    def barrier(self, h: SuiteHarness) -> None:
         poll(
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             "the replayed batch never flushed — was it lost with the crash?",
         )
+        for _ in range(16):
+            if h.executor()["flush"]["buffered_items"] == 0:
+                return
+            h.pull_tick()
+        raise AssertionError(f"rows were still buffered after 16 ticks: {h.executor()['flush']}")
+
+    def barrier(self, h: SuiteHarness) -> None:
         poll(
-            lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
+            lambda: (flush := h.executor()["flush"])["refreshes"] > self._snap["refreshes"]
+            and not flush["refresh_in_flight"],
             "the post-replay refresh never replaced the resident projection",
         )
 
@@ -219,6 +234,71 @@ def test_the_manifest_discard_found_the_unpublished_files(manifest_seam):
     assert manifest_seam.kill.stage.discarded
 
 
+# -- the side-manifest publish of a flush over two shards ---------------------------------------
+
+
+class DeclareSize(Stage):
+    """Declare the shard size one above the open shard's high water: the next new item fills the
+    shard and the one after opens the next. Entitled to nothing a viewer is served."""
+
+    label = "declare-size"
+
+    def apply(self, h: SuiteHarness) -> None:
+        self.open = max(h.numbers.built)
+        self.room = h.numbers.built[self.open]
+        resp = requests.put(
+            f"{h.server.control_base}/control/shards",
+            headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
+            json={"size": self.room + 1},
+            timeout=30,
+        )
+        assert resp.status_code == 201, resp.text
+
+
+@pytest.fixture(scope="module", params=[True, False], ids=["discarded", "kept"])
+def straddle_seam(request, tmp_path_factory, private_catalogue_bundle):
+    """A two-item flush over two shards killed at its first side-manifest commit, with the
+    unpublished files discarded or kept, and the interrupted publication completed after the
+    restart where the after-recording shows `before`."""
+    fx = cat.ingest_fx_keys(2)
+    batch = tuple(fx)
+    label = f"crash-straddle-{'discarded' if request.param else 'kept'}"
+    h = _harness(private_catalogue_bundle, tmp_path_factory, label)
+    declare = DeclareSize()
+    kill = Killed(
+        _write_stage(0, fx), kill_at="before_manifest_publish", discard_unsynced=request.param
+    )
+    try:
+        results = {r.label: r for r in run_plan(h, [Build(), declare, kill])}
+        kill_result = results[kill.label]
+        replay = None
+        if kill_result.delta != Rows(batch):
+            [replay] = run_plan(h, [FlushReplay()])
+        yield SimpleNamespace(
+            kill=kill_result,
+            batch=batch,
+            final=replay.after if replay is not None else kill_result.after,
+            numbers=h.numbers,
+            declare=declare,
+        )
+    finally:
+        h.stop()
+
+
+def test_the_straddling_batch_took_a_number_in_each_of_two_shards(straddle_seam):
+    numbers, declare = straddle_seam.numbers, straddle_seam.declare
+    assert numbers.latest(item_key(declare.open, declare.room)) == 0
+    assert numbers.latest(item_key(declare.open + 1, 0)) == 0
+
+
+def test_a_flush_over_two_shards_killed_at_the_manifest_seam_lands_on_an_endpoint(straddle_seam):
+    check(straddle_seam.kill)
+
+
+def test_the_straddling_batch_arrives_exactly_once(straddle_seam):
+    assert diff(straddle_seam.kill.before, straddle_seam.final) == Rows(straddle_seam.batch)
+
+
 # -- the merge's execution-to-publication gap ---------------------------------------------------
 
 
@@ -295,7 +375,6 @@ def test_negative_control_a_landing_between_the_endpoints_is_refused(manifest_se
         check(forged)
 
 
-@pytest.mark.writes_nothing
 def test_negative_control_a_kill_lands_only_on_a_publication_seam():
     """The two ack-contract sites take no kill from this driver: their crash story is the WAL's
     (truncate to the sync sidecar), and §12.3's discard table has no row for them — a kill armed

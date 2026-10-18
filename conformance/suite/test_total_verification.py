@@ -40,7 +40,6 @@ declaration would misname every column after it.
 from __future__ import annotations
 
 import dataclasses
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -131,21 +130,16 @@ def run(tmp_path_factory) -> SimpleNamespace:
             filters={"bay": {"eq": "cedar"}},
         )
 
-        # Ingest the corpus's own wire batch, then barrier on the background refresh — the
-        # census's second §9.2 obligation (decision 0044 D1). Sound while this is the only
-        # resident session, which is why the other principals authorise afterwards.
+        # Ingest the corpus's own wire batch, wait until readers see it, then until the
+        # background refresh of the resident entries ends — the census's second §9.2 obligation
+        # (decision 0044 D1). A batch that lands only in a shard no entry is resident for has
+        # nothing to refresh. Sound while this is the only resident session, which is why the
+        # other principals authorise afterwards.
         resp = server.ingest(files.ingest.read_bytes(), "total-verification-1")
         assert resp.status_code == 200, resp.text
         assert resp.json()["created"] == INGEST[1] - INGEST[0]
-        refreshes_before = server.status()["write_executor"]["flush"]["refreshes"]
-        server.flush()
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if server.status()["write_executor"]["flush"]["refreshes"] > refreshes_before:
-                break
-            time.sleep(0.05)
-        else:
-            raise TimeoutError("the background refresh never replaced the resident projection")
+        server.published()
+        server.refreshed()
 
         # The denies: suppress, delete, and suppress/unsuppress (module doc). Targets are battery
         # items, addressed by the unique field `id`, which is the item's `e` both in the built

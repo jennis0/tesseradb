@@ -24,8 +24,6 @@ from oracle.bundle import Bundle
 from oracle.harness import many_shards, spawn_server, stop_server
 from oracle.wire import decode_viewport_points
 
-pytestmark = pytest.mark.writes_nothing
-
 
 def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
     catalogue_bundle: Bundle,

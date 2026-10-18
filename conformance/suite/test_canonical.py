@@ -21,8 +21,6 @@ import pytest
 
 from .canonical import Streamed, canonicalise_viewport
 
-pytestmark = pytest.mark.writes_nothing
-
 U64 = pa.uint64()
 # `highlighted` is the fifth column and is always present, equal to `matched` where the request
 # carried no highlight (`highlight-and-hierarchy.md` §2) — so a synthetic body must carry it or

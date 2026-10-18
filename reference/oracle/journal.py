@@ -101,10 +101,11 @@ class IngestOp:
     #: changing nothing takes none.
     created: int
     mosaica_ids: tuple[str, ...] = ()
-    # The `entity_id_high_water` the barrier waits for: what it was before the call, raised past
-    # every number the batch's new items took. A new item given a deleted item's number takes it
-    # from below the high water and raises nothing. Captured per batch because that is the only
-    # quantity `/control/status` exposes that moves with an ingest at all (see `barrier`).
+    # The `entity_id_high_water` the barrier waits for: what it was before the call, raised to the
+    # sum over shards of each one's high water past every number its new items took. A new item
+    # given a deleted item's number takes it from below the high water and raises nothing.
+    # Captured per batch because that is the only quantity `/control/status` exposes that moves
+    # with an ingest at all (see `barrier`).
     required_high_water: int = 0
     applied: bool = False
 
@@ -258,14 +259,14 @@ class AckedJournal:
         self._sequence += 1
         if response.status_code == 200:
             payload = response.json()
-            taken = self.numbers.receipt(payload)
+            self.numbers.receipt(payload)
             self.ingests.append(
                 IngestOp(
                     sequence=self._sequence,
                     batch_id=batch_id,
                     created=int(payload["created"]),
                     mosaica_ids=tuple(payload["mosaica_ids"]),
-                    required_high_water=max([before, *(n + 1 for n in taken)]),
+                    required_high_water=max(before, self.numbers.high_water_floor()),
                 )
             )
         else:

@@ -84,7 +84,6 @@ WHOLE_SET_TEXT = "drawn from the whole set"
 CORE_ALONE_TEXT = "drawn from the core alone"
 
 
-@pytest.mark.writes_nothing
 def test_the_fixture_separates_the_two_principals_by_exactly_one_entity(label_server):
     """**The fixture's own claim, checked before anything rests on it.**
 
@@ -107,7 +106,6 @@ def test_the_fixture_separates_the_two_principals_by_exactly_one_entity(label_se
     assert lf.SPLIT in lf.WIDE_SET and lf.SPLIT not in lf.NARROW_SET
 
 
-@pytest.mark.writes_nothing
 @pytest.mark.parametrize("zoom", TIERS)
 def test_a_generating_set_one_member_short_serves_no_artifact_at_all(label_server, zoom):
     """**The headline, at every tier.** A viewer holding all but one member of a content's
@@ -131,7 +129,6 @@ def test_a_generating_set_one_member_short_serves_no_artifact_at_all(label_serve
     assert set(core) == {"l-ranked", "l-core"}
 
 
-@pytest.mark.writes_nothing
 @pytest.mark.parametrize("zoom", TIERS)
 def test_the_first_contained_content_is_the_one_served(label_server, zoom):
     """**Ranked contents are a fallback, not an all-or-nothing.** `l-ranked` carries two: a wide
@@ -150,7 +147,6 @@ def test_the_first_contained_content_is_the_one_served(label_server, zoom):
     assert whole["l-core"][1] == core["l-core"][1] == (CORE_ALONE_TEXT,)
 
 
-@pytest.mark.writes_nothing
 @pytest.mark.parametrize("zoom", TIERS)
 def test_a_principal_containing_no_generating_set_is_served_no_artifact(label_server, zoom):
     """A viewer holding a term none of the generating sets touches is served the layer's artifacts

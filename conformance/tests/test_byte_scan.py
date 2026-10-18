@@ -616,7 +616,6 @@ def _decode_mosaica_ids(points_bytes: bytes) -> list[int]:
 PLANTED_ENTITY_ID = 145_000
 
 
-@pytest.mark.writes_nothing
 def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bundle):
     """The structural half of I10's assurance, against **the bundle this module scans**.
 
@@ -671,7 +670,6 @@ def _subcell_stream(cells: list[int], counts: list[int]) -> bytes:
     return sink.getvalue()
 
 
-@pytest.mark.writes_nothing
 def test_every_scan_mechanism_catches_a_planted_entity_id():
     """The negative control conformance §4.3 asks for: **a planted emission the scanner must
     flag.**
@@ -988,7 +986,6 @@ def grant(byte_scan_server, catalogue_bundle_root: Path) -> Grant:
     )
 
 
-@pytest.mark.writes_nothing
 def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(grant: Grant):
     server, oracle_bundle, token = grant.server, grant.bundle, grant.token
     admitted, target_ids, target_ids_high = grant.admitted, grant.target_ids, grant.target_ids_high
@@ -1226,6 +1223,9 @@ def test_no_entity_id_crosses_the_artifacts_routes(grant: Grant):
         sorted(e for e in items if identity_mod.item_of_key(e)[1] >= SAFE_ID_FLOOR)
         for items in (grant.admitted, grant.denied)
     )
+    # In the many-shard mode no admitted item's number is above the floor (`grant`), so the
+    # admitted members are taken from below it.
+    seen = seen or sorted(grant.admitted)
     groups = [seen[i : i + 200] + unseen[i : i + 200] for i in range(0, 4_000, 200)]
     resp = server.register_layer(
         {

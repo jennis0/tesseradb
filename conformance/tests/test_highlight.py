@@ -123,7 +123,6 @@ def highlight_server(tmp_path_factory):
     stop_server(proc)
 
 
-@pytest.mark.writes_nothing
 def test_the_served_set_is_identical_with_and_without_a_highlight(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -141,7 +140,6 @@ def test_the_served_set_is_identical_with_and_without_a_highlight(highlight_serv
                     assert points_of(lit) == points_of(plain), what
 
 
-@pytest.mark.writes_nothing
 def test_the_counts_nest_and_the_highlighted_count_is_the_conjunctions(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -161,7 +159,6 @@ def test_the_counts_nest_and_the_highlighted_count_is_the_conjunctions(highlight
             )
 
 
-@pytest.mark.writes_nothing
 def test_the_point_bit_is_present_only_with_a_highlight_and_is_the_oracles(highlight_server):
     server, points = highlight_server
     for terms in PRINCIPALS:
@@ -185,7 +182,6 @@ def test_the_point_bit_is_present_only_with_a_highlight_and_is_the_oracles(highl
         assert sum(1 for b in bits if b) == want, f"{terms}: served {sum(bits)}, oracle {want}"
 
 
-@pytest.mark.writes_nothing
 def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -217,7 +213,6 @@ def test_the_artifact_bit_is_the_conjunctions_and_moves_nothing_else(highlight_s
             )
 
 
-@pytest.mark.writes_nothing
 def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(highlight_server):
     server, _points = highlight_server
     for terms in PRINCIPALS:
@@ -245,7 +240,6 @@ def test_the_highlight_projection_serves_the_same_rows_in_a_two_column_frame(hig
         assert bare.column("mosaica_id").to_pylist() == plain.column("mosaica_id").to_pylist()
 
 
-@pytest.mark.writes_nothing
 def test_an_unknown_point_rows_value_is_refused(highlight_server):
     server, _points = highlight_server
     token = server.authorise(["1", "2"])["token"]
@@ -253,7 +247,6 @@ def test_an_unknown_point_rows_value_is_refused(highlight_server):
     assert resp.status_code == 422, resp.text
 
 
-@pytest.mark.writes_nothing
 def test_highlighted_is_a_reserved_column_name(tmp_path):
     points = fixture_points()
     work = tmp_path / "reserved"
@@ -337,7 +330,6 @@ def dependent_server(tmp_path_factory):
     stop_server(proc)
 
 
-@pytest.mark.writes_nothing
 def test_a_dependent_artifact_carries_its_targets_highlight_bit(dependent_server):
     """**A label's `highlighted` is its cluster's**, exactly as its `matched` is (contracts §3.2
     r74; decision 0104's argument) — and its `masked_count` is its own.
