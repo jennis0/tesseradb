@@ -2724,10 +2724,10 @@ paths:
         added to the held membership, and a part it lacks (its parents, attachment, contents,
         shape or access labels) is filled. A part it holds with a different value is `409`, and the
         detail never names the held value. A content is filled at its position in `content`, which
-        is its rank. A content at a withdrawn rank is a new content at the next free rank, with
-        the generating set it was sent with, since a withdrawn rank is never taken again. A
-        deleted artifact's key is held by no artifact, so
-        a publication under it creates a new one. The answer is `201` if the batch created an
+        is its rank. A content at a rank holding none, withdrawn or past the last, is a new content
+        at the next free rank, with the generating set it was sent with, since a withdrawn rank is
+        never taken again. A deleted artifact's key is held by no artifact, so a publication under
+        it creates a new one. The answer is `201` if the batch created an
         artifact, and `200` if every key was held.
 
         A large membership is published with its first page here and the rest with `PATCH`.
@@ -2819,9 +2819,9 @@ paths:
         `withdrawn`. A rank is a content's position, and keeps its number when a content before it
         is withdrawn; a withdrawn rank names no content, and a page naming one is `422`. A part the
         artifact lacks is filled; one it holds with a different value is `409`. A content at a
-        withdrawn rank is filled as a new content at the next free rank. The batch commits whole.
-        Only an
-        `enumerated` layer's artifacts can be grown; a `spatial` or attribute layer is `422`.
+        rank holding none, withdrawn or past the last, is filled as a new content at the next free
+        rank. The batch commits whole. Only an `enumerated` layer's artifacts can be grown; a
+        `spatial` or attribute layer is `422`.
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
@@ -7113,7 +7113,7 @@ components:
         content:
           type: array
           default: []
-          description: Contents by rank, each filled where the artifact lacks it. A rank is a position among the artifact's contents, and a content at a withdrawn rank is a new content at the next free rank. A content here carries no generating set.
+          description: Contents by rank, each filled where the artifact lacks it. A rank is a position among the artifact's contents, and a content at a rank holding none, withdrawn or past the last, is a new content at the next free rank. A content here carries no generating set, so on a layer whose content requires every member visible it is `422`, and a `PUT` of the key supplies it with its `generated_from`.
           items:
             type: object
             additionalProperties: false

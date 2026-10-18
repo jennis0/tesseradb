@@ -26,10 +26,10 @@
 mod common;
 
 use common::*;
-use mosaica_engine::{AcceptError, Engine};
+use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_lifecycle::{ExecError, IncomingArtifact, IncomingGrowth};
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
     SuppliedContent, SuppliedRequirement,
@@ -809,21 +809,27 @@ fn a_page_replayed_after_a_compaction_withdrew_a_lower_rank_moves_the_same_set()
     );
 }
 
-/// **A fill after a withdrawal takes the next position, and a fill at a withdrawn rank is a new
-/// content at the next free one.** On a layer whose content serves on the artifact's own gate, `x`
-/// and `y` are withdrawn by pages that join a document to each set and take it out again. A
-/// content filled at rank 0 lands at position 2 and is served; one at rank 4 names a rank past the
-/// next; one at rank 1 lands at 3. Across a restart `z` is still served, and a page withdrawing
-/// position 2 withdraws `z` and leaves `w` served, which is where the log put each.
+/// **A fill after a withdrawal takes the next position, whatever has been published.** On a layer
+/// whose content serves on the artifact's own gate, `x` and `y` are withdrawn by pages that join a
+/// document to each set and take it out again. With a tick after every write, so each fill finds
+/// the artifact's content published: `z` at withdrawn rank 0 lands at position 2 and is served,
+/// `v` at rank 4, past the next, lands at 3, and `w` at withdrawn rank 1 lands at 4. Withdrawing
+/// each in turn serves the next, across a restart and a compaction, which leaves one content
+/// extent, and a restart after it.
 #[test]
 fn a_fill_after_a_withdrawal_takes_the_next_position() {
     let fx = fixture();
     let fill = |engine: &Engine, rank: u16, value: &str| {
         let mut growth = IncomingGrowth::from_entities("t0".into(), Vec::new());
         growth.parts.contents = vec![(rank, vec![value.to_string()])];
-        engine.grow_memberships(LAYER.into(), 0, vec![growth])
+        let filled = engine
+            .grow_memberships(LAYER.into(), 0, vec![growth])
+            .expect("a new content")[0]
+            .filled;
+        tick(engine);
+        filled
     };
-    let paged = |engine: &Engine, rank: u16, joining, leaving| {
+    let page = |engine: &Engine, rank: u16, joining, leaving| {
         engine
             .grow_memberships(
                 LAYER.into(),
@@ -838,6 +844,15 @@ fn a_fill_after_a_withdrawal_takes_the_next_position() {
             .expect("a page")
             .remove(0)
     };
+    // Read before the compaction, which moves the files the fixture reads it from.
+    let document = fx.members([0]);
+    let withdraw = |engine: &Engine, rank: u16| {
+        page(engine, rank, document.clone(), Vec::new());
+        let receipt = page(engine, rank, Vec::new(), document.clone());
+        assert_eq!(receipt.withdrawn, Some(rank));
+        tick(engine);
+    };
+    let label = |engine: &Engine| label_for(engine, &subset_credential());
     {
         let engine = fx.open();
         let mut layer = label_layer(LAYER);
@@ -857,38 +872,39 @@ fn a_fill_after_a_withdrawal_takes_the_next_position() {
                 )],
             )
             .unwrap();
-        for rank in [0, 1] {
-            paged(&engine, rank, fx.members([0]), Vec::new());
-            let receipt = paged(&engine, rank, Vec::new(), fx.members([0]));
-            assert_eq!(receipt.withdrawn, Some(rank));
-        }
-
-        assert_eq!(fill(&engine, 0, "z").expect("a new content")[0].filled, 1);
-        assert!(matches!(
-            fill(&engine, 4, "v"),
-            Err(AcceptError::Exec(ExecError::LayerRefused { .. }))
-        ));
-        assert_eq!(fill(&engine, 1, "w").expect("a new content")[0].filled, 1);
         tick(&engine);
+        withdraw(&engine, 0);
+        withdraw(&engine, 1);
+
+        assert_eq!(fill(&engine, 0, "z"), 1);
+        assert_eq!(label(&engine).as_deref(), Some("z"));
+        assert_eq!(fill(&engine, 4, "v"), 1);
+        assert_eq!(fill(&engine, 1, "w"), 1);
+        assert_eq!(label(&engine).as_deref(), Some("z"));
+        withdraw(&engine, 2);
+        assert_eq!(label(&engine).as_deref(), Some("v"));
+    }
+    {
+        let engine = fx.open();
+        assert_eq!(label(&engine).as_deref(), Some("v"), "across a restart");
+        fold(&engine);
+        assert_eq!(label(&engine).as_deref(), Some("v"), "across a compaction");
+        let extents: usize = side_manifest(&fx.root)
+            .layer_spaces
+            .iter()
+            .map(|space| space.content_extents.len())
+            .sum();
         assert_eq!(
-            label_for(&engine, &subset_credential()).as_deref(),
-            Some("z")
+            extents, 1,
+            "the compaction folds the content extents into one"
         );
     }
     let engine = fx.open();
     assert_eq!(
-        label_for(&engine, &subset_credential()).as_deref(),
-        Some("z"),
-        "across a restart"
+        label(&engine).as_deref(),
+        Some("v"),
+        "across a restart after the compaction"
     );
-    paged(&engine, 2, fx.members([0]), Vec::new());
-    assert_eq!(
-        paged(&engine, 2, Vec::new(), fx.members([0])).withdrawn,
-        Some(2)
-    );
-    tick(&engine);
-    assert_eq!(
-        label_for(&engine, &subset_credential()).as_deref(),
-        Some("w")
-    );
+    withdraw(&engine, 3);
+    assert_eq!(label(&engine).as_deref(), Some("w"));
 }

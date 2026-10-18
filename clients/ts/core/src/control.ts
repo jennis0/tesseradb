@@ -245,7 +245,7 @@ export type GrowingArtifact = {
   parent?: string[];
   /** The artifact this one is attached to. */
   attached_to?: Attachment | null;
-  /** Contents by rank, each a position among the artifact's contents. A content at a withdrawn rank is a new content at the next free rank. */
+  /** Contents by rank, each a position among the artifact's contents. A content at a rank holding none, withdrawn or past the last, is a new content at the next free rank. */
   content?: {rank: number; values: string[]}[];
   /** As on a publication. */
   bbox?: number[] | null;

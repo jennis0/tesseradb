@@ -1801,9 +1801,8 @@ class Database:
         A row naming no item, or two, is refused and the report lists it; the other rows leave.
         Columns are read and ignored as for `remove`. Taking out every item withdraws the text,
         and its rank is never taken again. Inserting the label with the same texts adds each
-        withdrawn one as a new text at the next free rank while none of the label's texts is in a
-        durable extent, and is refused once one is. A call the server refuses raises `Refusal`,
-        with the report as its `report`.
+        withdrawn one as a new text at the next free rank. A call the server refuses raises
+        `Refusal`, with the report as its `report`.
         """
         self._refuse_before_the_first_commit("leave")
         table, ignored = self._addressed(items, "leave")

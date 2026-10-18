@@ -726,7 +726,8 @@ When a content is dropped, at the compaction of the shard holding a member its g
 lost or at a page that empties the set, its rank is withdrawn in the record: the rank's values go
 and it is never served. A rank is the content's position, so the position stays, is never taken
 again, and the contents after it keep their ranks. A content a publication or fill supplies at a
-withdrawn rank is a new content at the next free rank, with the generating set it was sent with.
+rank that holds none, withdrawn or past the last, is a new content at the next free rank, with the
+generating set it was sent with, whatever the artifact has already published.
 The rank is withdrawn in every shard at that one compaction, which writes every shard's member
 packs.
 

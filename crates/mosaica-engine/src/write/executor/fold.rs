@@ -2272,9 +2272,8 @@ impl Executor {
         carried_rels.extend(others.side.into_keys());
         carried_rels.extend(kept.iter().map(|(_, extent)| extent.path.clone()));
         let mut carried_rels: Vec<String> = carried_rels.into_iter().collect();
-        // Content extents carry no entry in either manifest's `files`, so they are linked here,
-        // from the held lists; an extent holding a deleted artifact's row is written again
-        // without it.
+        // Content extents carry no entry in either manifest's `files`, so they are linked or
+        // written here, from the held lists.
         let contents = match super::publications::carry_space_contents(
             &from_prefix_dir,
             &to_prefix_dir,

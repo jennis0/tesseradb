@@ -2615,9 +2615,9 @@ struct GrowingArtifactBody {
     /// The attachment, under the same fill rule.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
-    /// Contents by rank, each filled, identical or 409; one at a withdrawn rank fills the next
-    /// free one. A content here carries no generating set, so it is refused on a layer whose
-    /// content requires every member visible.
+    /// Contents by rank, each identical or 409 where the rank holds a content, and otherwise a
+    /// new content at the next free rank. A content here carries no generating set, so it is
+    /// refused on a layer whose content requires every member visible.
     #[serde(default)]
     content: Vec<ContentFillBody>,
     /// The shape, as on a publication; absent where the row fills none.

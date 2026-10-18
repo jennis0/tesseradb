@@ -2357,8 +2357,8 @@ impl ArtifactStore {
     ///
     /// **A content's values are stored beside its digest and the record is queued for the next
     /// content extent** ([`Self::unpublished_content`]). An identical content on a record restored
-    /// from an extent takes the values back into memory and is not queued: its row is already in
-    /// a durable extent, and the record stack holds one row per entity.
+    /// from an extent takes the values back into memory and is not queued: its values are already
+    /// in a durable extent.
     ///
     /// **The log's copy of a shape is rebuilt through [`ArtifactShapes::new`]** and its digest
     /// compared with the recorded one: postcard restores the struct whole, so the stored digest is
@@ -2493,14 +2493,14 @@ impl ArtifactStore {
                     return FillOutcome::Identical;
                 }
                 // A fill the log carries for a position withdrawn since was filled and then
-                // withdrawn, and nothing is owed for it. The live path gives a content supplied
-                // at a withdrawn position the next one before the append.
+                // withdrawn, and nothing is owed for it. The live path gives every new content
+                // the next position before the append.
                 if record.withdraws(position) {
                     return FillOutcome::Identical;
                 }
                 if position != record.next_position() {
                     // A fill past the next position names a content between two that does not
-                    // exist. The live path refuses this before the append; at replay it is damage.
+                    // exist, which the live path never appends; at replay it is damage.
                     return FillOutcome::Undecodable;
                 }
                 let sets = generated_from.unwrap_or_default();
@@ -2523,27 +2523,6 @@ impl ArtifactStore {
             .get(&(layer.to_string(), level))
             .copied()
             .unwrap_or(0)
-    }
-
-    /// Whether the artifact at `ordinal` has a row in a durable content extent, or is in a
-    /// manifest whose content extent would already hold one if it had content: **an artifact
-    /// packed at or below the level's high-water with content it was packed with.** A further
-    /// content rank on such an artifact cannot be written, because the record stack holds one row
-    /// per entity and reads the first layer that has it (`ingest.md` §1.4 gives the per-column
-    /// read to track T3). The registry refuses the fill on this answer.
-    pub fn content_row_is_packed(&self, layer: &str, level: u32, ordinal: u32) -> bool {
-        let through = self
-            .published_through
-            .get(&(layer.to_string(), level))
-            .copied()
-            .unwrap_or(0);
-        ordinal < through
-            && self
-                .get(layer, level, ordinal)
-                .is_some_and(|record| !record.contents.is_empty())
-            && !self
-                .content_pending
-                .contains(&(layer.to_string(), level, ordinal))
     }
 
     /// Record that the content extent naming every pending content fill is durable, releasing the
@@ -3871,10 +3850,10 @@ impl ArtifactStore {
     /// the layer's declaration alone.
     ///
     /// **A record whose content was filled since its last content extent is written beside the
-    /// tail** ([`Self::content_pending`]), whichever side of the high-water it sits. Such a record
-    /// held no content when it was packed, so its entity is in no content extent and the row this
-    /// writes is the first; the registry refuses a fill that would need a second
-    /// ([`Self::content_row_is_packed`]).
+    /// tail** ([`Self::content_pending`]), whichever side of the high-water it sits, with the
+    /// values of every content it holds in memory. A content restored from an extent holds none
+    /// and is not written again: its values stay in the extent that has them, at their own tags,
+    /// and the record stack reads an artifact's row as the union of its tags in every extent.
     pub fn unpublished_content(&self) -> Vec<ContentRow> {
         let mut out = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -6716,8 +6695,8 @@ mod tests {
     }
 
     /// **A filled content's values reach the content extent and hold the log until they do**,
-    /// wherever the artifact sits against the high-water — and once packed, a further rank is
-    /// refused at the registry on [`ArtifactStore::content_row_is_packed`]'s answer.
+    /// wherever the artifact sits against the high-water, and a further content after that
+    /// extent is durable reaches the next one the same way.
     #[test]
     fn a_content_fill_is_written_beside_the_tail_and_pins_the_log_until_its_extent_is_durable() {
         use crate::wal::ArtifactPart;
@@ -6725,10 +6704,6 @@ mod tests {
         assert_eq!(store.apply(&publication("topics/x", 0, 100, &[1]), 0), 0);
         store.mark_published("topics/x", 0, 1);
         assert_eq!(store.oldest_wal_pos(), None, "packed, nothing pinned");
-        assert!(
-            !store.content_row_is_packed("topics/x", 0, 0),
-            "no content, no row"
-        );
 
         let values = vec!["shipping".to_string()];
         assert_eq!(
@@ -6757,10 +6732,6 @@ mod tests {
             "a filled record below the high-water is written beside the tail"
         );
         assert_eq!(store.oldest_wal_pos(), Some(40), "pinned at the fill");
-        assert!(
-            !store.content_row_is_packed("topics/x", 0, 0),
-            "pending, not yet a row"
-        );
 
         // The fold's rewrite releases the fill's pin but not the content's: the fold carries
         // content extents forward and writes no values.
@@ -6771,7 +6742,34 @@ mod tests {
         store.mark_content_published();
         assert_eq!(store.oldest_wal_pos(), None);
         assert!(store.unpublished_content().is_empty());
-        assert!(store.content_row_is_packed("topics/x", 0, 0));
+
+        let further = vec!["docks".to_string()];
+        assert_eq!(
+            store.apply(
+                &fill_record(
+                    "topics/x",
+                    0,
+                    ArtifactPart::Content {
+                        rank: 1,
+                        values: further.clone(),
+                        digest: content_digest(&further),
+                        generated_from: Vec::new(),
+                    }
+                ),
+                50
+            ),
+            0
+        );
+        assert_eq!(
+            store.unpublished_content(),
+            vec![(
+                "topics/x".to_string(),
+                EntityId::new(100),
+                vec![(0u16, "shipping".to_string()), (1u16, "docks".to_string())]
+            )],
+            "a further content on an artifact whose content is durable is written again"
+        );
+        assert_eq!(store.oldest_wal_pos(), Some(50));
     }
 
     /// **The pin's name is what an operator acts on, and it has to agree with the bound.**
