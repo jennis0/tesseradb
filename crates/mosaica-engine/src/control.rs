@@ -447,13 +447,29 @@ impl Engine {
         Stamp::of(&self.generation.load())
     }
 
-    /// [`Engine::accept_changes`] for one change to the item `entity` of the one shard served.
+    /// [`Engine::accept_changes`] for one change to the item `entity` of a bundle of one shard.
+    /// Over several shards an entity names no item alone, so this answers
+    /// [`crate::write::AcceptError::Contract`] and changes nothing.
     pub fn accept_change(
         &self,
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        let shard = self.generation.load().only_shard().id();
+        let only = {
+            let generation = self.generation.load();
+            let mut shards = generation.shards();
+            match (shards.next(), shards.next()) {
+                (Some(shard), None) => Some(shard.id()),
+                _ => None,
+            }
+        };
+        let Some(shard) = only else {
+            return Err(crate::write::AcceptError::Contract(
+                "an entity alone names no item in a bundle of several shards; name its shard with \
+                 `accept_changes`"
+                    .into(),
+            ));
+        };
         self.accept_changes(vec![(Target::Item(shard, entity), op)])
     }
 

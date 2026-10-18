@@ -59,6 +59,7 @@ use mosaica_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
 use mosaica_store::manifest::{DerivedExtent, DerivedForm};
 use mosaica_store::read::{Bundle, SegmentData, ViewData};
 use mosaica_types::layer::{MembershipSource, RegisteredLayer};
+use mosaica_types::view::ViewIncarnation;
 use mosaica_types::ShardId;
 
 use crate::row_column::RowColumn;
@@ -118,6 +119,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// against them.
 pub struct ShapeLevel {
     pub view: String,
+    /// The incarnation of the view's key whose artifacts the level holds.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level version the shapes were read at. A publication into the level moves it, and
@@ -158,11 +161,12 @@ pub struct ResolutionCost {
 }
 
 impl ShapeLevel {
-    /// Build from the store's record blobs: every shape of `(layer, level)` canonicalised for
-    /// `view`, decoded and decomposed — or, where `persisted` holds an entry descended from the
-    /// same canonical bytes, assembled from it.
+    /// Build from the store's record blobs: every shape of `(layer, level)` drawn in `view` at
+    /// `incarnation`, canonicalised for `view`, decoded and decomposed — or, where `persisted`
+    /// holds an entry descended from the same canonical bytes, assembled from it.
     pub fn build(
         view: &str,
+        incarnation: ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -186,7 +190,8 @@ impl ShapeLevel {
             // space, which would give one quarter's polygon a membership and a masked count on
             // every quarter's map. An entity-scoped layer's records are drawn in every view it
             // names and pass this.
-            if !store.drawn_in_view(layer, level, ordinal, crate::artifacts::view_key(view)) {
+            let key = crate::artifacts::view_key(view);
+            if !store.drawn_in_view(layer, level, ordinal, key, incarnation) {
                 shapes.push(None);
                 continue;
             }
@@ -237,6 +242,7 @@ impl ShapeLevel {
         let index = ShapeIndex::build(&shapes);
         ShapeLevel {
             view: view.to_string(),
+            incarnation,
             layer: layer.to_string(),
             level,
             level_version: store.level_version(layer, level),
@@ -432,12 +438,14 @@ impl ShapeStore {
             .cloned()
     }
 
-    /// The level's held structures at the store's current level version, built if absent or
-    /// stale. The build runs outside the lock — it is the expensive step — and a concurrent build
-    /// of the same level at the same version is harmless, the two being equal.
+    /// The level's held structures for `view` at `incarnation` and the store's current level
+    /// version, built if absent or stale. The build runs outside the lock — it is the expensive
+    /// step — and a concurrent build of the same level at the same version is harmless, the two
+    /// being equal.
     pub fn level(
         &self,
         view: &str,
+        incarnation: ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -445,12 +453,19 @@ impl ShapeStore {
     ) -> Arc<ShapeLevel> {
         let version = store.level_version(layer, level);
         if let Some(held) = self.get(view, layer, level) {
-            if held.level_version == version {
+            if held.level_version == version && held.incarnation == incarnation {
                 return held;
             }
         }
         let entries = persisted.held_entries(view, layer, level, version, store);
-        let built = Arc::new(ShapeLevel::build(view, layer, level, store, entries));
+        let built = Arc::new(ShapeLevel::build(
+            view,
+            incarnation,
+            layer,
+            level,
+            store,
+            entries,
+        ));
         let (interior, boundary, max_interior, max_boundary) = built.decomposition_size();
         tracing::info!(
             layer = %layer,
@@ -567,7 +582,14 @@ impl ShapeStore {
                         continue;
                     };
                     for level in 0..registered.runs.len() as u32 {
-                        let held = self.level(view, &declaration.name, level, store, persisted);
+                        let held = self.level(
+                            view,
+                            view_data.incarnation,
+                            &declaration.name,
+                            level,
+                            store,
+                            persisted,
+                        );
                         let cost = Self::stage_missing(
                             &held,
                             shard.record.id,
@@ -857,6 +879,7 @@ fn invert_column(
         &level.layer,
         level.level,
         crate::artifacts::view_key(&level.view),
+        level.incarnation,
     ) {
         if let Some(slot) = rows.get_mut(ordinal as usize) {
             *slot = Some(Bitmap::new());

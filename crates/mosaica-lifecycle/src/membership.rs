@@ -1349,6 +1349,14 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl ArtifactRecord {
+    /// Whether the artifact is drawn in the view whose key is `view` at `incarnation`: an
+    /// entity-scoped artifact in every view, a group-scoped one only in its own view's incarnation.
+    pub fn drawn_in(&self, view: &str, incarnation: mosaica_types::view::ViewIncarnation) -> bool {
+        self.view
+            .as_deref()
+            .is_none_or(|own| own == view && self.incarnation == incarnation)
+    }
+
     /// Where the content at `rank` has its values in the artifact's content row: tags
     /// `position × kinds + kind`.
     pub fn content_position(&self, rank: usize) -> usize {
@@ -3121,7 +3129,8 @@ impl ArtifactStore {
 
     /// The artifacts of one level a given view is **drawn** (`views.md` §3.5): every record of an
     /// entity-scoped layer, whose one set is drawn on every view it names, and on a group-scoped
-    /// layer only the records belonging to this view.
+    /// layer only the records belonging to this view at its `incarnation`. A record of a dropped
+    /// incarnation of the key, held until its deletion is compacted away, is drawn nowhere.
     ///
     /// **`view` is the view's own key**, not its path: a group's several layouts over one key set
     /// draw the same artifact in each, which is what the build's per-view pass reads too.
@@ -3134,17 +3143,24 @@ impl ArtifactStore {
         layer: &str,
         level: u32,
         view: &'a str,
+        incarnation: mosaica_types::view::ViewIncarnation,
     ) -> impl Iterator<Item = (u32, &'a ArtifactRecord)> {
         self.level(layer, level)
-            .filter(move |(_, record)| record.view.as_deref().is_none_or(|own| own == view))
+            .filter(move |(_, record)| record.drawn_in(view, incarnation))
     }
 
-    /// Is the artifact at `ordinal` drawn in `view` — every record of an entity-scoped layer,
-    /// and on a group-scoped one only its own view's ([`Self::level_in_view`], `views.md` §3.5)?
+    /// Is the artifact at `ordinal` drawn in `view` at `incarnation` ([`Self::level_in_view`])?
     /// A hole is drawn nowhere.
-    pub fn drawn_in_view(&self, layer: &str, level: u32, ordinal: u32, view: &str) -> bool {
+    pub fn drawn_in_view(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
+    ) -> bool {
         self.get(layer, level, ordinal)
-            .is_some_and(|record| record.view.as_deref().is_none_or(|own| own == view))
+            .is_some_and(|record| record.drawn_in(view, incarnation))
     }
 
     /// Every artifact of every layer, as `(layer, level, ordinal, record)`.

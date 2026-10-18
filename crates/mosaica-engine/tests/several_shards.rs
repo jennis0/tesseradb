@@ -457,6 +457,21 @@ fn an_insert_lands_in_the_open_shard_and_replays_there() {
     );
 }
 
+/// A change naming an entity and no shard is refused over two shards, where the entity is an
+/// item in each, and changes nothing.
+#[test]
+fn a_change_naming_an_entity_alone_is_refused_over_two_shards() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    let before = served_to(&engine, &full_coverage_credential());
+    let answered = engine.accept_change(EntityId::new(1), ChangeOp::Delete);
+    assert!(
+        matches!(answered, Err(AcceptError::Contract(_))),
+        "{answered:?}"
+    );
+    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
+}
+
 /// A bundle of two shards whose log holds deletions and suppressions in both reopens with each
 /// shard's denies: what the same denies leave served in a bundle of one shard.
 #[test]
@@ -956,9 +971,9 @@ fn a_view_drop_deletes_the_items_it_leaves_in_no_view_in_every_shard() {
 }
 
 /// A scoped artifact with members in both shards, in a view dropped and created again, is a held
-/// deletion: its key publishes a new artifact in the recreated view, the only one served, and the
-/// old record is held until the compaction of the second shard listing it. A restart before any
-/// compaction and one after each agree.
+/// deletion: its key publishes a new artifact in the recreated view, the only one served and the
+/// only one each shard's form of the view holds, and the old record is held until the compaction
+/// of the second shard listing it. A restart before any compaction and one after each agree.
 #[test]
 fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
     use mosaica_lifecycle::ShardSets;
@@ -1032,6 +1047,16 @@ fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
             .map(|artifact| artifact.mosaica_id)
             .collect();
         assert_eq!(served, vec![new], "{when}: only the new artifact is served");
+        for held_in in [ShardId::ZERO, shard(1)] {
+            let form = engine
+                .held_artifact_form_for_test(held_in, "g:k", "t", 0)
+                .expect("the viewport built the form");
+            assert_eq!(
+                (form.holds(0), form.holds(1)),
+                (false, true),
+                "{when}: shard {held_in}'s form holds the new artifact alone"
+            );
+        }
         assert_eq!(
             engine.locate_artifact(old).and_then(|at| at.key).is_some(),
             held,
@@ -1076,12 +1101,9 @@ fn a_scoped_column_serves_through_each_shards_compaction_without_a_restart() {
     scoped_column_through_each_compaction(false);
 }
 
-/// A group, a group-scoped column of it and a view under it, all declared at a running service,
-/// with one value flushed into shard 1, through the compaction of shard 0 and then shard 1,
-/// restarting after each where `restart`, and after both.
-fn scoped_column_through_each_compaction(restart: bool) {
-    let several = two_shards();
-    let engine = several.open_writing();
+/// A group `g`, a group-scoped column `heat` of it and a view `g:k` under it, declared at the
+/// running `engine`, with one item of `g:k` holding the value 7 flushed into shard 1.
+fn scoped_value_in_shard_one(engine: &Engine) {
     engine
         .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
             name: "g".into(),
@@ -1133,7 +1155,16 @@ fn scoped_column_through_each_compaction(restart: bool) {
             mosaica_id_column: false,
         })
         .expect("the insert is accepted");
-    publish_buffered(&engine);
+    publish_buffered(engine);
+}
+
+/// A group, a group-scoped column of it and a view under it, all declared at a running service,
+/// with one value flushed into shard 1, through the compaction of shard 0 and then shard 1,
+/// restarting after each where `restart`, and after both.
+fn scoped_column_through_each_compaction(restart: bool) {
+    let several = two_shards();
+    let engine = several.open_writing();
+    scoped_value_in_shard_one(&engine);
     let named: Vec<Vec<String>> = side_manifest(&several.root)
         .shards
         .records
@@ -1211,6 +1242,30 @@ fn scoped_column_through_each_compaction(restart: bool) {
     drop(engine);
     let engine = several.open_writing();
     assert_eq!(in_view(&engine), (1, 1));
+}
+
+/// A dropped view's group-scoped column, listed by both shards, leaves both shards' records at
+/// their compactions.
+#[test]
+fn a_dropped_views_scoped_column_leaves_every_shards_record() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    scoped_value_in_shard_one(&engine);
+    compact(&engine, Some(ShardId::ZERO));
+    let listed = |root: &std::path::Path| -> Vec<usize> {
+        side_manifest(root)
+            .shards
+            .records
+            .iter()
+            .map(|record| record.scoped_columns.len())
+            .collect()
+    };
+    assert_eq!(listed(&several.root), [1, 1], "both shards list the pair");
+
+    engine.drop_view("g".into(), "k".into()).unwrap();
+    compact(&engine, Some(shard(1)));
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(listed(&several.root), [0, 0]);
 }
 
 /// A label layer whose content is served only to a viewer seeing every item it was generated from.

@@ -903,6 +903,7 @@ pub(crate) fn predicate_source<'a>(
             declaration.shape?;
             let held = shapes.level(
                 view,
+                view_data.incarnation,
                 &declaration.name,
                 level,
                 store,

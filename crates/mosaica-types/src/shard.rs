@@ -205,10 +205,17 @@ pub fn check_shard_size(size: u64) -> Result<(), ShardSizeError> {
     Ok(())
 }
 
+/// The high water at which an open shard of `size` seals: `size`, or [`ENTITY_END`] where the size
+/// runs past the end of the ids. A build splits its items into shards at it, and an ingest seals
+/// at it.
+pub fn sealing_high_water(size: u64) -> u64 {
+    size.min(ENTITY_END)
+}
+
 /// Whether a shard whose high water is `high_water` has reached `size`, where an open shard
-/// seals. A size past [`ENTITY_END`] is reached at the end of the ids.
+/// seals.
 pub fn reached_size(high_water: u64, size: u64) -> bool {
-    high_water >= size.min(ENTITY_END)
+    high_water >= sealing_high_water(size)
 }
 
 /// Where entity ids end, exclusive: `u32::MAX` is never issued, so a half-open range's end fits a

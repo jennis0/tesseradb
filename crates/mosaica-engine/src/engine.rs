@@ -1260,13 +1260,10 @@ impl Engine {
         let bundle = served_bundle(bundle, &state, &vocabularies);
         // A dropped view's artifacts are deleted, with their keys free, wherever the log or the
         // deny state does not already hold the deletion.
-        let dead = crate::write::dead_view_artifacts(
-            &state.registry,
-            &state.artifacts,
-            |group, key, incarnation| {
-                bundle.manifest.incarnation_of_key(group, key) == Some(incarnation)
-            },
-        );
+        let dead =
+            crate::write::dead_view_artifacts(&state.registry, &state.artifacts, |group, key| {
+                bundle.manifest.incarnation_of_key(group, key)
+            });
         for target in dead {
             let mosaica_types::Target::Artifact(space, entity) = target else {
                 continue;

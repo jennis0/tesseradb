@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 
 use croaring::Bitmap;
 use mosaica_types::{
-    check_room, reached_size, reuse_min_free, EntityId, ItemAt, ShardFull, ShardId, ShardState,
-    ShardsExhausted, Target, Tenancy, TermId, ENTITY_END,
+    check_room, reached_size, reuse_min_free, sealing_high_water, EntityId, ItemAt, ShardFull,
+    ShardId, ShardState, ShardsExhausted, Target, Tenancy, TermId, ENTITY_END,
 };
 
 use crate::wal::WalRecord;
@@ -211,7 +211,7 @@ impl Allocator {
             ids.extend(take_lowest(&mut self.free, tenancy, wanted, taken));
         }
         if self.state == ShardState::Open {
-            let bound = size.min(ENTITY_END).max(self.high_water);
+            let bound = sealing_high_water(size).max(self.high_water);
             let lo = self.high_water;
             self.high_water = (lo + (n - ids.len() as u64)).min(bound);
             ids.extend(lo..self.high_water);
@@ -350,7 +350,7 @@ fn place(
     items: u64,
 ) -> Result<Placement, ShardsExhausted> {
     let threshold = reuse_min_free(size);
-    let bound = size.min(ENTITY_END);
+    let bound = sealing_high_water(size);
     let mut shards = shards.to_vec();
     shards.sort_by_key(|room| room.shard);
     let mut next_id = next_id;

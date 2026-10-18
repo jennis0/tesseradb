@@ -67,6 +67,8 @@ pub(super) struct Coordinate<'a> {
     pub(super) prefix: &'a str,
     pub(super) shard: ShardId,
     pub(super) view: &'a str,
+    /// The incarnation of the view's key whose artifacts the level draws.
+    pub(super) incarnation: mosaica_types::view::ViewIncarnation,
     pub(super) layer: &'a str,
     pub(super) level: u32,
     /// The shard's version of the level ([`ArtifactStore::level_version`]).
@@ -947,6 +949,7 @@ mod tests {
                 "v0",
                 ShardId::new(shard).expect("in range"),
                 "s0",
+                mosaica_types::view::DECLARED_INCARNATION,
                 layer,
                 0,
                 store,

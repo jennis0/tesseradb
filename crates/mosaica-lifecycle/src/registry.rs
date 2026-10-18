@@ -1742,11 +1742,11 @@ impl LayerRegistry {
     ///
     /// **Suppression-blindness carries over unchanged**, because the duplicate-key check
     /// [`prepare_artifacts`] makes reads [`ArtifactStore::ordinal_of_key`] — the store's key index,
-    /// which loses a key only when the artifact is deleted. A suppressed value's key therefore
-    /// still resolves, is refused as a duplicate, and never mints a second unsuppressed artifact
-    /// (§5's third ruling, stated in full on [`resolve_or_mint`]). A *deleted* value's key mints
-    /// again from the deletion's acknowledgement, and the new artifact is a new object with a new
-    /// entity — which is what a deletion means.
+    /// which loses a key only when the artifact is deleted, or its layer or view dropped. A
+    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints
+    /// a second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]).
+    /// A *deleted* value's key mints again from the deletion's acknowledgement, and the new
+    /// artifact is a new object with a new entity — which is what a deletion means.
     ///
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
     /// [`prepare_artifacts`]: LayerRegistry::prepare_artifacts
@@ -2411,11 +2411,12 @@ impl LayerRegistry {
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
     /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key
-    /// only at the acknowledgement of the artifact's *deletion*. A suppression touches no stored
-    /// structure at all (write-path §5.4, Rule S), so there is nothing here that could see one. Written against the *served* view instead, a suppressed
-    /// artifact would read as absent, its key would mint a second artifact, and the new one would
-    /// not be suppressed — a suppression defeated by ingesting a point. That is why this reads the
-    /// store, and why it must never be replaced by a `verdict` call.
+    /// only where the artifact goes: at the acknowledgement of its *deletion*, of its layer's drop
+    /// or of its view's drop. A suppression touches no stored structure at all (write-path §5.4,
+    /// Rule S), so there is nothing here that could see one. Written against the *served* view
+    /// instead, a suppressed artifact would read as absent, its key would mint a second artifact,
+    /// and the new one would not be suppressed — a suppression defeated by ingesting a point. That
+    /// is why this reads the store, and why it must never be replaced by a `verdict` call.
     pub fn resolve_or_mint(
         &self,
         layer_name: &str,
@@ -4950,7 +4951,18 @@ mod tests {
             Some("q1")
         );
         // Each is served only in its own view: the level projected for q2 holds one artifact.
-        assert_eq!(store.level_in_view("clusters/q", 0, "q2").count(), 1);
+        let declared = mosaica_types::view::DECLARED_INCARNATION;
+        assert_eq!(
+            store.level_in_view("clusters/q", 0, "q2", declared).count(),
+            1
+        );
+        assert_eq!(
+            store
+                .level_in_view("clusters/q", 0, "q2", declared + 1)
+                .count(),
+            0,
+            "another incarnation of the key draws none of this one's"
+        );
 
         // A re-`PUT` of the same key in the same view is the held artifact, not a third.
         let prepared = reg

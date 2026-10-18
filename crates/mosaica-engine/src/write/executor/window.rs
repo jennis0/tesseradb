@@ -767,12 +767,8 @@ impl Executor {
             )
         };
         drop(generation);
-        let (closed, placing) = match allocated {
-            Ok((closed, tally, placed)) => {
-                // Recorded at allocation: a failed append still fragmented the entity axis.
-                self.health.record_fragmentation(tally);
-                (closed, Placing::new(&shards, placed))
-            }
+        let (closed, tally, placing) = match allocated {
+            Ok((closed, tally, placed)) => (closed, tally, Placing::new(&shards, placed)),
             Err((error, waiters)) => {
                 fail_allocation(&self.health, error, waiters, entries, started);
                 return;
@@ -944,6 +940,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
         let sealed = closing.placing.commit(&self.live);
+        self.health.record_fragmentation(tally);
         // A sealed shard gets one closing compaction.
         let window_end = *positions.last().expect("a window appends its entries");
         self.compactions.sealed(sealed, window_end);

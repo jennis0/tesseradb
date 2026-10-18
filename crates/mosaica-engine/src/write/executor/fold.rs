@@ -2057,7 +2057,8 @@ impl Executor {
             .with_view_declarations(|declarations| declarations.names());
 
         // The shard now holds the base of every pair the compaction wrote, so it lists each one
-        // a shard lists; a pair of its own it did not write stays while another shard lists it.
+        // a shard lists; a pair of its own it did not write stays while another shard lists it
+        // and its view's incarnation is live.
         let mut scoped_columns: Vec<mosaica_store::manifest::ScopedColumn> = Vec::new();
         for (held, column) in partition_data
             .shards
@@ -2065,7 +2066,12 @@ impl Executor {
             .flat_map(|other| other.record.scoped_columns.iter().map(move |c| (other, c)))
         {
             let written = completed.scoped_views.contains(column);
-            let kept = held.record.id != shard_id && live_record.scoped_columns.contains(column);
+            let kept = held.record.id != shard_id
+                && live_record.scoped_columns.contains(column)
+                && live
+                    .bundle
+                    .manifest
+                    .is_live_incarnation(&column.view, column.incarnation);
             if (written || kept) && !scoped_columns.contains(column) {
                 scoped_columns.push(column.clone());
             }
@@ -2954,6 +2960,7 @@ impl Executor {
         self.live.with_artifacts(|store| {
             let held = self.deps.shapes.level(
                 view,
+                data.incarnation,
                 layer,
                 level,
                 store,
@@ -3082,8 +3089,12 @@ impl Executor {
                 if spatial {
                     let mut observed = None;
                     for (view, segment) in fold_segments {
+                        let Some(incarnation) = live.bundle.manifest.incarnation_of(view) else {
+                            continue;
+                        };
                         let held = self.deps.shapes.level(
                             view,
+                            incarnation,
                             &layer,
                             level,
                             store,
@@ -3740,6 +3751,7 @@ impl Executor {
                                 crate::artifacts::SpatialSource {
                                     level: self.deps.shapes.level(
                                         view,
+                                        view_data.incarnation,
                                         layer,
                                         *level,
                                         store,
@@ -3755,6 +3767,7 @@ impl Executor {
                             &generation.prefix,
                             shard.id(),
                             view,
+                            view_data.incarnation,
                             layer,
                             *level,
                             slice_of(store, shard.id()),

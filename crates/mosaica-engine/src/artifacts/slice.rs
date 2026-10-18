@@ -76,12 +76,17 @@ impl<'a> LevelSlice<'a> {
         self.through_slice(self.records.level(self.layer, self.level))
     }
 
-    /// The artifacts of the level drawn in `view`, as [`ArtifactStore::level_in_view`] walks them.
+    /// The artifacts of the level drawn in `view` at `incarnation`, as
+    /// [`ArtifactStore::level_in_view`] walks them.
     pub(crate) fn in_view<'v>(
         &'v self,
         view: &'v str,
+        incarnation: mosaica_types::view::ViewIncarnation,
     ) -> impl Iterator<Item = (u32, &'v ArtifactRecord)> {
-        self.through_slice(self.records.level_in_view(self.layer, self.level, view))
+        self.through_slice(
+            self.records
+                .level_in_view(self.layer, self.level, view, incarnation),
+        )
     }
 
     /// The slice's record of the artifact at `ordinal`, whose record in the level's records is

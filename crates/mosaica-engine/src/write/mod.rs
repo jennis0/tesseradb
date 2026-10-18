@@ -284,26 +284,27 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
     }
 }
 
-/// Every artifact of a group-scoped layer whose view `live` rejects, asked `(group, key,
-/// incarnation)`, as a deletion target. The records are not changed: a view drop deletes these,
-/// and an open marks them deleted over records packed or replayed from before a drop that named
-/// them.
+/// The artifacts a view drop deletes: every artifact of a group-scoped layer whose incarnation
+/// is not its key's live one, as `incarnation_of` answers `(group, key)` for the roster the drop
+/// leaves, and every artifact attached to one of them, as deletion targets. The live drop and the
+/// open both decide which artifacts are dead here. The records are not changed.
 pub(crate) fn dead_view_artifacts(
     registry: &LayerRegistry,
     store: &ArtifactStore,
-    live: impl Fn(&str, &str, mosaica_types::view::ViewIncarnation) -> bool,
+    incarnation_of: impl Fn(&str, &str) -> Option<mosaica_types::view::ViewIncarnation>,
 ) -> Vec<Target> {
-    store
-        .dead_view_artifacts(|layer, key, incarnation| {
-            match registry
-                .get(layer)
-                .and_then(|held| held.declaration.scope.group())
-            {
-                Some(group) => live(group, key, incarnation),
-                None => true,
-            }
-        })
-        .into_iter()
+    let dead = store.dead_view_artifacts(|layer, key, incarnation| {
+        match registry
+            .get(layer)
+            .and_then(|held| held.declaration.scope.group())
+        {
+            Some(group) => incarnation_of(group, key) == Some(incarnation),
+            None => true,
+        }
+    });
+    let attached = store.cascade_from(&dead);
+    dead.into_iter()
+        .chain(attached)
         .map(|(space, entity)| Target::Artifact(space, entity))
         .collect()
 }

@@ -1366,17 +1366,16 @@ impl Executor {
                     .map(|entity| Target::Item(shard.id(), entity))
             })
             .collect();
-        // The artifacts the key's live incarnation holds, in the owner's view and every sharing
-        // group's, and every artifact attached to one of them.
+        // The artifacts dead once the key leaves the owner and every sharing group.
         let manifest = &generation.bundle.manifest;
-        let mut artifacts = self.live.with_publication_state(|registry, store| {
-            crate::write::dead_view_artifacts(registry, store, |group, view, incarnation| {
-                view != key
-                    || manifest.owner_of_group(group) != owner
-                    || manifest.incarnation_of_key(group, view) != Some(incarnation)
+        let artifacts = self.live.with_publication_state(|registry, store| {
+            crate::write::dead_view_artifacts(registry, store, |group, view| {
+                let dropped = view == key && manifest.owner_of_group(group) == owner;
+                (!dropped)
+                    .then(|| manifest.incarnation_of_key(group, view))
+                    .flatten()
             })
         });
-        artifacts.extend(self.live.dependents_of(&artifacts));
         let deleted = dangling.len() as u64;
         let mut targets = dangling;
         targets.extend(artifacts.iter().copied());

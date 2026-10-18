@@ -2479,6 +2479,30 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
     );
 }
 
+/// A window whose log write fails gives its ids back, so the counters see only the retry that
+/// takes them again.
+#[test]
+fn a_window_that_never_became_durable_is_not_counted_in_the_fragmentation_figures() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let rows = || vec![keyed_row("frag-retry-a"), keyed_row("frag-retry-b")];
+
+    faults.fail_next_fsyncs(1);
+    assert!(engine
+        .ingest_rows(rows(), "failed".to_string(), [5u8; 32])
+        .is_err());
+    wait_until("the executor discarded the undurable region", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
+    engine
+        .ingest_rows(rows(), "retried".to_string(), [6u8; 32])
+        .expect("the retry is accepted");
+
+    let stats = engine.write_executor_stats();
+    assert_eq!(stats.fragmentation_windows, 1);
+    assert_eq!(stats.fragmentation.rows, 2);
+}
+
 /// **A poisoned node publishes no deny state.** The dispositions it is still applying were
 /// answered 500 under the apply-anyway rule, and contracts §3.1's residual is that a restart
 /// drops them — so a side-manifest carrying them would make a never-acked deny permanent on every

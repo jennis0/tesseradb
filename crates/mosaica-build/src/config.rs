@@ -260,7 +260,10 @@ struct DefaultsBlock {
 #[serde(deny_unknown_fields)]
 struct ShardsBlock {
     /// The high water at which the shard taking new items seals and the next one opens. A
-    /// positive integer. A build whose files create more items writes several shards.
+    /// positive integer; a size past 4,294,967,295, where the ids end, seals there. A build whose
+    /// files create more items writes several shards. An edit of a sealed shard's item takes an id
+    /// the shard has freed or one past its high water, so at a size at or past the end of the ids,
+    /// the edits of a full shard are refused until a compaction frees ids.
     size: u64,
 }
 

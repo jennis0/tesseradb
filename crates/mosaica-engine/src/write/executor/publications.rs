@@ -827,17 +827,20 @@ impl Executor {
         // spatial level's is the merged segment resolved whole against its shapes, in
         // `ArtifactProjections::rebase_merged`.
         let plan = &completed.plan;
-        if let (Some(previous), Some(space)) = (
+        if let (Some(previous), Some(next_view)) = (
             view_row_space(&live.bundle, &plan.partition, plan.shard, &plan.view),
-            view_row_space(&next_bundle, &plan.partition, plan.shard, &plan.view),
+            view_data(&next_bundle, &plan.partition, plan.shard, &plan.view),
         ) {
-            let merged_segment = view_data(&next_bundle, &plan.partition, plan.shard, &plan.view)
-                .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
+            let space = &next_view.row_space;
+            let merged_segment = next_view
+                .segments
+                .iter()
+                .find(|s| s.seg_id == merged_seg_id)
                 .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
                     self.segment_rows_of(
-                        &completed.plan.view,
+                        (&completed.plan.view, next_view.incarnation),
                         layer,
                         level,
                         merged_segment,
@@ -852,6 +855,7 @@ impl Executor {
                     &live.prefix,
                     completed.plan.shard,
                     &completed.plan.view,
+                    next_view.incarnation,
                     slice,
                     previous,
                     space,
@@ -1673,6 +1677,7 @@ impl Executor {
                         &generation.prefix,
                         shard,
                         view,
+                        data.incarnation,
                         layer,
                         level,
                         slice,
@@ -1704,6 +1709,7 @@ impl Executor {
                 let ordinals = &ordinals;
                 let held = self.deps.shapes.level(
                     view,
+                    data.incarnation,
                     layer,
                     level,
                     store,
@@ -1747,6 +1753,7 @@ impl Executor {
                     &generation.prefix,
                     shard,
                     view,
+                    data.incarnation,
                     layer,
                     level,
                     slice,
@@ -1759,15 +1766,15 @@ impl Executor {
         });
     }
 
-    /// Where a geometry publication's rows come from, per level of one view: what
-    /// `ArtifactProjections::extend_flushed` and `rebase_merged` are told
+    /// Where a geometry publication's rows come from, per level of one view at its incarnation:
+    /// what `ArtifactProjections::extend_flushed` and `rebase_merged` are told
     /// (`crate::artifacts::SegmentRows`). A stored level projects; a spatial level takes
     /// `resolved` where the flush's pool resolved the segment against the shapes now held, and
     /// resolves the segment here otherwise, for a level rebuilt by a publication since the flush
     /// was planned, or one no flush plan saw. An attribute predicate takes nothing.
     pub(super) fn segment_rows_of(
         &self,
-        view: &str,
+        (view, incarnation): (&str, mosaica_types::view::ViewIncarnation),
         layer: &str,
         level: u32,
         segment: Option<&mosaica_store::read::SegmentData>,
@@ -1785,6 +1792,7 @@ impl Executor {
         }
         let held = self.deps.shapes.level(
             view,
+            incarnation,
             layer,
             level,
             store,
@@ -2593,34 +2601,32 @@ impl Executor {
         //
         // A values-only publication added no rows, so it extends no form: `seg_id` is `None` and
         // the row space it publishes is the one it found.
-        if let (Some(previous), Some(space)) = (
+        if let (Some(previous), Some(next_view)) = (
             view_row_space(
                 &live.bundle,
                 &completed.partition,
                 completed.shard,
                 &completed.view,
             ),
-            view_row_space(
+            view_data(
                 &next_bundle,
                 &completed.partition,
                 completed.shard,
                 &completed.view,
             ),
         ) {
+            let space = &next_view.row_space;
             let segment = seg_id.as_ref().and_then(|seg_id| {
-                view_data(
-                    &next_bundle,
-                    &completed.partition,
-                    completed.shard,
-                    &completed.view,
-                )
-                .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
-                .map(|s| s.as_ref())
+                next_view
+                    .segments
+                    .iter()
+                    .find(|s| &s.seg_id == seg_id)
+                    .map(|s| s.as_ref())
             });
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
                     self.segment_rows_of(
-                        &completed.view,
+                        (&completed.view, next_view.incarnation),
                         layer,
                         level,
                         segment,
@@ -2635,6 +2641,7 @@ impl Executor {
                     &live.prefix,
                     completed.shard,
                     &completed.view,
+                    next_view.incarnation,
                     slice,
                     previous,
                     space,

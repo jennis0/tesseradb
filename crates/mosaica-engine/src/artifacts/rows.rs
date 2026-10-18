@@ -717,10 +717,10 @@ pub(super) fn drawn_record<'a>(
     layer: &str,
     level: u32,
     ordinal: u32,
-    view: &str,
+    (view, incarnation): (&str, mosaica_types::view::ViewIncarnation),
 ) -> Option<&'a ArtifactRecord> {
     store
-        .drawn_in_view(layer, level, ordinal, view_key(view))
+        .drawn_in_view(layer, level, ordinal, view_key(view), incarnation)
         .then(|| store.get(layer, level, ordinal))
         .flatten()
 }

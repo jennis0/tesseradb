@@ -672,8 +672,9 @@ a client uses the comparison is covered in serving.
 
 The schedule decides for each shard, on that shard's own gauges, whether a compaction is due:
 un-retired deletions of its items and of the artifacts it is listed by together, its segment count,
-its orphaned disc space or its tombstoned rows crossing a threshold. An artifact deletion that lists
-no shard counts in the open shard's gauge. `compaction_min_interval_secs` applies to each shard on
+its orphaned disc space or its tombstoned rows crossing a threshold. The artifacts a view drop
+deletes count as artifact deletions, so a drop can make a compaction due. An artifact deletion that
+lists no shard counts in the open shard's gauge. `compaction_min_interval_secs` applies to each shard on
 its own. Among the shards that are due, the one with the highest deleted fraction is compacted
 first, then the one with more segments, then the lowest number. Only one compaction runs at a time.
 `POST /control/compact` asks for a compaction of every shard with something to reclaim, one after
@@ -681,8 +682,8 @@ another, and of the shard the schedule ranks first where none has. A shard has s
 when its overlay holds a deletion, an artifact deletion lists it, it has a segment written since its
 last compaction, it lacks the base of a column declared at a running service, or it holds dead
 bytes. A request arriving while a compaction runs is held until that compaction lands. A shard
-that seals has one closing compaction queued if any of its gauges is above zero, run once the rows
-written before the seal have flushed.
+that seals has one closing compaction queued. Once the rows written before the seal have flushed,
+it runs if the shard has something to reclaim, and is dropped if not.
 
 ## Cached state and artifacts
 

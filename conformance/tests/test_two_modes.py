@@ -34,11 +34,11 @@ one-shard answer, which is how this module looks for them.
 6. *Status figures of the process and of the layout:* the caches, the heap and the sessions,
    which the control plane keeps per shard and per process; `segments[].count`, since each shard
    has its base segment, and `fragmentation`, a figure of each shard's postings; `shards.size`;
-   the write executor's counters, buffer and log, `publication` and each partition's
-   `segments_version`, since a flush publishes one shard of one view at a time; and the
-   compaction's counters, times and shard, since a compaction request compacts each shard with
-   something to reclaim and counts one for each. The corpus figures, summed over shards, are
-   compared.
+   the write executor's counters and log, though not its buffered and flushable items, which every
+   comparison takes flushed, `publication` and each partition's `segments_version`, since a flush
+   publishes one shard of one view at a time; and the compaction's counters, times and shard,
+   since a compaction request compacts each shard with something to reclaim and counts one for
+   each. The corpus figures, summed over shards, are compared.
 
 **The write script.** Each corpus is compared as built, after a write script, and after a
 compaction and a restart. The script is the same requests to every server of both modes: an
@@ -737,7 +737,11 @@ def send_status(side, server, token, body, request):
         del segments["count"]
     for partition in status["partitions"]:
         del partition["segments_version"]
-    status["write_executor"] = {"posture": status["write_executor"]["posture"]}
+    executor = status["write_executor"]
+    status["write_executor"] = {
+        "posture": executor["posture"],
+        "flush": {k: executor["flush"][k] for k in ("buffered_items", "flushable_items")},
+    }
     status["compaction"] = {k: status["compaction"][k] for k in COMPACTION_CORPUS}
     return side.rekey(status)
 

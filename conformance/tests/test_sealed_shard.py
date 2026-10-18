@@ -78,7 +78,7 @@ def test_a_compaction_reaches_every_shard_with_something_to_reclaim(world):
     w.compact()
     status = w.status()
     assert status["compaction"]["folds"] - before["folds"] == len(written), status["compaction"]
-    assert status["compaction"]["shard"] in written
+    assert status["compaction"]["shard"] == max(written), status["compaction"]
     assert status["overlay"]["retirable"] == 0, status["overlay"]
     w.check_served()
     [(deleted, gone)] = w.deleted.items()

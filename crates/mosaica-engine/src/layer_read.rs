@@ -213,6 +213,7 @@ impl Engine {
             &generation.prefix,
             shard.id(),
             view,
+            view_data.incarnation,
             &declaration.name,
             level,
             crate::write::slice_of(written, shard.id()),

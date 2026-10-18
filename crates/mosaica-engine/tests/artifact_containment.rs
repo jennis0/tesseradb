@@ -377,6 +377,7 @@ fn form(
         prefix,
         ShardId::ZERO,
         view,
+        mosaica_types::view::DECLARED_INCARNATION,
         LAYER,
         0,
         store,

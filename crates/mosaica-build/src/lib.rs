@@ -131,9 +131,10 @@ impl ShardSpan {
     }
 
     /// The shards `n` items fill at `size` apiece, in allocation order: one, empty, where there
-    /// are none.
+    /// are none. Each shard but the last holds the items an ingest seals it at.
     pub(crate) fn of(n: u64, size: u64) -> Result<Vec<ShardSpan>> {
-        let count = n.div_ceil(size).max(1);
+        let width = mosaica_types::sealing_high_water(size);
+        let count = n.div_ceil(width).max(1);
         if count > u64::from(ShardId::LIMIT) {
             return Err(BuildError::Invalid(format!(
                 "{n} items at a `[shards] size` of {size} fill {count} shards, more than the {} a \
@@ -145,8 +146,8 @@ impl ShardSpan {
         Ok((0..count)
             .map(|k| ShardSpan {
                 id: ShardId::new(k as u32).expect("the count is checked against the limit"),
-                lo: k * size,
-                hi: ((k + 1) * size).min(n),
+                lo: k * width,
+                hi: ((k + 1) * width).min(n),
             })
             .collect())
     }
@@ -3398,6 +3399,16 @@ fn relative_to(prefix_dir: &Path, path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A size past the end of the ids splits the items where an ingest of them seals a shard.
+    #[test]
+    fn a_size_past_the_end_of_the_ids_splits_at_the_end_of_the_ids() {
+        let end = mosaica_types::ENTITY_END;
+        let spans = ShardSpan::of(end + 1, u64::MAX).unwrap();
+        let bounds: Vec<(u64, u64)> = spans.iter().map(|span| (span.lo, span.hi)).collect();
+        assert_eq!(bounds, [(0, end), (end, end + 1)]);
+        assert!(mosaica_types::reached_size(spans[0].len(), u64::MAX));
+    }
 
     /// The count is over *distinct* codes, and every point is counted — the two numbers the
     /// report prints are not derived from each other.
