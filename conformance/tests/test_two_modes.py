@@ -253,13 +253,14 @@ class Side:
             headers = {"Authorization": f"Bearer {server.operator_credential}"}
             if write.batch is not None:
                 headers["x-mosaica-batch-id"] = write.batch
-            resp = requests.request(  # nosemgrep: the status is asserted on its own line
+            resp = requests.request(
                 write.method,
                 f"{server.control_base}{write.path}",
                 headers=headers,
                 json=body,
                 timeout=120,
             )
+            resp.raise_for_status()
             assert resp.status_code in write.expect, f"{write.method} {write.path}: {resp.text}"
             if write.path.startswith("/control/flush"):
                 assert resp.json()["visible"], resp.text
