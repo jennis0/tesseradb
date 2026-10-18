@@ -246,14 +246,13 @@ class DeclareSize(Stage):
     def apply(self, h: SuiteHarness) -> None:
         self.open = max(h.numbers.built)
         self.room = h.numbers.built[self.open]
-        resp = requests.put(
+        resp = requests.put(  # nosemgrep: the status is asserted on its own line
             f"{h.server.control_base}/control/shards",
             headers={"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"},
             json={"size": self.room + 1},
             timeout=30,
         )
         assert resp.status_code == 201, resp.text
-        resp.raise_for_status()
 
 
 @pytest.fixture(scope="module", params=[True, False], ids=["discarded", "kept"])
