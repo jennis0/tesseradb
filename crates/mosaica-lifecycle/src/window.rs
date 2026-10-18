@@ -251,9 +251,64 @@ pub struct ClosedEntry<W> {
     /// The edges this entry's close has to settle, carried through the allocation unchanged.
     pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
+    /// What the entry's request rows became, and which ones are over the key bound, as admitted:
+    /// what [`ClosedEntry::reopen`] gives back.
+    slots: Vec<Slot>,
+    over_bound: Vec<u32>,
 }
 
 impl<W> ClosedEntry<W> {
+    /// The entry as it was admitted, its ids given up: for a window that closes again without one
+    /// of its entries. Each row keeps every value written into it since.
+    pub fn reopen(self) -> WindowEntry<W> {
+        let WalRecord::IngestBatch {
+            batch_id,
+            body_hash,
+            rows,
+            edits,
+            ..
+        } = self.record
+        else {
+            unreachable!("a ClosedEntry's record is always an IngestBatch")
+        };
+        let rows = rows
+            .into_iter()
+            .zip(self.terms)
+            .map(|(row, terms)| unallocated(row, terms))
+            .collect();
+        let edits = edits
+            .into_iter()
+            .zip(self.edit_terms)
+            .map(|(edit, terms)| {
+                let mut terms = Some(terms);
+                UnallocatedEdit {
+                    shard: edit.shard,
+                    old: edit.old,
+                    number: edit.number,
+                    rows: edit
+                        .rows
+                        .into_iter()
+                        .map(|row| UnallocatedRow {
+                            join: None,
+                            ..unallocated(row, terms.take().unwrap_or_default())
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        WindowEntry {
+            rows,
+            edits,
+            slots: self.slots,
+            over_bound: self.over_bound,
+            batch_id,
+            body_hash,
+            memberships: self.memberships,
+            edges: self.edges,
+            waiters: self.waiters,
+        }
+    }
+
     /// The record's rows, for the buffer apply. Panics only if this type is ever built from
     /// something other than an `IngestBatch`, which [`CommitWindow::allocate`] is the sole producer
     /// of.
@@ -311,6 +366,20 @@ impl<W> ClosedEntry<W> {
             WalRecord::IngestBatch { receipt, .. } => receipt,
             _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
         }
+    }
+}
+
+/// `row` without the id a window gave it, `terms` back in it; a join keeps the item it names.
+fn unallocated(row: WalRow, terms: Vec<TermId>) -> UnallocatedRow {
+    UnallocatedRow {
+        join: row.join.then(|| ItemAt::new(row.shard, row.entity_id)),
+        view: row.view,
+        descriptors: row.descriptors,
+        x: row.x,
+        y: row.y,
+        scalars: row.scalars,
+        scoped: row.scoped,
+        terms,
     }
 }
 
@@ -886,6 +955,8 @@ impl<W> CommitWindow<W> {
                 memberships: entry.memberships,
                 edges: entry.edges,
                 waiters: entry.waiters,
+                slots: entry.slots,
+                over_bound: entry.over_bound,
             });
         }
         Ok((closed, tally, placed))
@@ -995,6 +1066,67 @@ mod tests {
         let low: Vec<u64> = split_ids.iter().skip(1).step_by(2).copied().collect();
         let high: Vec<u64> = split_ids.iter().step_by(2).copied().collect();
         assert!(low.iter().max() < high.iter().min());
+    }
+
+    /// A window whose entries are reopened after it gave its ids back, and allocated again, frames
+    /// what it framed the first time: every row, join, edit, receipt and id. Without one of its
+    /// entries, the others take the ids the first would have left them.
+    #[test]
+    fn a_reopened_window_frames_what_it_framed() {
+        let window = || {
+            let mut w = CommitWindow::new(0);
+            let mut joining = row(&[2]);
+            joining.join = Some(ItemAt::new(ShardId::ZERO, EntityId::new(5)));
+            let mut a = entry("a", vec![row(&[9]), joining]);
+            a.slots[1] = Slot::Written {
+                row: 1,
+                mosaica_id: Some(5),
+            };
+            a.slots.push(Slot::Edited {
+                edit: 0,
+                mosaica_id: 3,
+            });
+            a.over_bound = vec![0];
+            a.edits.push(UnallocatedEdit {
+                shard: ShardId::ZERO,
+                old: EntityId::new(3),
+                number: EntityId::new(3),
+                rows: vec![row(&[4]), row(&[])],
+            });
+            push(&mut w, a);
+            push(&mut w, entry("b", vec![row(&[1])]));
+            w
+        };
+        let framed = |closed: &[ClosedEntry<&'static str>]| -> Vec<(WalRecord, Vec<ItemAt>)> {
+            closed
+                .iter()
+                .map(|e| (e.record.clone(), e.items.clone()))
+                .collect()
+        };
+
+        let mut alloc = Allocator::new(10);
+        let (first, _, placed) = close(window(), &mut alloc).unwrap();
+        let expected = framed(&first);
+        for (_, taken) in placed.taken {
+            alloc.give_back(taken);
+        }
+        let mut again = CommitWindow::new(1);
+        for entry in first {
+            push(&mut again, entry.reopen());
+        }
+        let (second, _, placed) = close(again, &mut alloc).unwrap();
+        assert_eq!(framed(&second), expected);
+
+        for (_, taken) in placed.taken {
+            alloc.give_back(taken);
+        }
+        let mut without = CommitWindow::new(2);
+        push(&mut without, second.into_iter().nth(1).unwrap().reopen());
+        let (alone, _, _) = close(without, &mut alloc).unwrap();
+        assert_eq!(
+            alone[0].items,
+            vec![ItemAt::new(ShardId::ZERO, EntityId::new(10))]
+        );
     }
 
     /// Each entry's ids come back in **its own** submitted row order, and every id the window issued

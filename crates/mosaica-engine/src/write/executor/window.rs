@@ -40,7 +40,8 @@ impl BatchState {
 }
 
 /// A closed commit window and every waiter it owes: [`ClosingWindow::fail_all`],
-/// [`ClosingWindow::fail_wal`] and [`ClosingWindow::ack`] are its three exits.
+/// [`ClosingWindow::fail_wal`], [`ClosingWindow::ack`] and [`ClosingWindow::reopen`] are its four
+/// exits.
 pub(super) struct ClosingWindow {
     closed: Vec<ClosedEntry<Reply<Ingested>>>,
     /// Entries, not rows: what the service estimate is per.
@@ -162,6 +163,16 @@ impl ClosingWindow {
         refuse_waiters(health, waiters, self.entries, self.started, error);
     }
 
+    /// Before the append: nothing was appended or applied. Every id the window took is given back,
+    /// and its entries come back as they were admitted.
+    pub(super) fn reopen(self) -> Vec<WindowEntry<Reply<Ingested>>> {
+        drop(self.placing);
+        self.closed
+            .into_iter()
+            .map(mosaica_lifecycle::ClosedEntry::reopen)
+            .collect()
+    }
+
     /// The append or fsync failed: apply nothing, and blame [`Blame`]'s rule for every waiter but
     /// the one carrying the real error.
     pub(super) fn fail_wal(self, health: &ExecutorHealth, blamed: usize, error: WalError) {
@@ -205,6 +216,9 @@ impl ClosingWindow {
         health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
     }
 }
+
+/// The codes a vocabulary pass drew, as `(vocabulary, key, code)`.
+type Drawn = Vec<(String, String, u32)>;
 
 /// What a vocabulary pass drew over a commit window's rows.
 pub(super) struct MintedCodes {
@@ -679,11 +693,12 @@ impl Executor {
     }
 
     /// Pad every row to schema and draw a code for every discovered-vocabulary key, into one
-    /// mutable copy of the bindings shared by the whole window.
+    /// mutable copy of the bindings shared by the whole window. `Err` carries the codes drawn
+    /// before the refusal, which [`Executor::unmint`] takes back.
     pub(super) fn mint_window_codes(
         &self,
         closing: &mut ClosingWindow,
-    ) -> std::result::Result<MintedCodes, MintError> {
+    ) -> std::result::Result<MintedCodes, (MintError, Drawn)> {
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = &generation.bundle.manifest.declared_scalars;
@@ -699,31 +714,94 @@ impl Executor {
             {
                 // A column declared since admission is appended at the tail of `declared_scalars`.
                 crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
-                mint_cells(
+                let minted = mint_cells(
                     &mut row.scalars,
                     declared_scalars
                         .iter()
                         .map(|d| (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)),
                     &mut vocabularies,
                     &mut fresh,
-                )?;
-                let Some(families) = scoped_by_view.get(row.view.as_str()) else {
-                    continue;
-                };
-                mint_cells(
-                    &mut row.scoped,
-                    families
-                        .iter()
-                        .map(|f| (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)),
-                    &mut vocabularies,
-                    &mut fresh,
-                )?;
+                )
+                .and_then(|()| {
+                    let Some(families) = scoped_by_view.get(row.view.as_str()) else {
+                        return Ok(());
+                    };
+                    mint_cells(
+                        &mut row.scoped,
+                        families
+                            .iter()
+                            .map(|f| (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)),
+                        &mut vocabularies,
+                        &mut fresh,
+                    )
+                });
+                if let Err(e) = minted {
+                    return Err((e, fresh));
+                }
             }
         }
         Ok(MintedCodes {
             vocabularies,
             fresh,
         })
+    }
+
+    /// Put back the key each cell carried where a refused close wrote one of `drawn`'s codes over
+    /// it, so the next close draws a code for it again.
+    fn unmint(&self, closing: &mut ClosingWindow, drawn: &[(String, String, u32)]) {
+        if drawn.is_empty() {
+            return;
+        }
+        let keys: FxHashMap<(&str, u32), &str> = drawn
+            .iter()
+            .map(|(vocabulary, key, code)| ((vocabulary.as_str(), *code), key.as_str()))
+            .collect();
+        let restore = |cells: &mut [WalScalar], vocabularies: Vec<Option<&str>>| {
+            for (cell, vocabulary) in cells.iter_mut().zip(vocabularies) {
+                let key = vocabulary
+                    .zip(scalar_code(cell))
+                    .and_then(|at| keys.get(&at));
+                if let Some(key) = key {
+                    *cell = WalScalar::Utf8((*key).to_string());
+                }
+            }
+        };
+        let generation = self.generation.load_full();
+        let declared: Vec<Option<&str>> = generation
+            .bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .map(|d| d.vocabulary.as_deref())
+            .collect();
+        let scoped_by_view = scoped_families_by_view(&generation.bundle.manifest);
+        for entry in closing.entries_mut() {
+            let (rows, edits) = entry.rows_and_edits_mut();
+            for row in rows
+                .iter_mut()
+                .chain(edits.iter_mut().flat_map(|e| e.rows.iter_mut()))
+            {
+                restore(&mut row.scalars, declared.clone());
+                if let Some(families) = scoped_by_view.get(row.view.as_str()) {
+                    restore(
+                        &mut row.scoped,
+                        families.iter().map(|f| f.vocabulary.as_deref()).collect(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// A window of several entries refused at its close: each entry closes again in a window of its
+    /// own, in the order they were admitted, so an entry is refused only for what it cannot do
+    /// alone, with its own reason, and the others commit. `drawn` is what the refused close drew.
+    fn close_each_alone(&mut self, mut closing: ClosingWindow, drawn: &[(String, String, u32)]) {
+        self.unmint(&mut closing, drawn);
+        for entry in closing.reopen() {
+            let mut window = CommitWindow::new(self.next_window_seq());
+            window.push(entry, mosaica_lifecycle::WindowClaims::default());
+            self.close_window(window);
+        }
     }
 
     /// Close a commit window: allocate, then one fsync over the vocabulary mints, the entries, the
@@ -801,7 +879,10 @@ impl Executor {
 
         let minted = match self.mint_window_codes(&mut closing) {
             Ok(minted) => minted,
-            Err(e) => {
+            Err((_, drawn)) if closing.entries().len() > 1 => {
+                return self.close_each_alone(closing, &drawn);
+            }
+            Err((e, _)) => {
                 let detail = e.to_string();
                 closing.fail_all(&self.health, || ExecError::VocabularyRefused {
                     detail: detail.clone(),
@@ -817,8 +898,10 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::VocabularyMint, mark);
 
+        let several = closing.entries().len() > 1;
         let (mut mint_records, minted_per_entry) = match self.mint_records(closing.entries_mut()) {
             Ok(minted) => minted,
+            Err(_) if several => return self.close_each_alone(closing, &fresh_bindings),
             Err(detail) => {
                 closing.fail_all(&self.health, || ExecError::LayerRefused {
                     detail: detail.clone(),
@@ -837,6 +920,7 @@ impl Executor {
         });
         match self.derive_records(rows, &vocabularies) {
             Ok(records) => mint_records.extend(records),
+            Err(_) if several => return self.close_each_alone(closing, &fresh_bindings),
             Err(detail) => {
                 closing.fail_all(&self.health, || ExecError::LayerRefused {
                     detail: detail.clone(),
@@ -868,6 +952,7 @@ impl Executor {
         };
         let growth = match prepared {
             Ok(growth) => growth,
+            Err(_) if several => return self.close_each_alone(closing, &fresh_bindings),
             Err(detail) => {
                 closing.fail_all(&self.health, || ExecError::LayerRefused {
                     detail: detail.clone(),

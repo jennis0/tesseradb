@@ -28,7 +28,7 @@ use mosaica_build::config::{Config, Schema};
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{AcceptError, Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
-use mosaica_lifecycle::{ChangeOp, Wal, WalRecord, WalScalar};
+use mosaica_lifecycle::{ChangeOp, ExecError, Wal, WalRecord, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 use mosaica_types::{EntityId, ShardId};
 
@@ -726,5 +726,111 @@ fn a_declared_vocabulary_is_unaffected_by_the_mint_loop() {
         stored_code_of(&root, "band", entity),
         Some(2),
         "an already-coded declared value must reach the segment unchanged"
+    );
+}
+
+/// **A batch refused at its window's close is refused alone.** Two callers' batches are admitted
+/// into one window, and together they need more codes than the vocabulary has left: the first
+/// batch's one key fits, and the second's five do not fit beside it. The first commits as it
+/// would alone; the second is refused as exhausted, binds none of its keys, and
+/// gives back the ids it took, in this process and after a restart.
+#[test]
+fn a_batch_refused_at_its_windows_close_is_refused_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    let schema_toml = discovered_sparse_schema_toml();
+    build_fixture_with_schema(&root, tmp.path(), &schema_toml, "department", 2);
+    let mut engine = engine_over(tmp.path(), &root, config());
+    let rows = |engine: &Engine, keys: &[String]| -> Vec<UnallocatedRow> {
+        keys.iter()
+            .map(|key| UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec()],
+                x: 1.0,
+                y: 1.0,
+                scalars: vec![WalScalar::Utf8(key.clone())],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
+            })
+            .collect()
+    };
+    let first_keys = vec!["first".to_string()];
+    let second_keys: Vec<String> = (0..5).map(|i| format!("second-{i}")).collect();
+
+    engine.set_work_pass_paused_for_test(true);
+    let enqueued = engine.work_enqueued_for_test();
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            engine.ingest_rows(
+                rows(&engine, &first_keys),
+                "batch-first".to_string(),
+                [1u8; 32],
+            )
+        });
+        wait_until("the first batch is queued", Duration::from_secs(30), || {
+            engine.work_enqueued_for_test() > enqueued
+        });
+        let second = scope.spawn(|| {
+            engine.ingest_rows(
+                rows(&engine, &second_keys),
+                "batch-second".to_string(),
+                [2u8; 32],
+            )
+        });
+        wait_until(
+            "the second batch is queued",
+            Duration::from_secs(30),
+            || engine.work_enqueued_for_test() > enqueued + 1,
+        );
+        engine.set_work_pass_paused_for_test(false);
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    let first = first.expect("the first batch commits");
+    assert!(
+        matches!(
+            second,
+            Err(AcceptError::Exec(ExecError::VocabularyRefused { .. }))
+        ),
+        "the second batch is refused as exhausted: {second:?}"
+    );
+
+    let check = |engine: &Engine, after: &str| {
+        let generation = engine.generation();
+        let department = generation.vocabularies.get("department").unwrap();
+        assert!(
+            department.code_of("first").is_some(),
+            "the first batch's key is bound, after {after}"
+        );
+        for key in &second_keys {
+            assert_eq!(
+                department.code_of(key),
+                None,
+                "the second batch bound {key}, after {after}"
+            );
+        }
+        assert!(
+            engine.view_holds(mosaica_types::ItemAt::new(ShardId::ZERO, first[0]), "s0"),
+            "the first batch's row is held, after {after}"
+        );
+    };
+    let next = |engine: &Engine, batch: &str| {
+        engine
+            .ingest_rows(rows(engine, &first_keys), batch.to_string(), [3u8; 32])
+            .expect("a batch of a bound key is accepted")[0]
+    };
+    check(&engine, "the close");
+    assert_eq!(
+        next(&engine, "batch-next").raw(),
+        first[0].raw() + 1,
+        "the refused batch's ids are given back"
+    );
+    drop(engine);
+    engine = engine_over(tmp.path(), &root, config());
+    check(&engine, "a restart");
+    assert_eq!(
+        next(&engine, "batch-after-restart").raw(),
+        first[0].raw() + 2,
+        "no id the refused batch took is held after a restart"
     );
 }

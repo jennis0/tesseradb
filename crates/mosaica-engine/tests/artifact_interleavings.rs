@@ -1358,12 +1358,13 @@ fn two_batches_in_one_window_naming_one_new_edge_record_it_once() {
     );
 }
 
-/// **Two batches of one window naming different parents for one parentless child refuse the
-/// window.** The conflict is the same one a build refuses over a corpus, and it is found where the
-/// window's edges are gathered — before anything is appended, so neither batch lands and a replay
-/// has nothing to disagree with.
+/// **Of two batches of one window naming different parents for one parentless child, the second
+/// is refused.** The conflict is the same one a build refuses over a corpus, and it is found where
+/// the window's edges are gathered, before anything is appended. Each batch then closes alone, in
+/// the order they were admitted: the first gives the child its parent, and the second, naming
+/// another, is refused as it would be if sent after it.
 #[test]
-fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_window() {
+fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_second() {
     let fx = fixture();
     let (engine, faults) = fx.open_with_faults();
     engine.register_layer(nested_open(LAYER)).unwrap();
@@ -1392,15 +1393,15 @@ fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_window() {
         parked.gate.join().unwrap();
         (b1.join().unwrap(), b2.join().unwrap())
     });
-    for outcome in [&first, &second] {
-        outcome
-            .as_ref()
-            .expect_err("the window carries two parents for one child");
-    }
-    assert!(
-        parents_of(&engine, "c").is_empty(),
-        "a refused window records no edge"
-    );
+    first.expect("the first batch gives the child its parent");
+    second.expect_err("the second batch names another parent for the child");
+    settle(&engine);
+    let p0 = artifacts_of(&engine, &full_coverage_credential())
+        .into_iter()
+        .find(|a| a.key.as_deref() == Some("p0"))
+        .expect("p0 is served")
+        .mosaica_id;
+    assert_eq!(parents_of(&engine, "c"), vec![p0], "the first batch's edge");
 }
 
 /// **A mint under an existing artifact, and a fill on that artifact naming the mint, is a cycle.**
@@ -1408,8 +1409,10 @@ fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_window() {
 /// Neither half can see it alone: the publication's parent is not in the store when the fill
 /// resolves, and the fill's is not in the store when the publication is prepared. So the close walks
 /// the layer's held edges and every edge it is about to create as one graph, and refuses the window.
+/// Each batch then closes alone: the mint lands, and the fill that would close the cycle is
+/// refused.
 #[test]
-fn a_mint_and_a_fill_that_close_a_cycle_refuse_the_window() {
+fn a_mint_and_a_fill_that_close_a_cycle_refuse_the_fill() {
     let fx = fixture();
     let (engine, faults) = fx.open_with_faults();
     engine.register_layer(nested_open(LAYER)).unwrap();
@@ -1437,8 +1440,9 @@ fn a_mint_and_a_fill_that_close_a_cycle_refuse_the_window() {
         parked.gate.join().unwrap();
         (b1.join().unwrap(), b2.join().unwrap())
     });
-    for outcome in [&first, &second] {
-        outcome.as_ref().expect_err("the two edges close a cycle");
-    }
-    assert!(parents_of(&engine, "c").is_empty(), "nothing was recorded");
+    first.expect("the mint lands");
+    second.expect_err("the fill closes a cycle");
+    settle(&engine);
+    assert!(parents_of(&engine, "c").is_empty(), "c holds no parent");
+    assert_eq!(parents_of(&engine, "m").len(), 1, "m is c's child");
 }
