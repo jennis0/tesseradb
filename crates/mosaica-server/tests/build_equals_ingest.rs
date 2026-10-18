@@ -435,8 +435,9 @@ impl Corpus {
         }
     }
 
-    /// The files in `dir`, whole or with no rows, and the declaration.
-    fn write(&self, dir: &Path, empty: bool) -> String {
+    /// The files in `dir`, whole or with no rows, and the declaration, at the shard size `size`
+    /// where one is given.
+    fn write(&self, dir: &Path, empty: bool, size: Option<u64>) -> String {
         std::fs::create_dir_all(dir).unwrap();
         self.world.write(&dir.join("world.parquet"), empty);
         self.near.write(&dir.join("near.parquet"), empty);
@@ -449,6 +450,10 @@ impl Corpus {
             "\n[[attribute]]\nname   = \"b\"\ntype   = \"keyword\"\nunique = true\n"
         } else {
             ""
+        };
+        let shards = match size {
+            Some(size) => format!("\n[shards]\nsize = {size}\n"),
+            None => String::new(),
         };
         format!(
             r#"
@@ -464,7 +469,7 @@ members = "members.parquet"
 [defaults]
 source          = "world"
 allocation_view = "world"
-
+{shards}
 [[view]]
 name             = "world"
 extent           = {{ min = 0.0, max = 100.0 }}
@@ -581,6 +586,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         layers,
         layer_inputs: acquired.layers,
         schema: config.schema,
+        shard_size: config.shard_size,
         ..build_args(out, views)
     }
 }
@@ -839,31 +845,9 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
     out
 }
 
-/// Compare the two paths over the corpus `seed` draws; answers the reasons the build refused rows
-/// for.
-async fn build_equals_ingest(seed: u64) -> Vec<String> {
-    let corpus = Corpus::draw(seed);
-    let tmp = TempDir::new().unwrap();
-
-    // Path A: the build.
-    let full = tmp.path().join("full");
-    let declaration = corpus.write(&full, false);
-    let built_root = full.join("bundle");
-    let report = build(&args(&full, &declaration, &built_root)).expect("the build runs");
-    assert!(
-        report.refused.iter().any(|entry| entry.is_refusal()),
-        "seed {seed} plants refusals"
-    );
-
-    // Path B: the same declaration built empty, and each file sent in declaration order.
-    let empty = tmp.path().join("empty");
-    corpus.write(&empty, true);
-    let empty_root = empty.join("bundle");
-    build(&args(&empty, &declaration, &empty_root)).expect("the empty build runs");
-    trace(&format!("seed {seed}: built; spawning"));
-    let ingested = spawn_server(&empty_root, &empty.join("cache"), &empty.join("wal.log")).await;
-    trace(&format!("seed {seed}: spawned"));
-
+/// Send the corpus `seed` draws to `ingested` one file at a time, in declaration order, and check
+/// each is refused where the build `report` refused it.
+async fn ingest_each_file(ingested: &TestServer, corpus: &Corpus, report: &BuildReport, seed: u64) {
     let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
     for (source, object, rows, view) in [
         ("world", "view 'world'", &corpus.world, Some("world")),
@@ -871,12 +855,12 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         ("far", "view 'g:far'", &corpus.far, Some("g:far")),
         ("notes", "attribute source 'notes'", &corpus.notes, None),
     ] {
-        let refuses = !reported(&report, object).is_empty();
+        let refuses = !reported(report, object).is_empty();
         let batch = format!("{seed}-{source}");
         let body = rows.ingest_body();
         trace(&format!("seed {seed}: ingest {batch}"));
         let answer = send(
-            &ingested,
+            ingested,
             reqwest::Method::POST,
             "/control/ingest",
             view,
@@ -886,9 +870,9 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         )
         .await;
         let what = format!("seed {seed}: {source}");
-        assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
+        assert_refused_alike(report, object, &listed(&answer, by_row), rows, &what);
         trace(&format!("seed {seed}: tick"));
-        tick(&ingested).await;
+        tick(ingested).await;
     }
 
     // The group-scoped attribute's file, each view's rows as one batch naming that view.
@@ -896,10 +880,10 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         let view = format!("g:{key}");
         let object = format!("attribute 'grade' in view '{view}'");
         let (rows, file_rows) = corpus.grades.of_view(key);
-        let refuses = !reported(&report, &object).is_empty();
+        let refuses = !reported(report, &object).is_empty();
         trace(&format!("seed {seed}: ingest grades of {view}"));
         let answer = send(
-            &ingested,
+            ingested,
             reqwest::Method::POST,
             "/control/ingest",
             Some(&view),
@@ -911,24 +895,24 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         let of_file = |entry: &Value| vec![file_rows[entry["row"].as_u64().unwrap() as usize]];
         let what = format!("seed {seed}: the grades of {view}");
         assert_refused_alike(
-            &report,
+            report,
             &object,
             &listed(&answer, of_file),
             &corpus.grades,
             &what,
         );
         trace(&format!("seed {seed}: tick"));
-        tick(&ingested).await;
+        tick(ingested).await;
     }
 
     // The access relation, one row per item naming it with its labels.
     let object = "point_visibility";
     let (body, rows_of) = corpus.relation.relation_body();
-    let refuses = !reported(&report, object).is_empty();
+    let refuses = !reported(report, object).is_empty();
     let batch = format!("{seed}-access");
     trace(&format!("seed {seed}: ingest {batch}"));
     let answer = send(
-        &ingested,
+        ingested,
         reqwest::Method::POST,
         "/control/ingest",
         None,
@@ -940,20 +924,20 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     let of_item = |entry: &Value| rows_of[entry["row"].as_u64().unwrap() as usize].clone();
     let what = format!("seed {seed}: the access relation");
     assert_refused_alike(
-        &report,
+        report,
         object,
         &listed(&answer, of_item),
         &corpus.relation,
         &what,
     );
     trace(&format!("seed {seed}: tick"));
-    tick(&ingested).await;
+    tick(ingested).await;
 
     let object = format!("layer '{LAYER}' members");
-    let refuses = !reported(&report, &object).is_empty();
+    let refuses = !reported(report, &object).is_empty();
     trace(&format!("seed {seed}: publish members"));
     let answer = send(
-        &ingested,
+        ingested,
         reqwest::Method::PUT,
         &format!("/control/layers/{LAYER}/artifacts"),
         None,
@@ -975,14 +959,49 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     };
     let what = format!("seed {seed}: the members");
     assert_refused_alike(
-        &report,
+        report,
         &object,
         &listed(&answer, of_member),
         &corpus.members,
         &what,
     );
     trace(&format!("seed {seed}: tick"));
-    tick(&ingested).await;
+    tick(ingested).await;
+}
+
+/// Compare the two paths over the corpus `seed` draws, declared in shards of a third of the items
+/// its build holds, rounded up, where `thirds`; answers the reasons the build refused rows for.
+async fn build_equals_ingest(seed: u64, thirds: bool) -> Vec<String> {
+    let corpus = Corpus::draw(seed);
+    let tmp = TempDir::new().unwrap();
+    let size = thirds.then(|| {
+        let counted = tmp.path().join("counted");
+        let declaration = corpus.write(&counted, false, None);
+        let report =
+            build(&args(&counted, &declaration, &counted.join("bundle"))).expect("the build runs");
+        report.items.div_ceil(3)
+    });
+
+    // Path A: the build.
+    let full = tmp.path().join("full");
+    let declaration = corpus.write(&full, false, size);
+    let built_root = full.join("bundle");
+    let report = build(&args(&full, &declaration, &built_root)).expect("the build runs");
+    assert!(
+        report.refused.iter().any(|entry| entry.is_refusal()),
+        "seed {seed} plants refusals"
+    );
+
+    // Path B: the same declaration built empty, and each file sent in declaration order.
+    let empty = tmp.path().join("empty");
+    corpus.write(&empty, true, size);
+    let empty_root = empty.join("bundle");
+    build(&args(&empty, &declaration, &empty_root)).expect("the empty build runs");
+    trace(&format!("seed {seed}: built; spawning"));
+    let ingested = spawn_server(&empty_root, &empty.join("cache"), &empty.join("wal.log")).await;
+    trace(&format!("seed {seed}: spawned"));
+
+    ingest_each_file(&ingested, &corpus, &report, seed).await;
 
     // Compared as a restart replays it.
     trace(&format!("seed {seed}: shutdown"));
@@ -1026,6 +1045,16 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     trace(&format!("seed {seed}: compared; shutting down both"));
     built.shutdown().await;
     ingested.shutdown().await;
+    if size.is_some() {
+        for (root, path) in [(&built_root, "the build"), (&empty_root, "the ingest")] {
+            let shards = mosaica_store::read::open_bundle(root)
+                .expect("the bundle opens")
+                .partitions["default"]
+                .shards
+                .len();
+            assert!(shards >= 3, "seed {seed}: {path} holds {shards} shards");
+        }
+    }
     trace(&format!("seed {seed}: done"));
     report
         .refused
@@ -1039,7 +1068,7 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
     let mut reasons = std::collections::BTreeSet::new();
     for seed in 1..=6u64 {
         eprintln!("seed {seed}");
-        reasons.extend(build_equals_ingest(seed).await);
+        reasons.extend(build_equals_ingest(seed, false).await);
     }
     for reason in [
         "names_two_items",
@@ -1052,5 +1081,15 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
             reasons.contains(reason),
             "the corpora plant {reason}: {reasons:?}"
         );
+    }
+}
+
+/// The same, declared in shards of a third of each corpus: both paths fill and seal shards, and
+/// answer alike.
+#[tokio::test]
+async fn a_build_in_shards_of_a_third_answers_as_its_files_ingested() {
+    for seed in 1..=6u64 {
+        eprintln!("seed {seed}");
+        build_equals_ingest(seed, true).await;
     }
 }

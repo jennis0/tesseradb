@@ -47,24 +47,37 @@ pub(super) struct ClosingWindow {
     entries: u64,
     /// When the window opened, so the service covers the wait as well as the close.
     started: std::time::Instant,
+    /// Dropped by a failing exit before it answers a waiter, so a retry finds the ids given back.
+    placing: Placing,
 }
 
-/// What a window's placement did beyond issuing ids: the shards it sealed and opened. Unless the
-/// window commits, every seal is undone and no opened shard takes writes.
+/// What a window's placement did: the ids it took from each shard, and the shards it sealed and
+/// opened. Unless the window commits, every shard has its ids back and its seal undone, and no
+/// opened shard takes writes.
 pub(super) struct Placing {
-    /// The shards held before the window that it sealed.
-    sealed: Vec<Arc<ShardWrite>>,
+    /// Each shard held before the window, with what the window took from it.
+    taken: Vec<(Arc<ShardWrite>, mosaica_lifecycle::alloc::Taken)>,
     placed: mosaica_lifecycle::Placed,
     committed: bool,
 }
 
 impl Placing {
-    pub(super) fn new(shards: &[Arc<ShardWrite>], placed: mosaica_lifecycle::Placed) -> Placing {
+    /// `shards` are those the window was allocated over, in the order it was given them.
+    pub(super) fn new(
+        shards: &[Arc<ShardWrite>],
+        mut placed: mosaica_lifecycle::Placed,
+    ) -> Placing {
+        let taken = std::mem::take(&mut placed.taken);
+        debug_assert!(shards
+            .iter()
+            .map(|shard| shard.id)
+            .eq(taken.iter().map(|(id, _)| *id)));
         Placing {
-            sealed: shards
+            taken: shards
                 .iter()
-                .filter(|shard| placed.sealed.contains(&shard.id))
                 .cloned()
+                .zip(taken)
+                .map(|(shard, (_, taken))| (shard, taken))
                 .collect(),
             placed,
             committed: false,
@@ -83,7 +96,7 @@ impl Placing {
 
     /// The window is durable: its seals stand and the shards it opened take writes. Answers every
     /// shard it sealed, in the order they sealed, those it opened among them.
-    pub(super) fn commit(mut self, live: &LiveState) -> Vec<ShardId> {
+    pub(super) fn commit(&mut self, live: &LiveState) -> Vec<ShardId> {
         self.committed = true;
         let sealed = std::mem::take(&mut self.placed.sealed);
         let opened = std::mem::take(&mut self.placed.opened);
@@ -100,8 +113,8 @@ impl Placing {
 impl Drop for Placing {
     fn drop(&mut self) {
         if !self.committed {
-            for shard in &self.sealed {
-                shard.with_allocator(|alloc| alloc.reopen());
+            for (shard, taken) in self.taken.drain(..) {
+                shard.with_allocator(|alloc| alloc.give_back(taken));
             }
         }
     }
@@ -122,6 +135,7 @@ pub(super) struct OpenedShards {
 impl ClosingWindow {
     pub(super) fn new(
         closed: Vec<ClosedEntry<Reply<Ingested>>>,
+        placing: Placing,
         entries: u64,
         started: std::time::Instant,
     ) -> Self {
@@ -129,6 +143,7 @@ impl ClosingWindow {
             closed,
             entries,
             started,
+            placing,
         }
     }
 
@@ -142,6 +157,7 @@ impl ClosingWindow {
 
     /// Before the append: nothing was appended or applied, and every waiter gets the same reason.
     pub(super) fn fail_all(self, health: &ExecutorHealth, error: impl Fn() -> ExecError) {
+        drop(self.placing);
         let waiters = self.closed.into_iter().map(|e| e.waiters).collect();
         refuse_waiters(health, waiters, self.entries, self.started, error);
     }
@@ -149,6 +165,7 @@ impl ClosingWindow {
     /// The append or fsync failed: apply nothing, and blame [`Blame`]'s rule for every waiter but
     /// the one carrying the real error.
     pub(super) fn fail_wal(self, health: &ExecutorHealth, blamed: usize, error: WalError) {
+        drop(self.placing);
         let mut blame = Blame::new(blamed, error);
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
@@ -284,7 +301,8 @@ fn mint_cells<'a>(
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
-/// A full shard is refused at admission; this is the backstop.
+/// Admission refuses a batch whose edits pass the end of a shard's ids or whose new items need a
+/// shard past the last number; this is the backstop.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: mosaica_lifecycle::AllocError,
@@ -509,20 +527,14 @@ impl Executor {
                 let room = |window: &CommitWindow<Reply<Ingested>>| {
                     let mut total = window.wanted().clone();
                     total.add(wanted.clone());
-                    let items = match live.several_shards {
-                        SeveralShards::Refused => total.items,
-                        // New items open the next shard past the open one's size.
-                        #[cfg(feature = "several-shard-writes")]
-                        SeveralShards::Written => 0,
-                    };
-                    live.window_room(&total.edits, items)
+                    live.window_room(&total.edits, total.items)
                 };
                 if !window.is_empty() && room(&window).is_err() {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Err(full) = room(&window) {
-                    reply.fail(ExecError::ShardFull(full));
+                if let Err(refused) = room(&window) {
+                    reply.fail(ExecError::from(refused));
                     return (window, admission);
                 }
                 if let Some(entry) = self.admit(submission, reply) {
@@ -717,7 +729,7 @@ impl Executor {
     /// Close a commit window: allocate, then one fsync over the vocabulary mints, the entries, the
     /// artifact publications and the growths against them, in that order, since a mint must be
     /// durable before the rows it colours and a publication must exist before anything addresses
-    /// it. A failure applies nothing, so ids given to a failed window are never reissued.
+    /// it. A failure applies nothing, and gives every id the window took back to its shard.
     pub(super) fn close_window(&mut self, window: CommitWindow<Reply<Ingested>>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
@@ -755,20 +767,16 @@ impl Executor {
             )
         };
         drop(generation);
-        let (closed, placing) = match allocated {
-            Ok((closed, tally, placed)) => {
-                // Recorded at allocation: a failed append still fragmented the entity axis.
-                self.health.record_fragmentation(tally);
-                (closed, Placing::new(&shards, placed))
-            }
+        let (closed, tally, placing) = match allocated {
+            Ok((closed, tally, placed)) => (closed, tally, Placing::new(&shards, placed)),
             Err((error, waiters)) => {
                 fail_allocation(&self.health, error, waiters, entries, started);
                 return;
             }
         };
-        let mut closing = ClosingWindow::new(closed, entries, started);
+        let mut closing = ClosingWindow::new(closed, placing, entries, started);
         // Written before anything names them; a failure leaves files nothing names.
-        let opening = placing.opened();
+        let opening = closing.placing.opened();
         let opened = match self.open_shards(&opening) {
             Ok(opened) => opened,
             Err(e) => {
@@ -896,7 +904,7 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
-        let shard_records = placing.records();
+        let shard_records = closing.placing.records();
         let entries_at = vocabulary_records.len() + shard_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();
@@ -931,9 +939,11 @@ impl Executor {
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
-        let sealed = placing.commit(&self.live);
+        let sealed = closing.placing.commit(&self.live);
+        self.health.record_fragmentation(tally);
         // A sealed shard gets one closing compaction.
-        self.compactions.sealed(sealed);
+        let window_end = *positions.last().expect("a window appends its entries");
+        self.compactions.sealed(sealed, window_end);
         if let Some(opened) = &opened {
             self.adopt_opened(opened);
         }
@@ -1022,7 +1032,6 @@ impl Executor {
                 prefix_dir: &prefix_dir,
                 prefix: &generation.prefix,
                 phash,
-                terms: generation.dict.len() as u64,
                 record_packs,
                 runtime: crate::write::runtime_columns(attributes),
             },
@@ -1106,7 +1115,7 @@ impl Executor {
             &vocabularies,
             mints,
         );
-        // A window buffering nothing still publishes its bindings through the open shard.
+        // A window buffering nothing still publishes its bindings through the last shard.
         let mut written: std::collections::BTreeSet<ShardId> = closed
             .iter()
             .flat_map(|entry| {
@@ -1118,7 +1127,7 @@ impl Executor {
             })
             .collect();
         if written.is_empty() {
-            written.insert(self.live.open_shard().id);
+            written.insert(self.live.last_shard().id);
         }
         let mut touched: std::collections::BTreeMap<ShardId, ShardWrites> = written
             .into_iter()

@@ -30,8 +30,6 @@ import pytest
 
 from .entitlement import _rows_at, _rows_by_tuple, _split_rows
 
-pytestmark = pytest.mark.writes_nothing
-
 #: Wide enough to carry a null-bearing column of each kind the render columns actually use — the
 #: null semantics are where the two routes diverge if `_column_equal` is wrong.
 COLUMNS = ("mosaica_id", "code", "fx_key", "weight", "seen_at", "bay")

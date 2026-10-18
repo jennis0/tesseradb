@@ -24,7 +24,7 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let ids = alloc.allocate_items(n, u64::MAX);
+            let ids = alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new());
             prop_assert_eq!(&ids, &(expected_next..expected_next + n).collect::<Vec<_>>());
             for id in ids {
                 prop_assert!(seen.insert(id), "id {} allocated twice in one session", id);
@@ -61,7 +61,7 @@ proptest! {
             let mut alloc = Allocator::new(seed);
 
             for n in sizes {
-                let range = alloc.allocate_items(n, u64::MAX);
+                let range = alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new());
                 for id in range {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
@@ -106,7 +106,7 @@ proptest! {
             let seed = side_high_water.max(shard_zero_mark(&wal));
             let mut alloc = Allocator::new(seed);
 
-            for id in alloc.allocate_items(n, u64::MAX) {
+            for id in alloc.allocate_items(n, u64::MAX, &mut ByTenancy::new()) {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
@@ -144,8 +144,8 @@ proptest! {
     /// **One window takes ids in the allocator's order** in its one open shard, over a pool of
     /// freed ids at fuzzed tenancies: an edit's new entity takes tenancy 0, lowest first, then
     /// the high water, whatever the size; a new item takes the lowest tenancy, lowest id first,
-    /// then the high water up to the size; the edits draw first. The items the size cannot hold
-    /// open the next shard and seal this one.
+    /// then the high water up to the size; the edits draw first. The shard seals once its high
+    /// water reaches the size, and the items the size cannot hold open the next shard.
     #[test]
     fn a_window_takes_ids_in_the_allocators_order(
         pool in prop::collection::btree_map(0u32..200, 0u16..4, 0..40),
@@ -200,7 +200,7 @@ proptest! {
         prop_assert_eq!(given, expected);
         prop_assert_eq!(alloc.high_water(), HIGH_WATER + edits_fresh + here);
         let overflow = items_fresh > here;
-        prop_assert_eq!(alloc.state() == ShardState::Sealed, overflow);
+        prop_assert_eq!(alloc.state() == ShardState::Sealed, edits_fresh + here >= room);
         prop_assert_eq!(placed.opened.len(), usize::from(overflow));
     }
 
@@ -233,8 +233,8 @@ proptest! {
 
         for (created, edits, deletes, fold, rotate, crash) in rounds {
             let edited = edits.min(items.len());
-            let given_edits = alloc.allocate_edits(edited as u64).unwrap();
-            let given_items = alloc.allocate_items(created, u64::MAX);
+            let given_edits = alloc.allocate_edits(edited as u64, &mut ByTenancy::new()).unwrap();
+            let given_items = alloc.allocate_items(created, u64::MAX, &mut ByTenancy::new());
             for (at, &entity) in given_edits.iter().enumerate() {
                 prop_assert_eq!(
                     index.get(&entity).copied().unwrap_or(0),

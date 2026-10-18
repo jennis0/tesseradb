@@ -65,8 +65,6 @@ from oracle import filters as filt
 from oracle import viewport as vp
 from oracle.wire import FRAME_TRAILER, decode_viewport, decode_viewport_points, split_frames
 
-pytestmark = pytest.mark.writes_nothing
-
 ZOOM = 3
 
 # The sweep expression: disjunction across both columns, with a category leaf mixing a key

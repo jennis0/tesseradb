@@ -633,7 +633,6 @@ struct ReconstructedWrites {
 /// entity it names.
 fn reconstruct_writes(
     wal_path: &Path,
-    several_shards: crate::write::SeveralShards,
     bundle: &Bundle,
     readers: &PrefixReaders,
     side: SideDeclarations,
@@ -716,7 +715,6 @@ fn reconstruct_writes(
     };
     let (overlay, buffers, state) = WritePath::reconstruct(
         wal_path,
-        several_shards,
         crate::write::ManifestSeed {
             shards: seeds,
             next_id: partition.next_shard_id,
@@ -805,7 +803,6 @@ fn open_logged_shards(
             prefix_dir: &readers.prefix_dir,
             prefix: &readers.prefix,
             phash: &readers.phash,
-            terms: readers.dict.len() as u64,
             record_packs,
             runtime: crate::write::runtime_columns(state.attributes.snapshot()),
         },
@@ -939,6 +936,26 @@ fn apply_unique_events(
     Ok(())
 }
 
+/// Every `(family, view, incarnation)` some shard's record lists: the views of a family a flush
+/// or a compaction has given a column and `MANIFEST.json` does not yet list.
+/// `with_scoped_columns` drops a pair of a dead incarnation rather than publishing its values as
+/// the new view's.
+fn listed_scoped_columns(
+    bundle: &Bundle,
+) -> Vec<(String, String, mosaica_types::view::ViewIncarnation)> {
+    across_partitions(bundle, |p| {
+        let mut columns: Vec<_> = p
+            .shards
+            .iter()
+            .flat_map(|shard| shard.record.scoped_columns.iter())
+            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+            .collect();
+        columns.sort();
+        columns.dedup();
+        columns
+    })
+}
+
 /// The bundle as the log leaves it: the vocabularies, columns, groups and plain views the log
 /// holds past the last publication, and the roster — the views a build declared, plus every view
 /// created while the service ran, minus every key dropped. Applied before the first generation is
@@ -952,20 +969,7 @@ fn served_bundle(
     let (runtime_attributes, runtime_scoped_attributes) = state.attributes.snapshot();
     let (runtime_groups, runtime_plain_views) = state.view_declarations.snapshot();
     let (created_views, dead_incarnations) = state.roster.snapshot();
-    // And the group-scoped columns a flush wrote: `with_scoped_columns` drops a column of a
-    // dead incarnation rather than publishing its values as the new view's.
-    let scoped_columns: Vec<(String, String, mosaica_types::view::ViewIncarnation)> =
-        across_partitions(&bundle, |p| {
-            let mut columns: Vec<_> = p
-                .shards
-                .iter()
-                .flat_map(|shard| shard.record.scoped_columns.iter())
-                .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
-                .collect();
-            columns.sort();
-            columns.dedup();
-            columns
-        });
+    let scoped_columns = listed_scoped_columns(&bundle);
     let manifest = bundle.manifest.with_declarations(&Declarations {
         groups: &runtime_groups,
         plain_views: &runtime_plain_views,
@@ -1223,51 +1227,17 @@ impl Engine {
         wal_path: &Path,
         config: EngineConfig,
     ) -> Result<Engine> {
-        Engine::open_with(
-            bundle_root,
-            cache_dir,
-            wal_path,
-            config,
-            crate::write::SeveralShards::Refused,
-        )
-    }
-
-    /// [`Engine::open`], taking writes, and a log, over a bundle of several point shards. For this
-    /// crate's own tests.
-    #[cfg(feature = "several-shard-writes")]
-    pub fn open_writing_several_shards(
-        bundle_root: &Path,
-        cache_dir: &Path,
-        wal_path: &Path,
-        config: EngineConfig,
-    ) -> Result<Engine> {
-        Engine::open_with(
-            bundle_root,
-            cache_dir,
-            wal_path,
-            config,
-            crate::write::SeveralShards::Written,
-        )
-    }
-
-    fn open_with(
-        bundle_root: &Path,
-        cache_dir: &Path,
-        wal_path: &Path,
-        config: EngineConfig,
-        several_shards: crate::write::SeveralShards,
-    ) -> Result<Engine> {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
         let side = merge_side_declarations(&mut bundle);
 
         let mut readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
-            deny,
+            mut deny,
             buffers,
             mut state,
             vocabularies,
-        } = reconstruct_writes(wal_path, several_shards, &bundle, &readers, side)?;
+        } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
         open_logged_shards(bundle_root, &mut bundle, &mut readers, &state)?;
 
         let fragments = Arc::new(FragmentCache::new(cache_dir, authorisation_rule_hash()));
@@ -1288,11 +1258,22 @@ impl Engine {
             &readers.prefix_dir,
         )?;
         let bundle = served_bundle(bundle, &state, &vocabularies);
-        crate::write::retire_dead_view_artifacts(
-            &state.registry,
-            &mut state.artifacts,
-            &bundle.manifest,
-        );
+        // A dropped view's artifacts are deleted, with their keys free, wherever the log or the
+        // deny state does not already hold the deletion.
+        let dead =
+            crate::write::dead_view_artifacts(&state.registry, &state.artifacts, |group, key| {
+                bundle.manifest.incarnation_of_key(group, key)
+            });
+        for target in dead {
+            let mosaica_types::Target::Artifact(space, entity) = target else {
+                continue;
+            };
+            let deny = deny.spaces.entry(space).or_default();
+            deny.apply(entity, mosaica_lifecycle::ChangeOp::Delete);
+            if let Some((name, level, ordinal)) = state.registry.locate_in(space, entity) {
+                state.artifacts.release_key(name, level, ordinal);
+            }
+        }
         // The suggestion indexes go in the engine's own cache directory, never in the bundle:
         // they are derived, and rebuilt every open.
         let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);
@@ -1547,12 +1528,14 @@ pub(crate) fn open_rotation(
     }
     .map_err(|e| not_openable(&e))?;
     // The columns the side manifest still declares, appended on `Engine::open`'s rule: those
-    // declared while the compaction ran and those some shard holds no base of.
+    // declared while the compaction ran and those some shard holds no base of, each family with
+    // the views the shards list.
     let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
     let runtime_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
     bundle.manifest = bundle.manifest.with_declarations(&Declarations {
         attributes: &side_attributes,
         scoped_attributes: &side_scoped_attributes,
+        scoped_columns: &listed_scoped_columns(&bundle),
         ..Declarations::default()
     });
     if let Some(partition) = bundle.partitions.values().next() {

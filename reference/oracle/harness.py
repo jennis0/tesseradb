@@ -1060,16 +1060,15 @@ def spawn_server(
     `wal_path` across two calls is exactly the restart-on-same-state case
     (`test_restart_replay.py`).
 
-    If `log_path` is given, the child's stdout+stderr are redirected to that file (so a caller
-    can scan the full log after the process is killed, without risking a filled pipe buffer
-    stalling the child mid-test — `test_byte_scan.py`'s log-scan needs this). Otherwise stdout is
-    piped in-process (matching the original `reference/tests/conftest.py` behaviour, which only
-    ever reads that pipe on an early-exit failure).
+    The child's stdout and stderr are appended to `log_path`, by default `tmp_dir/serve.log`,
+    never piped: nothing reads a pipe while the server runs, and once its buffer is full the
+    server's next log line blocks the thread writing it, the write executor's included.
     """
     ensure_cli_built()
 
     cache_dir = cache_dir if cache_dir is not None else (tmp_dir / "cache")
     wal_path = wal_path if wal_path is not None else (tmp_dir / "wal.log")
+    log_path = log_path if log_path is not None else (tmp_dir / "serve.log")
 
     for attempt in range(SPAWN_ATTEMPTS):
         viewer_port = free_port()
@@ -1096,15 +1095,8 @@ def spawn_server(
         if env_extra:
             env.update(env_extra)
 
-        if log_path is not None:
-            log_file = open(log_path, "ab")
-            log_start = log_file.tell()
-            stdout_target = log_file
-            stderr_target = subprocess.STDOUT
-        else:
-            log_start = 0
-            stdout_target = subprocess.PIPE
-            stderr_target = subprocess.STDOUT
+        log_file = open(log_path, "ab")
+        log_start = log_file.tell()
 
         proc = subprocess.Popen(
             # `--deployment`, not `-c`: the configuration rework made `mosaica.toml` the one document
@@ -1114,11 +1106,10 @@ def spawn_server(
             [str(CLI_BIN), "serve", "--deployment", str(config_path)],
             cwd=REPO_ROOT,
             env=env,
-            stdout=stdout_target,
-            stderr=stderr_target,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
-        if log_path is not None:
-            log_file.close()  # the child inherited the fd; our handle can close now
+        log_file.close()  # the child inherited the fd; our handle can close now
 
         srv = Server(viewer_port, session_port, control_port)
         try:
@@ -1131,18 +1122,12 @@ def spawn_server(
     raise AssertionError("unreachable")
 
 
-def wait_healthy(
-    proc: subprocess.Popen, srv: Server, log_path: Path | None, log_start: int
-) -> None:
+def wait_healthy(proc: subprocess.Popen, srv: Server, log_path: Path, log_start: int) -> None:
     """Wait up to 20 s for `proc` to answer `/healthz`; raise what it said if it exits first."""
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            extra = ""
-            if proc.stdout is not None:
-                extra = proc.stdout.read().decode(errors="replace")
-            elif log_path is not None:
-                extra = log_path.read_bytes()[log_start:].decode(errors="replace")
+            extra = log_path.read_bytes()[log_start:].decode(errors="replace")
             raise exited_early(proc.returncode, extra)
         try:
             resp = requests.get(f"{srv.viewer_base}/healthz", timeout=1)

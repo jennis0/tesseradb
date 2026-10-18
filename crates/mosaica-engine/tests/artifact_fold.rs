@@ -22,7 +22,7 @@ use common::*;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_lifecycle::IncomingArtifact;
+use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::{EntityId, Target};
 
@@ -2264,4 +2264,202 @@ fn an_artifact_deletion_in_two_shards_compacting_shard_zero_first() {
 #[test]
 fn an_artifact_deletion_in_two_shards_compacting_shard_one_first() {
     an_artifact_deletion_in_two_shards(1, 0);
+}
+
+/// An artifact with members in both shards is deleted and its key published again. The new
+/// artifact is the one served and the one a growth by the key joins: before any compaction, while
+/// the deleted one is held after the first shard's compaction, across a restart, and after the
+/// second shard's compaction removes it.
+#[test]
+fn a_republished_key_names_the_new_artifact_while_each_shard_compacts() {
+    let fx = two_shards();
+    let engine = fx.open_writing();
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let items = items_by_id(&engine, 0..TWO_SHARD_N);
+    let (zero, one) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
+    let sets = |ids: &[u64]| {
+        mosaica_lifecycle::ShardSets::of_items(
+            ids.iter()
+                .map(|id| items[*id as usize].expect("every id names an item")),
+        )
+    };
+    let artifact = |members: &[u64]| {
+        let mut artifact =
+            IncomingArtifact::from_entities(Some("k".into()), Vec::<EntityId>::new());
+        artifact.members = sets(members);
+        artifact
+    };
+    let deleted = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact(&[zero[0], zero[1], one[0], one[1]])],
+        )
+        .unwrap()[0];
+    let Target::Artifact(space, entity) = artifact_target(&engine, deleted) else {
+        panic!("an artifact's target")
+    };
+    engine
+        .accept_changes(vec![(Target::Artifact(space, entity), ChangeOp::Delete)])
+        .unwrap();
+    let put = engine
+        .put_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact(&[zero[2], zero[3], one[2], one[3]])],
+        )
+        .expect("the deleted artifact's key is published again");
+    assert_eq!(put.created, 1, "the publication created an artifact");
+    let new = put.mosaica_ids[0];
+    tick_until(
+        &engine,
+        "the deletion's publication",
+        std::time::Duration::from_secs(30),
+        || owed(&fx.root, space, entity).1,
+    );
+    assert_eq!(owed(&fx.root, space, entity), (vec![0, 1], true));
+
+    let joiners = [zero[4], one[4], zero[5], one[5], zero[6]];
+    let joined = std::cell::Cell::new(0);
+    let names_the_new_one = |engine: &Engine, when: &str| {
+        let served: Vec<mosaica_types::MosaicaId> =
+            artifacts_of(engine, &full_coverage_credential())
+                .iter()
+                .map(|a| a.mosaica_id)
+                .collect();
+        assert_eq!(served, vec![new], "{when}: only the new artifact is served");
+        let at = joined.get();
+        joined.set(at + 1);
+        let mut join = IncomingGrowth::from_entities("k".into(), Vec::new());
+        join.joining = sets(&[joiners[at]]);
+        let grown = engine
+            .grow_memberships("clusters/a".into(), 0, vec![join])
+            .unwrap_or_else(|e| panic!("{when}: a growth by the key is refused: {e:?}"));
+        assert_eq!(
+            grown[0].mosaica_id, new,
+            "{when}: a growth by the key joins the new artifact"
+        );
+    };
+    names_the_new_one(&engine, "before any compaction");
+
+    assert_eq!(compact(&engine, Some(shard(1))), 1);
+    assert_eq!(
+        owed(&fx.root, space, entity),
+        (vec![0], true),
+        "the deleted artifact is held for shard 0"
+    );
+    names_the_new_one(&engine, "after shard 1's compaction");
+    drop(engine);
+    let engine = fx.open_writing();
+    names_the_new_one(&engine, "across a restart");
+
+    assert_eq!(compact(&engine, Some(shard(0))), 1);
+    assert_eq!(owed(&fx.root, space, entity), (vec![], false));
+    assert_eq!(
+        engine
+            .locate_artifact(Target::Artifact(space, entity))
+            .and_then(|at| at.key),
+        None,
+        "the deleted artifact's record is removed"
+    );
+    names_the_new_one(&engine, "after shard 0's compaction removed it");
+    drop(engine);
+    let engine = fx.open_writing();
+    names_the_new_one(&engine, "after both compactions and a restart");
+}
+
+/// A deleted artifact's key names nothing while its record is held: a growth by it is refused and a
+/// put under it creates another artifact, so neither adds the shard of the members it brings to
+/// those whose compaction must remove the deletion. What the side-manifest records, and the
+/// growth's refusal, are the same at a later publication and across a restart.
+#[test]
+fn writes_naming_a_deleted_artifacts_key_leave_the_shards_owing_it() {
+    let fx = two_shards();
+    let engine = fx.open_writing();
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let items = items_by_id(&engine, 0..TWO_SHARD_N);
+    let (zero, one) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
+    let sets = |ids: &[u64]| {
+        mosaica_lifecycle::ShardSets::of_items(
+            ids.iter()
+                .map(|id| items[*id as usize].expect("every id names an item")),
+        )
+    };
+    let artifact = |key: &str, members: &[u64]| {
+        let mut artifact =
+            IncomingArtifact::from_entities(Some(key.into()), Vec::<EntityId>::new());
+        artifact.members = sets(members);
+        artifact
+    };
+    let ids = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                artifact("grown", &[zero[0], zero[1]]),
+                artifact("put", &[zero[2], zero[3]]),
+            ],
+        )
+        .unwrap();
+    let targets: Vec<(mosaica_types::LayerSpace, EntityId)> = ids
+        .iter()
+        .map(|id| match artifact_target(&engine, *id) {
+            Target::Artifact(space, entity) => (space, entity),
+            other => panic!("an artifact's target, not {other:?}"),
+        })
+        .collect();
+    engine
+        .accept_changes(
+            targets
+                .iter()
+                .map(|(space, entity)| (Target::Artifact(*space, *entity), ChangeOp::Delete))
+                .collect(),
+        )
+        .unwrap();
+    let owed_now = || {
+        targets
+            .iter()
+            .map(|(space, entity)| owed(&fx.root, *space, *entity))
+            .collect::<Vec<_>>()
+    };
+    tick_until(
+        &engine,
+        "the deletions' publication",
+        std::time::Duration::from_secs(30),
+        || owed_now().iter().all(|(_, held)| *held),
+    );
+    let expected = vec![(vec![0], true); 2];
+    assert_eq!(owed_now(), expected);
+
+    let grow = |engine: &Engine| {
+        let mut join = IncomingGrowth::from_entities("grown".into(), Vec::new());
+        join.joining = sets(&[one[0]]);
+        engine.grow_memberships("clusters/a".into(), 0, vec![join])
+    };
+    grow(&engine).expect_err("a growth by a deleted artifact's key is refused");
+    let put = engine
+        .put_artifacts("clusters/a".into(), 0, vec![artifact("put", &[one[1]])])
+        .expect("the put is taken");
+    assert_eq!(put.created, 1, "the put created another artifact");
+    assert_ne!(put.mosaica_ids[0], ids[1]);
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), expected);
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), expected, "a later publication");
+
+    drop(engine);
+    let engine = fx.open_writing();
+    publish_buffered(&engine);
+    assert_eq!(owed_now(), expected, "across a restart");
+    grow(&engine).expect_err("a growth by the key is refused across a restart");
 }

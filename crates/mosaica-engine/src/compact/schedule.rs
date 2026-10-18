@@ -80,11 +80,8 @@ pub(crate) fn due(
     gauges: Gauges,
     dead_bytes: impl FnOnce() -> Option<DeadBytes>,
 ) -> Option<FoldTrigger> {
-    // Saturating, so a clock that steps backwards reads as not yet due.
-    if let Some(last) = last_fold_unix {
-        if now_unix.saturating_sub(last) < schedule.min_interval_secs {
-            return None;
-        }
+    if !past_floor(schedule, now_unix, last_fold_unix) {
+        return None;
     }
 
     // The any-hour routes come before the window so their reason is the one logged.
@@ -122,6 +119,17 @@ pub(crate) fn due(
     let dead = measured.on_disc.saturating_sub(measured.named);
     (measured.named > 0 && dead as f64 / measured.named as f64 >= threshold)
         .then_some(FoldTrigger::DeadBytes)
+}
+
+/// Whether `min_interval_secs` has passed since `last_fold_unix`, the floor [`due`] reads: no
+/// route fires for a shard before it. Saturating, so a clock that steps backwards reads as not yet
+/// past.
+pub(crate) fn past_floor(
+    schedule: &CompactionSchedule,
+    now_unix: u64,
+    last_fold_unix: Option<u64>,
+) -> bool {
+    last_fold_unix.is_none_or(|last| now_unix.saturating_sub(last) >= schedule.min_interval_secs)
 }
 
 /// What the schedule ranks a due shard by, the least first: the higher deleted fraction, then
@@ -225,6 +233,36 @@ mod tests {
             ..s
         };
         assert_eq!(due(&ratio_only, at(10, 14), None, gauges(0, 300), || None), None);
+    }
+
+    /// A sealed shard its closing compaction left with one base segment, no deletion and no dead
+    /// byte is due at no hour, with every route armed and no floor.
+    #[test]
+    fn a_sealed_shard_with_zero_gauges_is_never_picked() {
+        let s = CompactionSchedule {
+            tombstoned_rows_fraction: Some(0.000_001),
+            dead_bytes_ratio: Some(0.000_001),
+            ..schedule()
+        };
+        let sealed = Gauges {
+            live_segments: 1,
+            retirable_deletions: 0,
+            artifact_deletions: 0,
+            live_rows: 1_000,
+        };
+        let walked = || {
+            Some(DeadBytes {
+                on_disc: 4_096,
+                named: 4_096,
+            })
+        };
+        for hour in 0..24 {
+            assert_eq!(
+                due(&s, at(10, hour), None, sealed, walked),
+                None,
+                "at {hour}:00"
+            );
+        }
     }
 
     /// Due shards rank by deleted fraction, then segments, then the lower number, whatever their

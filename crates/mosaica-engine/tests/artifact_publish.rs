@@ -11,11 +11,12 @@
 mod common;
 
 use common::*;
-use mosaica_engine::Engine;
+use mosaica_engine::{AcceptError, Engine};
+use mosaica_lifecycle::membership::{IncomingAttachment, IncomingGrowth};
 use mosaica_lifecycle::resolve::Refusal;
-use mosaica_lifecycle::{wal::ChangeOp, IncomingArtifact};
+use mosaica_lifecycle::{wal::ChangeOp, ExecError, IncomingArtifact};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, MosaicaId};
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -384,6 +385,114 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
     // And it comes back — a suppression is the reversible one of the two removal rules.
     engine.accept_changes(vec![(target, ChangeOp::Unsuppress)]).unwrap();
     assert!(served(&engine), "the unsuppressed artifact is served again");
+}
+
+/// A deleted artifact's key names nothing from the deletion's acknowledgement: a growth by it and
+/// an attachment to it are refused, and a publication under it creates a new artifact. The key
+/// then names the new artifact alone, and only the new one is served, before any compaction,
+/// across a restart, and after the compaction that removes the deleted one and a restart.
+#[test]
+fn a_deleted_artifacts_key_publishes_a_new_artifact_before_any_compaction() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    let mut labels = flat_declaration("labels/a");
+    labels.depends_on = vec!["clusters/a".into()];
+    engine.register_layer(labels).unwrap();
+    let deleted = engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact("k", fx.members(0..40))],
+        )
+        .unwrap()[0];
+    engine
+        .accept_changes(vec![(artifact_target(&engine, deleted), ChangeOp::Delete)])
+        .unwrap();
+
+    // Resolved before the compaction, which moves the bundle to another prefix.
+    let joiners = fx.members(100..125);
+    let joining = std::cell::Cell::new(0);
+    let grow = |engine: &Engine| {
+        let from = joining.get();
+        joining.set(from + 5);
+        engine.grow_memberships(
+            "clusters/a".into(),
+            0,
+            vec![IncomingGrowth::from_entities(
+                "k".into(),
+                joiners[from..from + 5].to_vec(),
+            )],
+        )
+    };
+    assert!(
+        matches!(
+            grow(&engine),
+            Err(AcceptError::Exec(ExecError::LayerRefused { .. }))
+        ),
+        "a growth by a deleted artifact's key is refused"
+    );
+    let attached = engine.publish_artifacts(
+        "labels/a".into(),
+        0,
+        vec![IncomingArtifact::attached(
+            Some("l0".into()),
+            fx.members(0..40),
+            Vec::new(),
+            IncomingAttachment {
+                layer: "clusters/a".into(),
+                level: 0,
+                key: "k".into(),
+            },
+        )],
+    );
+    assert!(
+        matches!(
+            attached,
+            Err(AcceptError::Exec(ExecError::LayerRefused { .. }))
+        ),
+        "an attachment to a deleted artifact's key is refused"
+    );
+
+    let put = engine
+        .put_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![artifact("k", fx.members(40..80))],
+        )
+        .expect("a deleted artifact's key is published again");
+    assert_eq!(put.created, 1, "the publication created an artifact");
+    let new = put.mosaica_ids[0];
+    assert_ne!(new, deleted);
+    let names_the_new_one = |engine: &Engine, when: &str| {
+        let served: Vec<MosaicaId> = artifacts_of(engine, &full_coverage_credential())
+            .iter()
+            .filter(|a| a.layer == "clusters/a")
+            .map(|a| a.mosaica_id)
+            .collect();
+        assert_eq!(served, vec![new], "{when}: only the new artifact is served");
+        let grown = grow(engine)
+            .unwrap_or_else(|e| panic!("{when}: a growth by the key is refused: {e:?}"));
+        assert_eq!(
+            grown[0].mosaica_id, new,
+            "{when}: a growth by the key joins the new artifact"
+        );
+    };
+    names_the_new_one(&engine, "before any compaction");
+
+    drop(engine);
+    let engine = fx.open();
+    names_the_new_one(&engine, "across a restart");
+    fold(&engine);
+    assert_eq!(
+        engine.generation_status().layer_spaces.retirable,
+        0,
+        "the compaction removed the deleted artifact"
+    );
+    names_the_new_one(&engine, "after the compaction");
+    drop(engine);
+    let engine = fx.open();
+    names_the_new_one(&engine, "after the compaction and a restart");
 }
 
 /// **A membership that came back from an extent is read through that extent**, and it is the set

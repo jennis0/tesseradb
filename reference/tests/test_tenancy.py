@@ -48,7 +48,7 @@ def test_a_deleted_items_number_is_taken_one_tenancy_higher_and_its_old_identifi
     [
         pytest.param(item(3), id="the deleted item's own identifier"),
         pytest.param(item(4, 1), id="a number whose holder was not deleted"),
-        pytest.param(item(12, 0, shard=1), id="another shard"),
+        pytest.param(item(0, 0, shard=2), id="a shard past the next"),
         pytest.param(forward_artifact(KEY, 0, 12), id="an artifact"),
     ],
 )
@@ -107,3 +107,28 @@ def test_each_shards_numbers_are_counted_apart():
     assert count.live(item(3)) and not count.live(item(3, shard=1))
     with pytest.raises(AssertionError):
         count.named(item(0, shard=2))
+
+
+def test_a_new_item_may_open_the_next_shard_and_is_then_counted_there(count):
+    """A shard the bundle does not hold is known once a new item takes a number of it, and only
+    the shard numbered next after every known one may be opened."""
+    with pytest.raises(AssertionError):
+        count.named(item(0, shard=1))
+    assert count.created(item(0, shard=1)) == item_key(1, 0)
+    assert count.live(item(0, shard=1)) and count.named(item(0, shard=1)) == item_key(1, 0)
+    count.delete(item(0, shard=1))
+    assert count.created(item(0, 1, shard=1)) == item_key(1, 0)
+    with pytest.raises(AssertionError):
+        count.created(item(0, shard=3))
+
+
+def test_the_high_water_floor_sums_each_shards_built_and_issued_numbers():
+    count = HolderCount(key=KEY, built={0: 10, 1: 4})
+    assert count.high_water_floor() == 14
+    count.created(item(4, shard=1))
+    count.created(item(6, shard=1))
+    assert count.high_water_floor() == 17
+    count.delete(item(2))
+    count.created(item(2, 1))
+    count.created(item(1, shard=2))
+    assert count.high_water_floor() == 19

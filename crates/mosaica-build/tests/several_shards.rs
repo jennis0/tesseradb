@@ -900,11 +900,18 @@ fn a_build_past_its_size_is_the_split_one_shard_build_when_every_column_spills()
     split_property(ExtentRoute::Extents);
 }
 
-/// Exactly `size` items is one shard; one item more is a second shard holding that item.
+/// Exactly `size` items is one shard, written sealed as an ingest that fills a shard seals it; one
+/// item more is a second shard holding that item, open. A last shard holding the size is sealed
+/// beside the others.
 #[test]
-fn one_item_past_the_size_opens_a_second_shard_of_one() {
+fn a_build_of_exactly_the_size_is_sealed_and_one_item_past_it_opens_a_second_shard_of_one() {
+    use mosaica_types::ShardState::{Open, Sealed};
     let tmp = tempfile::tempdir().unwrap();
-    for (size, held) in [(ITEMS, vec![ITEMS]), (ITEMS - 1, vec![ITEMS - 1, 1])] {
+    for (size, held, states) in [
+        (ITEMS, vec![ITEMS], vec![Sealed]),
+        (ITEMS - 1, vec![ITEMS - 1, 1], vec![Sealed, Open]),
+        (ITEMS / 3, vec![ITEMS / 3; 3], vec![Sealed; 3]),
+    ] {
         let root = built(tmp.path(), Some(size), &format!("at-{size}"));
         let bundle = open_bundle(&root).expect("the bundle opens");
         let high_waters: Vec<u64> = bundle.partitions["default"]
@@ -914,14 +921,12 @@ fn one_item_past_the_size_opens_a_second_shard_of_one() {
             .collect();
         assert_eq!(high_waters, held, "at size {size}");
         let partition = &bundle.partitions["default"];
-        let states: Vec<mosaica_types::ShardState> = partition
+        let recorded: Vec<mosaica_types::ShardState> = partition
             .shards
             .iter()
             .map(|shard| shard.record.state)
             .collect();
-        let mut sealed = vec![mosaica_types::ShardState::Sealed; held.len() - 1];
-        sealed.push(mosaica_types::ShardState::Open);
-        assert_eq!(states, sealed, "at size {size}");
+        assert_eq!(recorded, states, "at size {size}");
         assert_eq!(partition.next_shard_id as usize, held.len());
         let identities: std::collections::BTreeSet<[u8; 32]> = partition
             .shards

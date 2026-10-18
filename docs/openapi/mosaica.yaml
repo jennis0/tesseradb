@@ -1740,9 +1740,11 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
-        **The shard's size.** A batch whose new and edited items would take the shard's high water
-        past the size `PUT /control/shards` declares is `409` and writes nothing. Each batch sent
-        beside it is taken or refused on its own.
+        **Shards.** The server places new items in its shards itself, and no batch is refused for
+        the shard size `PUT /control/shards` declares. A batch is `409` and writes nothing only
+        where its new items would need a shard past the last an identifier can name, or its edits
+        would take a shard's ids past their end. Each batch sent beside it is taken or refused on
+        its own.
 
         **Retries.** `x-mosaica-batch-id` names the batch. The same bytes sent again under the same
         id answer `200` with `replayed: true`, the first acceptance's `mosaica_ids` and `refused`,
@@ -1804,8 +1806,7 @@ paths:
             - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
-            - The ids the batch's new and edited items take would carry the shard's high water past its size; the detail names the size, the high water and how many ids the batch needed
-            - The bundle holds several point shards, which take no write; the body was not read
+            - The batch's new items would need a point shard past the 524,288 a bundle holds, or its edits would carry a shard's high water past 4,294,967,295, where the shard's ids end; the detail gives the figures
           content:
             application/json:
               schema:
@@ -1852,10 +1853,11 @@ paths:
         the new labels, and `op: "predicate"` is refused with that advice.
 
         A `mosaica_id` may also name an annotation artifact or a layer, as a publication's or a
-        registration's answer gives it. A deleted artifact stops being served at once, and the next
-        fold removes its record and its supplied content. A suppressed layer stops being served
-        with all its artifacts until it is unsuppressed. A layer is not deleted here: a request
-        that deletes one by its own `mosaica_id` is `422` and applies nothing, and
+        registration's answer gives it. A deleted artifact stops being served at once and its key
+        is free, so a publication under the key creates a new artifact. Its record and supplied
+        content leave at the compaction of the last shard that lists it. A suppressed layer stops
+        being served with all its artifacts until it is unsuppressed. A layer is not deleted here: a
+        request that deletes one by its own `mosaica_id` is `422` and applies nothing, and
         `DELETE /control/layers/{name}` removes it.
 
         A change names its item in `match`, by its `mosaica_id`, a string of decimal digits, and
@@ -1906,7 +1908,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: With `strict=true`, a change's values name two items. Nothing was applied. The detail names the change by its index in the request. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: With `strict=true`, a change's values name two items. Nothing was applied. The detail names the change by its index in the request.
           content:
             application/json:
               schema:
@@ -1974,9 +1976,9 @@ paths:
         requests before one tick share it. `publication` names the first cycle certain to include
         every write buffered before the request. With `wait=visible` the `202` is held until that
         cycle has run, or until `serve.visible_wait_max_secs` passes. A tick flushes one view's
-        buffered rows. Where several views hold rows, the cycle stays open, and `publication` does
-        not reach its number, until every one of them has been published. A request body is not
-        read.
+        buffered rows in one shard, the view and shard holding the row longest in the log. Where
+        several hold rows, the cycle stays open, and `publication` does not reach its number,
+        until every one of them has been published. A request body is not read.
       security:
         - controlCredential: []
       parameters:
@@ -1992,8 +1994,6 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/SeveralShards"
         "422":
           description: "`wait` has a value other than `visible`, or the query names another parameter. No cycle was requested."
           content:
@@ -2024,8 +2024,6 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/SeveralShards"
 
   /control/attributes:
     put:
@@ -2082,7 +2080,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten.
           content:
             application/json:
               schema:
@@ -2116,15 +2114,15 @@ paths:
     put:
       tags: ["control: shards"]
       operationId: declareShards
-      summary: Declare the size of the shard items are stored in.
+      summary: Declare the shard size.
       description: |
-        The body is a corpus declaration's `[shards]` table in JSON. The size is the high water
-        the shard may not pass; `POST /control/ingest` says how a batch is counted against it.
-        Without a declaration the size is 4,026,531,840. `GET /control/status` reports it under
-        `shards`.
+        The body is a corpus declaration's `[shards]` table in JSON. The size is the high water at
+        which the open shard seals and the next opens for new items. An edit stays in its item's
+        shard and may take a sealed shard past the size. Without a declaration the size is
+        4,026,531,840. `GET /control/status` reports it under `shards`.
 
-        Declaring the size the shard has answers `200` and changes nothing. A size below the
-        shard's high water is `409`.
+        A size at or below the open shard's high water seals it, and a sealed shard stays sealed.
+        Declaring the size the bundle has answers `200` and changes nothing.
       security:
         - controlCredential: []
       parameters:
@@ -2137,7 +2135,7 @@ paths:
               $ref: "#/components/schemas/ShardsDeclaration"
       responses:
         "200":
-          description: The shard already has this size.
+          description: The bundle already has this size.
           content:
             application/json:
               schema:
@@ -2154,12 +2152,6 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
-        "409":
-          description: The size is below the shard's high water. The detail names the high water. Or the bundle holds several point shards, which take no write; the body was not read.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "413":
           $ref: "#/components/responses/DeclarationTooLarge"
         "415":
@@ -2224,7 +2216,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change.
           content:
             application/json:
               schema:
@@ -2292,8 +2284,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "409":
-          $ref: "#/components/responses/SeveralShards"
         "413":
           $ref: "#/components/responses/DeclarationTooLarge"
         "415":
@@ -2365,7 +2355,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`.
           content:
             application/json:
               schema:
@@ -2443,7 +2433,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility or point default. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: The name is declared with a different title, frame, projection, visibility or point default.
           content:
             application/json:
               schema:
@@ -2517,7 +2507,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A live view holds this key. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: A live view holds this key.
           content:
             application/json:
               schema:
@@ -2550,8 +2540,10 @@ paths:
       summary: Drop a view of a view group and free its key.
       description: |
         The view leaves every roster at once, including the rosters of groups sharing its views,
-        and its rows stay on disc, unreachable, until the compaction fold. Its artifacts become
-        unreachable with it. Rows buffered for it and not yet flushed are discarded.
+        and its rows stay on disc, unreachable, until each shard's compaction. The artifacts scoped
+        to it are deleted, as `POST /control/changes` deletes an artifact: they are unreachable
+        with it and their keys are free at once. Rows buffered for it and not yet flushed are
+        discarded.
 
         Every item the drop leaves with a row in no view, flushed or buffered, is deleted, as
         `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
@@ -2582,8 +2574,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "409":
-          $ref: "#/components/responses/SeveralShards"
         "422":
           description: |
             - `wait` has a value other than `visible`
@@ -2636,7 +2626,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: Every one of the 2³¹ layer spaces has been given to a layer, or the layer declares more levels than one layer space holds. Nothing was registered. The detail gives the figures. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: Every one of the 2³¹ layer spaces has been given to a layer, or the layer declares more levels than one layer space holds. Nothing was registered. The detail gives the figures.
           content:
             application/json:
               schema:
@@ -2698,8 +2688,6 @@ paths:
           $ref: "#/components/responses/ControlBadCredential"
         "403":
           $ref: "#/components/responses/Forbidden"
-        "409":
-          $ref: "#/components/responses/SeveralShards"
         "422":
           description: |
             - No layer is registered under this name
@@ -2735,8 +2723,12 @@ paths:
         An artifact whose `key` the level already holds is not created again: its members are
         added to the held membership, and a part it lacks (its parents, attachment, contents,
         shape or access labels) is filled. A part it holds with a different value is `409`, and the
-        detail never names the held value. The answer is `201` if the batch created an artifact,
-        and `200` if every key was held.
+        detail never names the held value. A content is filled at its position in `content`, which
+        is its rank. A content at a rank holding none, withdrawn or past the last, is a new content
+        at the next free rank, with the generating set it was sent with, since a withdrawn rank is
+        never taken again. A deleted artifact's key is held by no artifact, so a publication under
+        it creates a new one. The answer is `201` if the batch created an
+        artifact, and `200` if every key was held.
 
         A large membership is published with its first page here and the rest with `PATCH`.
         Per request: at most `ingest.max_artifacts_per_request` artifacts, `excluding` at most
@@ -2785,7 +2777,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
           content:
             application/json:
               schema:
@@ -2804,7 +2796,7 @@ paths:
             - An unknown layer or level, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
             - Labels the layer does not take, or none where it requires them
-            - A parent or attachment that does not exist
+            - A parent or attachment that does not exist, or was deleted
           content:
             application/json:
               schema:
@@ -2820,12 +2812,16 @@ paths:
       operationId: growMemberships
       summary: Add members to artifacts a level holds, remove them from generating sets, and fill missing parts.
       description: |
-        Each row names an artifact by the key it was published under; an unknown key is `422`, and
-        this verb creates nothing. `members` joins the membership. With a `rank`, `members` and
-        `leaving` move the generating set of the content at that rank instead, and a page that
-        empties the set withdraws the content, reported as `withdrawn`. A part the artifact lacks
-        is filled; one it holds with a different value is `409`. The batch commits whole. Only an
-        `enumerated` layer's artifacts can be grown; a `spatial` or attribute layer is `422`.
+        Each row names an artifact by the key it was published under; an unknown key, a deleted
+        artifact's included, is `422`, and this verb creates nothing. `members` joins the
+        membership. With a `rank`, `members` and `leaving` move the generating set of the content
+        at that rank instead, and a page that empties the set withdraws the content, reported as
+        `withdrawn`. A rank is a content's position, and keeps its number when a content before it
+        is withdrawn; a withdrawn rank names no content, and a page naming one is `422`. A part the
+        artifact lacks is filled; one it holds with a different value is `409`. A content at a
+        rank holding none, withdrawn or past the last, is filled as a new content at the next free
+        rank. The batch commits whole. Only an `enumerated` layer's artifacts can be grown; a
+        `spatial` or attribute layer is `422`.
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
@@ -2885,7 +2881,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written. Or the bundle holds several point shards, which take no write; the body was not read.
+          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written.
           content:
             application/json:
               schema:
@@ -2896,9 +2892,9 @@ paths:
             - An unknown field, column or metadata key
             - No artifacts
             - More members than the cap
-            - An unknown key, layer or level
+            - An unknown layer, level or key, a deleted artifact's key included
             - A layer whose membership is not `enumerated`
-            - `leaving` without a `rank`
+            - `leaving` without a `rank`, or a `rank` naming no content, a withdrawn one included
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
@@ -3920,12 +3916,6 @@ components:
             type: string
     WriteFailed:
       description: "`500 fail-closed`: the write could not be made durable, or the write executor stopped while holding it. It may have been applied in full, so this is not a refusal; the detail says so. Sending the same request again is safe."
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
-    SeveralShards:
-      description: "`409 conflict`: the bundle holds several point shards, which take no write. Nothing was read or written; serve a bundle of one shard to write."
       content:
         application/json:
           schema:
@@ -6320,7 +6310,7 @@ components:
         size:
           type: integer
           minimum: 1
-          description: The high water the shard may not pass.
+          description: The high water at which the open shard seals.
 
     ShardsDeclared:
       type: object
@@ -6332,7 +6322,7 @@ components:
           minimum: 1
         existing:
           type: boolean
-          description: "`true` where the shard already had this size and nothing was written."
+          description: "`true` where the bundle already had this size and nothing was written."
         publication:
           type: integer
           minimum: 0
@@ -7100,7 +7090,7 @@ components:
           type: [integer, "null"]
           minimum: 0
           maximum: 65535
-          description: Absent, `members` joins the membership. Present, `members` and `leaving` move the generating set of the content at this rank, and the row fills no part.
+          description: Absent, `members` joins the membership. Present, `members` and `leaving` move the generating set of the content at this rank, its position among the artifact's contents, and the row fills no part. A withdrawn rank is `422`.
         members:
           oneOf:
             - $ref: "#/components/schemas/MemberTable"
@@ -7123,7 +7113,7 @@ components:
         content:
           type: array
           default: []
-          description: Contents by rank, each filled where the artifact lacks it. A content here carries no generating set.
+          description: Contents by rank, each filled where the artifact lacks it. A rank is a position among the artifact's contents, and a content at a rank holding none, withdrawn or past the last, is a new content at the next free rank. A content here carries no generating set, so on a layer whose content requires every member visible it is `422`, and a `PUT` of the key supplies it with its `generated_from`.
           items:
             type: object
             additionalProperties: false
@@ -7193,7 +7183,7 @@ components:
               withdrawn:
                 type: integer
                 minimum: 0
-                description: Present where this row emptied the generating set at this rank. The content is withdrawn, and the publisher supplies it again.
+                description: Present where this row emptied the generating set at its rank, and that rank. The content is withdrawn, and its rank is never taken again; a content supplied in its place takes the next free rank.
         refused:
           type: array
           description: The members the identity rule refused, which the artifacts were grown without. Empty with `strict=true`.
@@ -7232,7 +7222,7 @@ components:
             size:
               type: integer
               minimum: 1
-              description: The high water an insert may not take the shard past, as `PUT /control/shards` or the build's `[shards]` declared it.
+              description: The high water at which the open shard seals, as `PUT /control/shards` or the build's `[shards]` declared it.
         publication:
           type: integer
           minimum: 0
@@ -7419,7 +7409,7 @@ components:
                   minimum: 0
         segments:
           type: array
-          description: The live segment count per partition and view, summed over the bundle's shards, which every viewport pays for. A merge bounds the count; a fold resets it to one a shard. On a bundle of one shard, a count past `compaction_max_segments` means folds are being refused.
+          description: The live segment count per partition and view, summed over the bundle's shards, which every viewport pays for. A merge bounds the count, and a compaction resets its shard's to one. The schedule compacts a shard whose count reaches `compaction_max_segments`, so a count past that figure times the number of shards means compactions are being refused.
           items:
             type: object
             additionalProperties: false
@@ -7466,7 +7456,7 @@ components:
             retirable:
               type: integer
               minimum: 0
-              description: Deleted artifacts, whose records a fold removes. The fold schedule counts them with the point shard's deletions.
+              description: Deleted artifacts, whose records leave at the compaction of the last shard that lists them. The schedule counts each in the gauge of every shard that lists it, and one no shard lists in the open shard's.
         compaction:
           $ref: "#/components/schemas/CompactionStatus"
         fragmentation:
@@ -7763,7 +7753,7 @@ components:
         posture:
           type: string
           enum: [not-started, running, wal-poisoned, dead]
-          description: "`running` is ready. Over a bundle of several point shards, which takes no write, `running` has no thread behind it, and nothing is logged, flushed, merged or folded. `wal-poisoned` is not ready, and still applies deletions and suppressions."
+          description: "`running` is ready. `wal-poisoned` is not ready, and still applies deletions and suppressions."
         ready:
           type: boolean
           description: Whether `posture` is `running`. `/readyz` answers `200` only when this is `true` and no partition serves a stepped-down manifest.
@@ -7913,20 +7903,27 @@ components:
       type: object
       additionalProperties: false
       description: Compaction folds. Alarm on `fold_failures`, and on `fold_refusals` rising while `folds` does not.
-      required: [live_rows, folds, fold_failures, fold_requested, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
+      required: [live_rows, folds, fold_failures, fold_requested, shard, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
       properties:
         live_rows:
           type: integer
           minimum: 0
           description: Rows the bundle's segments hold, deleted ones not yet folded included, summed over the bundle's shards.
-        folds: { type: integer, minimum: 0 }
+        folds:
+          type: integer
+          minimum: 0
+          description: Compactions published, one for each shard compacted.
         fold_failures:
           type: integer
           minimum: 0
-          description: Folds discarded. Each leaves a bundle-sized directory nothing reclaims.
+          description: Compactions discarded. Each leaves a directory nothing reclaims, the size of its shard's files.
         fold_requested:
           type: boolean
           description: True from a `POST /control/compact` until the last compaction it asked for publishes, is discarded or is refused.
+        shard:
+          type: [integer, "null"]
+          minimum: 0
+          description: The shard the running compaction is on, or the last one's when none runs; null before the first since the service started.
         fold_refusals:
           type: integer
           minimum: 0

@@ -719,7 +719,7 @@ impl Executor {
                             let leaves = !grown.leaving.is_empty();
                             pages.push(crate::artifacts::SetPage {
                                 ordinal: grown.ordinal,
-                                rank,
+                                position: rank,
                                 joining,
                                 whole: leaves || cardinality == 0,
                             });

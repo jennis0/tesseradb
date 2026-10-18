@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use mosaica_lifecycle::membership::ArtifactStore;
 use mosaica_types::layer::{LayerDeclaration, ServingLayout};
+use mosaica_types::view::ViewIncarnation;
 use mosaica_types::ShardId;
 
 use mosaica_store::permutation::RowSpace;
@@ -37,6 +38,7 @@ impl ArtifactProjections {
         prefix: &str,
         shard: ShardId,
         view: &str,
+        incarnation: ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -52,6 +54,7 @@ impl ArtifactProjections {
             prefix,
             shard,
             view,
+            incarnation,
             layer,
             level,
             level_version: store.level_version(layer, level),
@@ -152,12 +155,17 @@ impl ArtifactProjections {
         let view = view_key(at.view);
         let len = (0..records.slots(at.layer, at.level).len() as u32)
             .rev()
-            .find(|&ordinal| records.drawn_in_view(at.layer, at.level, ordinal, view))
+            .find(|&ordinal| {
+                records.drawn_in_view(at.layer, at.level, ordinal, view, at.incarnation)
+            })
             .map_or(0, |ordinal| ordinal as usize + 1);
         self.shared_records(at.records_address(), key, len, || {
-            Arc::new(ArtifactRecords::build(
-                records.level_in_view(at.layer, at.level, view),
-            ))
+            Arc::new(ArtifactRecords::build(records.level_in_view(
+                at.layer,
+                at.level,
+                view,
+                at.incarnation,
+            )))
         })
     }
 
@@ -180,7 +188,7 @@ impl ArtifactProjections {
         // Filtered by view: a shape belongs to one view of its group, and resolving it into every
         // view's row space would draw it on every view's map with a real masked count.
         let mut built = ArtifactRows::build_resolved(
-            slice.in_view(view_key(at.view)),
+            slice.in_view(view_key(at.view), at.incarnation),
             joined,
             spatial.total_rows,
             space,
@@ -258,7 +266,7 @@ impl ArtifactProjections {
         };
         let transposed = claimed.as_ref().and_then(|(column, _)| {
             ArtifactRows::build_from_column_sharing(
-                slice.in_view(view_key(at.view)),
+                slice.in_view(view_key(at.view), at.incarnation),
                 space,
                 column,
                 &mut adopted,
@@ -283,7 +291,7 @@ impl ArtifactProjections {
         let behind = claimed.as_ref().is_some_and(|(_, behind)| *behind);
         let mut built = transposed.unwrap_or_else(|| {
             ArtifactRows::build_over_sharing(
-                slice.in_view(view_key(at.view)),
+                slice.in_view(view_key(at.view), at.incarnation),
                 space,
                 adopted.take(),
                 slice.shared(),
@@ -393,7 +401,7 @@ impl ArtifactProjections {
             return true;
         }
         let started = std::time::Instant::now();
-        let level = || slice.in_view(view_key(at.view));
+        let level = || slice.in_view(view_key(at.view), at.incarnation);
         let mut added = if behind {
             built.base_joins(level(), space)
         } else {
@@ -439,7 +447,8 @@ impl ArtifactProjections {
             "ALARM: a level built from its column alone has no column to serve from; its rows \
              are transposed back"
         );
-        built.membership = MembershipRows::build(slice.in_view(view_key(at.view)), space);
+        built.membership =
+            MembershipRows::build(slice.in_view(view_key(at.view), at.incarnation), space);
         built.index = Arc::new(TileIndex::build(&built.membership, total_rows(space)));
     }
 
@@ -452,7 +461,7 @@ impl ArtifactProjections {
         slice: &LevelSlice<'_>,
         space: &RowSpace,
     ) -> usize {
-        let inherited = built.inherit(slice, space, view_key(at.view));
+        let inherited = built.inherit(slice, space, view_key(at.view), at.incarnation);
         if inherited > 0 {
             tracing::info!(
                 layer = %at.layer,

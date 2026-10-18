@@ -18,8 +18,6 @@ from oracle.bundle import Bundle
 from oracle.harness import run_build, shards_toml, write_deployment
 from oracle.record_blob import record_dirs_of
 
-pytestmark = pytest.mark.writes_nothing
-
 N = 8
 
 

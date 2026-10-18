@@ -235,7 +235,7 @@ class Control:
         return self._send("PUT", "/control/attributes", _json(body), {"content-type": JSON})
 
     def declare_shards(self, body: dict) -> Answer:
-        """`PUT /control/shards`: the shard's size, as `{"size": n}`."""
+        """`PUT /control/shards`: the shard size, as `{"size": n}`."""
         return self._send("PUT", "/control/shards", _json(body), {"content-type": JSON})
 
     def declare_vocabulary(self, name: str, body: dict) -> Answer:
@@ -337,9 +337,9 @@ class Control:
     def compact(self) -> Answer:
         """`POST /control/compact`: ask for a compaction, which removes deleted items' rows.
 
-        The server answers `202` at once and compacts at its next cycle. A request made while a
-        compaction runs is dropped, and the answer cannot say so. The `compaction` block of
-        `status()` shows what happened.
+        The server answers `202` at once and, from its next cycle, compacts every shard with
+        something to reclaim, one after another. A request made while a compaction runs is held
+        until that compaction lands. The `compaction` block of `status()` shows what happened.
         """
         return self._send("POST", "/control/compact", b"")
 

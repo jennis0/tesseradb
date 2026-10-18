@@ -497,8 +497,9 @@ pub(in crate::write) struct Compactions {
     /// The shards a request named and no compaction has been dispatched for, in order. `Some`
     /// until the request is answered: [`ExecutorHealth::fold_requested`] stays raised.
     requested: Option<std::collections::VecDeque<ShardId>>,
-    /// The shards sealed since their last compaction, each due one closing compaction.
-    closing: std::collections::BTreeSet<ShardId>,
+    /// The shards sealed since their last compaction, each due one closing compaction, with the
+    /// WAL position of the last record the append that sealed it wrote.
+    closing: std::collections::BTreeMap<ShardId, u64>,
     /// When each shard's last compaction started, as a unix second, so the interval can limit
     /// attempts.
     started: std::collections::BTreeMap<ShardId, u64>,
@@ -534,9 +535,11 @@ impl Compactions {
         drop(self.thread.take());
     }
 
-    /// Queue a closing compaction for each of `sealed`.
-    pub(in crate::write) fn sealed(&mut self, sealed: impl IntoIterator<Item = ShardId>) {
-        self.closing.extend(sealed);
+    /// Queue a closing compaction for each of `sealed`, by an append that ended at WAL position
+    /// `at`.
+    pub(in crate::write) fn sealed(&mut self, sealed: impl IntoIterator<Item = ShardId>, at: u64) {
+        self.closing
+            .extend(sealed.into_iter().map(|shard| (shard, at)));
     }
 }
 
@@ -999,10 +1002,10 @@ pub(super) fn levels_of(store: &ArtifactStore) -> impl Iterator<Item = (String, 
 
 impl Executor {
     /// Each shard's gauges, as the schedule reads them. An artifact deletion counts in each shard
-    /// that holds it, and one no shard holds in the open shard's.
+    /// that holds it, and one no shard holds in the last shard's (`LiveState::last_shard`).
     fn shard_gauges(&self, generation: &Generation) -> Vec<(ShardId, crate::compact::Gauges)> {
         let mut artifact_deletions: std::collections::BTreeMap<ShardId, u64> = Default::default();
-        let open = self.live.open_shard().id;
+        let last = self.live.last_shard().id;
         let mut shards = generation.shards();
         let several = match (shards.next(), shards.next()) {
             (Some(only), None) => {
@@ -1023,7 +1026,7 @@ impl Executor {
                 *artifact_deletions.entry(shard).or_default() += artifacts.cardinality();
                 held_somewhere.or_inplace(&artifacts);
             }
-            *artifact_deletions.entry(open).or_default() +=
+            *artifact_deletions.entry(last).or_default() +=
                 deleted.andnot_cardinality(&held_somewhere);
         }
         generation
@@ -1048,7 +1051,7 @@ impl Executor {
         dead_bytes_of(
             &self.prefix_dir(generation),
             generation,
-            self.live.open_shard().id,
+            self.live.last_shard().id,
         )
     }
 
@@ -1087,6 +1090,12 @@ impl Executor {
     /// startup sweep's to reclaim, not a fold's.
     fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<(ShardId, Scheduled)> {
         let now = unix_now()?;
+        // No shard past its floor is due on any gauge, so none is read.
+        if !generation.shards().any(|shard| {
+            crate::compact::past_floor(&self.deps.compaction, now, self.fold_floor_from(shard.id()))
+        }) {
+            return None;
+        }
         let dead = std::cell::OnceCell::new();
         let walked = || dead.get_or_init(|| self.dead_bytes(generation));
         let (shard, trigger, gauges) = self
@@ -1197,19 +1206,25 @@ impl Executor {
         }
         if !self.compactions.closing.is_empty() {
             let reclaiming = self.reclaiming(generation);
-            for shard in self.compactions.closing.clone() {
-                let held = generation.shard(shard);
+            for (shard, sealed_at) in self.compactions.closing.clone() {
+                // Rows the shard holds from the sealing append or before it are flushed first, so
+                // its closing compaction reclaims them. Its edits' rows since need not wait.
+                let unflushed = generation.shard(shard).is_some_and(|held| {
+                    held.buffer
+                        .oldest_wal_pos()
+                        .is_some_and(|oldest| oldest.is_none_or(|at| at <= sealed_at))
+                });
+                if unflushed {
+                    continue;
+                }
                 let reclaims = reclaiming
                     .iter()
                     .any(|(at, _, reclaims)| *at == shard && *reclaims);
                 if reclaims {
                     return Some((shard, Dispatching::Closing));
                 }
-                // A sealed shard with nothing to reclaim is due nothing, unless rows it holds are
-                // still buffered: they are flushed first, and its closing compaction reclaims them.
-                if held.is_none_or(|held| held.buffer.is_empty()) {
-                    self.compactions.closing.remove(&shard);
-                }
+                // A sealed shard with nothing to reclaim is due nothing.
+                self.compactions.closing.remove(&shard);
             }
         }
         self.scheduled_fold(generation)
@@ -1506,6 +1521,9 @@ impl Executor {
                     self.compactions.ended.insert(last, ended);
                 }
                 self.compactions.last = Some(shard_id);
+                self.health
+                    .compaction_shard
+                    .store(shard_id.raw(), Ordering::SeqCst);
                 if let Some(now) = unix_now() {
                     self.compactions.started.insert(shard_id, now);
                 }
@@ -2039,7 +2057,8 @@ impl Executor {
             .with_view_declarations(|declarations| declarations.names());
 
         // The shard now holds the base of every pair the compaction wrote, so it lists each one
-        // a shard lists; a pair of its own it did not write stays while another shard lists it.
+        // a shard lists; a pair of its own it did not write stays while another shard lists it
+        // and its view's incarnation is live.
         let mut scoped_columns: Vec<mosaica_store::manifest::ScopedColumn> = Vec::new();
         for (held, column) in partition_data
             .shards
@@ -2047,7 +2066,12 @@ impl Executor {
             .flat_map(|other| other.record.scoped_columns.iter().map(move |c| (other, c)))
         {
             let written = completed.scoped_views.contains(column);
-            let kept = held.record.id != shard_id && live_record.scoped_columns.contains(column);
+            let kept = held.record.id != shard_id
+                && live_record.scoped_columns.contains(column)
+                && live
+                    .bundle
+                    .manifest
+                    .is_live_incarnation(&column.view, column.incarnation);
             if (written || kept) && !scoped_columns.contains(column) {
                 scoped_columns.push(column.clone());
             }
@@ -2248,9 +2272,8 @@ impl Executor {
         carried_rels.extend(others.side.into_keys());
         carried_rels.extend(kept.iter().map(|(_, extent)| extent.path.clone()));
         let mut carried_rels: Vec<String> = carried_rels.into_iter().collect();
-        // Content extents carry no entry in either manifest's `files`, so they are linked here,
-        // from the held lists; an extent holding a deleted artifact's row is written again
-        // without it.
+        // Content extents carry no entry in either manifest's `files`, so they are linked or
+        // written here, from the held lists.
         let contents = match super::publications::carry_space_contents(
             &from_prefix_dir,
             &to_prefix_dir,
@@ -2936,6 +2959,7 @@ impl Executor {
         self.live.with_artifacts(|store| {
             let held = self.deps.shapes.level(
                 view,
+                data.incarnation,
                 layer,
                 level,
                 store,
@@ -3064,8 +3088,12 @@ impl Executor {
                 if spatial {
                     let mut observed = None;
                     for (view, segment) in fold_segments {
+                        let Some(incarnation) = live.bundle.manifest.incarnation_of(view) else {
+                            continue;
+                        };
                         let held = self.deps.shapes.level(
                             view,
+                            incarnation,
                             &layer,
                             level,
                             store,
@@ -3722,6 +3750,7 @@ impl Executor {
                                 crate::artifacts::SpatialSource {
                                     level: self.deps.shapes.level(
                                         view,
+                                        view_data.incarnation,
                                         layer,
                                         *level,
                                         store,
@@ -3737,6 +3766,7 @@ impl Executor {
                             &generation.prefix,
                             shard.id(),
                             view,
+                            view_data.incarnation,
                             layer,
                             *level,
                             slice_of(store, shard.id()),

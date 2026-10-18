@@ -174,8 +174,8 @@ fn retained<'r>(
 /// [`ArtifactStore::degradations`], and the caller declares it again. An artifact left with no
 /// contents is withheld when its layer declares supplied content.
 ///
-/// Each withdrawn content's position joins [`ArtifactRecord::withdrawn`], so the contents ranked
-/// below it keep reading their own values.
+/// Each withdrawn content's position joins [`ArtifactRecord::withdrawn`], so every other content
+/// keeps its position, which is the rank a caller, the log and a report name it by.
 fn withdraw_ranks(record: &mut ArtifactRecord, withdrawn: &[usize]) {
     let positions: Vec<u16> = withdrawn
         .iter()
@@ -769,7 +769,8 @@ pub struct IncomingGrowth {
     /// non-empty set here with `rank` absent refuses the batch.
     pub leaving: ShardSets,
     /// Which of the artifact's sets this row moves: `None` the membership, `Some(k)` the
-    /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5).
+    /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5), its position in the
+    /// artifact's content row, which a withdrawal of another content does not move.
     ///
     /// **A row moves one set and fills no fixed part.** A set page and a fixed part in one row
     /// would be a content supplied beside its own set, which the publication route is the place
@@ -794,7 +795,8 @@ pub struct FixedParts {
     pub parent_keys: Vec<String>,
     /// The attachment, named by the target's key, on [`IncomingArtifact::attached_to`]'s terms.
     pub attached_to: Option<IncomingAttachment>,
-    /// Contents by rank: `(rank, values)`, the values positional to the layer's declared kinds.
+    /// Contents by rank: `(rank, values)`, the values positional to the layer's declared kinds,
+    /// each rank a position in the artifact's content row.
     pub contents: Vec<(u16, Vec<String>)>,
     /// The canonical shapes, on [`IncomingArtifact::shape`]'s terms.
     pub shape: Option<ArtifactShapes>,
@@ -1162,7 +1164,7 @@ pub struct ArtifactRecord {
     /// The incarnation of `view` this artifact was published under, and
     /// [`mosaica_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
     /// created again under the same key is a new incarnation, and none of the old one's artifacts
-    /// belong to it ([`ArtifactStore::retire_dead_views`]).
+    /// belong to it ([`ArtifactStore::dead_view_artifacts`]).
     pub incarnation: mosaica_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]). In a store holding one point shard's
@@ -1183,9 +1185,10 @@ pub struct ArtifactRecord {
     /// tested would pay that cost on every artifact of every viewport.
     pub contents: Vec<ContentSet>,
     /// The positions of the contents withdrawn from this artifact, ascending. A content's values
-    /// are stored at its position in the artifact's content row, which is its rank counting the
-    /// withdrawn positions as well ([`Self::content_position`]); a withdrawn position is never
-    /// served and never taken again.
+    /// are stored at its position in the artifact's content row, which is its index in
+    /// [`Self::contents`] counting the withdrawn positions as well ([`Self::content_position`]).
+    /// The position is the rank a caller, a log record and a fold's report name the content by; a
+    /// withdrawn position is never served and never taken again.
     pub withdrawn: Box<[u16]>,
     /// What this artifact exists as an attachment to, resolved at publication.
     ///
@@ -1317,6 +1320,17 @@ pub fn content_position(withdrawn: &[u16], rank: usize) -> usize {
     position
 }
 
+/// The rank of the content at `position`, given an artifact's withdrawn positions, ascending, and
+/// how many contents it holds: `None` where that position is withdrawn or past the last content.
+pub fn rank_at(withdrawn: &[u16], contents: usize, position: usize) -> Option<usize> {
+    let at = u16::try_from(position).ok()?;
+    if withdrawn.contains(&at) {
+        return None;
+    }
+    let rank = position - withdrawn.partition_point(|held| *held < at);
+    (rank < contents).then_some(rank)
+}
+
 /// The digest a content's values are stored with: SHA-256 over each value's UTF-8 bytes, each
 /// preceded by its length as a `u32` LE, so that two value lists that concatenate to the same
 /// bytes digest differently.
@@ -1335,6 +1349,14 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl ArtifactRecord {
+    /// Whether the artifact is drawn in the view whose key is `view` at `incarnation`: an
+    /// entity-scoped artifact in every view, a group-scoped one only in its own view's incarnation.
+    pub fn drawn_in(&self, view: &str, incarnation: mosaica_types::view::ViewIncarnation) -> bool {
+        self.view
+            .as_deref()
+            .is_none_or(|own| own == view && self.incarnation == incarnation)
+    }
+
     /// Where the content at `rank` has its values in the artifact's content row: tags
     /// `position × kinds + kind`.
     pub fn content_position(&self, rank: usize) -> usize {
@@ -1344,13 +1366,17 @@ impl ArtifactRecord {
     /// The rank of the content at `position` in the artifact's content row, or `None` where that
     /// position is withdrawn or past the last content.
     pub fn rank_at(&self, position: usize) -> Option<usize> {
-        let withdrawn = u16::try_from(position).ok()?;
-        if self.withdrawn.contains(&withdrawn) {
-            return None;
-        }
-        let below = self.withdrawn.partition_point(|held| *held < withdrawn);
-        let rank = position - below;
-        (rank < self.contents.len()).then_some(rank)
+        rank_at(&self.withdrawn, self.contents.len(), position)
+    }
+
+    /// Whether the content at `position` has been withdrawn.
+    pub fn withdraws(&self, position: usize) -> bool {
+        u16::try_from(position).is_ok_and(|position| self.withdrawn.contains(&position))
+    }
+
+    /// The position the next content takes: one past every content and every withdrawn one.
+    pub fn next_position(&self) -> usize {
+        self.contents.len() + self.withdrawn.len()
     }
 
     /// One point shard's slice of this record: `members` and `sets` in that shard, and of the
@@ -1466,6 +1492,8 @@ pub struct ArtifactStore {
     /// The third level is the artifact's view (`ingest.md` §1.5): a group-scoped layer's keys are
     /// unique per `(layer, view)` and an entity-scoped layer's sit under `None`, so the same key
     /// in two views resolves to two ordinals and neither can be reached from the other's view.
+    /// A deleted artifact's key leaves at the deletion's acknowledgement
+    /// ([`ArtifactStore::release_key`]), while its record is held until a compaction removes it.
     keys: KeyIndex,
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
@@ -1703,32 +1731,43 @@ impl ArtifactStore {
         out
     }
 
-    /// `shard`'s part of the generating set at `rank`, `None` where its slice holds no record of
-    /// the artifact or the rank names no content there.
+    /// `shard`'s part of the generating set ranked `rank`, `None` where its slice holds no record
+    /// of the artifact.
     fn held_set(
         &self,
         shard: ShardId,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        rank: usize,
     ) -> Option<&Bitmap> {
         self.slice(shard)?
             .get(layer, level, ordinal)?
             .contents
-            .get(rank as usize)
+            .get(rank)
             .map(|content| &content.generated_from)
     }
 
-    /// Whether the generating set at `rank` is `sets` in every shard.
+    /// The rank of the content at `position` of the artifact at `ordinal`, `None` where the
+    /// ordinal is a hole or the position names no content.
+    fn rank_of(&self, layer: &str, level: u32, ordinal: u32, position: u16) -> Option<usize> {
+        self.get(layer, level, ordinal)?
+            .rank_at(usize::from(position))
+    }
+
+    /// Whether the generating set at `position` is `sets` in every shard. `false` where the
+    /// position names no content.
     pub fn set_is(
         &self,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         sets: &ShardSets,
     ) -> bool {
+        let Some(rank) = self.rank_of(layer, level, ordinal, position) else {
+            return false;
+        };
         let held = |shard| self.held_set(shard, layer, level, ordinal, rank);
         sets.iter().all(|(shard, set)| held(shard) == Some(set))
             && self
@@ -1737,21 +1776,20 @@ impl ArtifactStore {
                 .all(|shard| held(shard).is_none_or(Bitmap::is_empty))
     }
 
-    /// The generating set at `rank` after a page joining `joining` and then leaving `leaving` in
-    /// each shard: whether the page changes it, and its cardinality over every shard after. Joins
-    /// apply before leaves. `None` where the ordinal is a hole or the rank names no content.
+    /// The generating set at `position` after a page joining `joining` and then leaving `leaving`
+    /// in each shard: whether the page changes it, and its cardinality over every shard after.
+    /// Joins apply before leaves. `None` where the ordinal is a hole or the position names no
+    /// content, which a withdrawn position does not.
     pub fn paged(
         &self,
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         joining: &ShardSets,
         leaving: &ShardSets,
     ) -> Option<(bool, u64)> {
-        self.get(layer, level, ordinal)?
-            .contents
-            .get(rank as usize)?;
+        let rank = self.rank_of(layer, level, ordinal, position)?;
         let shards: std::collections::BTreeSet<ShardId> = self
             .shards()
             .chain(joining.iter().map(|(shard, _)| shard))
@@ -1863,14 +1901,19 @@ impl ArtifactStore {
             self.spaces.insert(layer.to_string(), space);
         }
         if let Some(key) = &record.key {
-            self.keys
+            // Two records hold one key only where the older was deleted before the key was given
+            // again, and ordinals are never reused, so the key names the higher.
+            let named = self
+                .keys
                 .entry(layer.to_string())
                 .or_default()
                 .entry(level)
                 .or_default()
                 .entry(record.view.clone())
                 .or_default()
-                .insert(key.clone(), ordinal);
+                .entry(key.clone())
+                .or_insert(ordinal);
+            *named = (*named).max(ordinal);
         }
         let edge = edge(space, &record);
         let idx = ordinal as usize;
@@ -2010,6 +2053,40 @@ impl ArtifactStore {
             .1
             .get(key)
             .copied()
+    }
+
+    /// Take the key of `layer`'s artifact at `level` and `ordinal` out of the key index, where it
+    /// still names that artifact, so the key names nothing and a publication under it creates a
+    /// new artifact. The record stays.
+    pub fn release_key(&mut self, layer: &str, level: u32, ordinal: u32) {
+        let Some(record) = self.get(layer, level, ordinal) else {
+            return;
+        };
+        let (view, key) = (record.view.clone(), record.key.clone());
+        self.unkey(layer, level, &view, key.as_deref(), ordinal);
+    }
+
+    /// Remove `key` from `view`'s index of the level where it names `ordinal`: a key given again
+    /// after a deletion names the new artifact, which keeps it.
+    fn unkey(
+        &mut self,
+        layer: &str,
+        level: u32,
+        view: &Option<String>,
+        key: Option<&str>,
+        ordinal: u32,
+    ) {
+        let Some(key) = key else { return };
+        if let Some(keys) = self
+            .keys
+            .get_mut(layer)
+            .and_then(|levels| levels.get_mut(&level))
+            .and_then(|views| views.get_mut(view))
+        {
+            if keys.get(key) == Some(&ordinal) {
+                keys.remove(key);
+            }
+        }
     }
 
     /// The views, other than `view`, whose set of this level holds `key` — what a cross-view edge
@@ -2210,7 +2287,8 @@ impl ArtifactStore {
 
     /// What a fill of the record at `ordinal` changes in the other shards' slices: an attachment
     /// reaches each slice's record, and the artifact everywhere where it now borrows; a content
-    /// reaches each slice's record with nothing in its set.
+    /// reaches each slice's record with that shard's part of its set, and a slice holding no
+    /// record of the artifact takes one where its part is not empty.
     fn fill_slices(
         &mut self,
         layer: &str,
@@ -2238,15 +2316,28 @@ impl ArtifactStore {
                     self.hold_borrowed_everywhere(layer, level, ordinal);
                 }
             }
-            ArtifactPart::Content { .. } => {
-                for (_, slice) in &mut self.slices.others {
-                    if let Some(held) = slice.record_mut(layer, level, ordinal) {
-                        held.contents.push(ContentSet {
+            ArtifactPart::Content { generated_from, .. } => {
+                let sets = ShardSets::from_wal(generated_from).unwrap_or_default();
+                let cardinality = sets.cardinality();
+                let nothing = record.slice_holding_nothing();
+                let space = self.spaces[layer];
+                for (shard, slice) in &mut self.slices.others {
+                    let part = sets.get(*shard).cloned().unwrap_or_default();
+                    match slice.record_mut(layer, level, ordinal) {
+                        Some(held) => held.contents.push(ContentSet {
                             values: None,
                             digest: [0; 32],
-                            generated_from: Bitmap::new(),
-                            cardinality: 0,
-                        });
+                            generated_from: part,
+                            cardinality,
+                        }),
+                        None if !part.is_empty() => {
+                            let mut held = nothing.clone();
+                            if let Some(content) = held.contents.last_mut() {
+                                content.generated_from = part;
+                            }
+                            slice.put(layer, space, level, ordinal, held, None);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -2266,8 +2357,8 @@ impl ArtifactStore {
     ///
     /// **A content's values are stored beside its digest and the record is queued for the next
     /// content extent** ([`Self::unpublished_content`]). An identical content on a record restored
-    /// from an extent takes the values back into memory and is not queued: its row is already in
-    /// a durable extent, and the record stack holds one row per entity.
+    /// from an extent takes the values back into memory and is not queued: its values are already
+    /// in a durable extent.
     ///
     /// **The log's copy of a shape is rebuilt through [`ArtifactShapes::new`]** and its digest
     /// compared with the recorded one: postcard restores the struct whole, so the stored digest is
@@ -2286,6 +2377,16 @@ impl ArtifactStore {
         part: &crate::wal::ArtifactPart,
     ) -> FillOutcome {
         use crate::wal::ArtifactPart;
+        let generated_from = match part {
+            ArtifactPart::Content { generated_from, .. } => {
+                match self.held_shards(generated_from) {
+                    Some(sets) => Some(sets),
+                    None => return FillOutcome::Undecodable,
+                }
+            }
+            _ => None,
+        };
+        let own = self.slices.own;
         let key = (layer.to_string(), level);
         let Some(record) = self
             .levels
@@ -2375,12 +2476,14 @@ impl ArtifactStore {
                 rank,
                 values,
                 digest,
+                ..
             } => {
                 if content_digest(values) != *digest {
                     return FillOutcome::Undecodable;
                 }
-                let rank = *rank as usize;
-                if let Some(held) = record.contents.get_mut(rank) {
+                let position = *rank as usize;
+                if let Some(rank) = record.rank_at(position) {
+                    let held = &mut record.contents[rank];
                     if held.digest != *digest {
                         return FillOutcome::Differs;
                     }
@@ -2389,17 +2492,23 @@ impl ArtifactStore {
                     }
                     return FillOutcome::Identical;
                 }
-                if rank != record.contents.len() {
-                    // Ranks are positions in a list, so a fill past the next one names a content
-                    // between two that does not exist. The live path refuses this before the
-                    // append; at replay it is damage.
+                // A fill the log carries for a position withdrawn since was filled and then
+                // withdrawn, and nothing is owed for it. The live path gives every new content
+                // the next position before the append.
+                if record.withdraws(position) {
+                    return FillOutcome::Identical;
+                }
+                if position != record.next_position() {
+                    // A fill past the next position names a content between two that does not
+                    // exist, which the live path never appends; at replay it is damage.
                     return FillOutcome::Undecodable;
                 }
+                let sets = generated_from.unwrap_or_default();
                 record.contents.push(ContentSet {
                     values: Some(values.clone()),
                     digest: *digest,
-                    generated_from: Bitmap::new(),
-                    cardinality: 0,
+                    generated_from: sets.get(own).cloned().unwrap_or_default(),
+                    cardinality: sets.cardinality(),
                 });
                 self.content_pending
                     .insert((layer.to_string(), level, ordinal));
@@ -2414,27 +2523,6 @@ impl ArtifactStore {
             .get(&(layer.to_string(), level))
             .copied()
             .unwrap_or(0)
-    }
-
-    /// Whether the artifact at `ordinal` has a row in a durable content extent, or is in a
-    /// manifest whose content extent would already hold one if it had content: **an artifact
-    /// packed at or below the level's high-water with content it was packed with.** A further
-    /// content rank on such an artifact cannot be written, because the record stack holds one row
-    /// per entity and reads the first layer that has it (`ingest.md` §1.4 gives the per-column
-    /// read to track T3). The registry refuses the fill on this answer.
-    pub fn content_row_is_packed(&self, layer: &str, level: u32, ordinal: u32) -> bool {
-        let through = self
-            .published_through
-            .get(&(layer.to_string(), level))
-            .copied()
-            .unwrap_or(0);
-        ordinal < through
-            && self
-                .get(layer, level, ordinal)
-                .is_some_and(|record| !record.contents.is_empty())
-            && !self
-                .content_pending
-                .contains(&(layer.to_string(), level, ordinal))
     }
 
     /// Record that the content extent naming every pending content fill is durable, releasing the
@@ -2709,12 +2797,12 @@ impl ArtifactStore {
     /// leaves the artifact's ranked list, and a content the caller wants back is supplied again.
     /// An empty set is contained in every mask, so a content retained on one would serve to every
     /// principal reaching the artifact — decision 0107's rule, re-made at the caller's door.
-    /// Withdrawal is [`withdraw_ranks`]' disposition and shifts the ranks
-    /// above it down, as the fold's does.
+    /// Withdrawal is [`withdraw_ranks`]' disposition, as the fold's is, and every other content
+    /// keeps its position.
     ///
-    /// **An ordinal naming no record, and a rank naming no content, change nothing** and are not
-    /// damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
-    /// content that same fold withdrew.
+    /// **An ordinal naming no record, and a position naming no content, change nothing** and are
+    /// not damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
+    /// content withdrawn since the page was logged.
     ///
     /// The cardinality is the set's over every shard, and each shard's part moves in that shard's
     /// slice, which takes a record of the artifact where the page joins it and it held none.
@@ -2724,18 +2812,20 @@ impl ArtifactStore {
         layer: &str,
         level: u32,
         ordinal: u32,
-        rank: u16,
+        position: u16,
         joining: &ShardSets,
         leaving: &ShardSets,
         cardinality: u64,
     ) -> bool {
-        let Some((_, after)) = self.paged(layer, level, ordinal, rank, joining, leaving) else {
+        let Some((_, after)) = self.paged(layer, level, ordinal, position, joining, leaving) else {
             return true;
         };
         if after != cardinality {
             return false;
         }
-        let rank = rank as usize;
+        let Some(rank) = self.rank_of(layer, level, ordinal, position) else {
+            return true;
+        };
         if cardinality == 0 {
             self.each_held(layer, level, ordinal, |record| {
                 withdraw_ranks(record, &[rank])
@@ -3018,7 +3108,8 @@ impl ArtifactStore {
 
     /// The artifacts of one level a given view is **drawn** (`views.md` §3.5): every record of an
     /// entity-scoped layer, whose one set is drawn on every view it names, and on a group-scoped
-    /// layer only the records belonging to this view.
+    /// layer only the records belonging to this view at its `incarnation`. A record of a dropped
+    /// incarnation of the key, held until its deletion is compacted away, is drawn nowhere.
     ///
     /// **`view` is the view's own key**, not its path: a group's several layouts over one key set
     /// draw the same artifact in each, which is what the build's per-view pass reads too.
@@ -3031,17 +3122,24 @@ impl ArtifactStore {
         layer: &str,
         level: u32,
         view: &'a str,
+        incarnation: mosaica_types::view::ViewIncarnation,
     ) -> impl Iterator<Item = (u32, &'a ArtifactRecord)> {
         self.level(layer, level)
-            .filter(move |(_, record)| record.view.as_deref().is_none_or(|own| own == view))
+            .filter(move |(_, record)| record.drawn_in(view, incarnation))
     }
 
-    /// Is the artifact at `ordinal` drawn in `view` — every record of an entity-scoped layer,
-    /// and on a group-scoped one only its own view's ([`Self::level_in_view`], `views.md` §3.5)?
+    /// Is the artifact at `ordinal` drawn in `view` at `incarnation` ([`Self::level_in_view`])?
     /// A hole is drawn nowhere.
-    pub fn drawn_in_view(&self, layer: &str, level: u32, ordinal: u32, view: &str) -> bool {
+    pub fn drawn_in_view(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
+    ) -> bool {
         self.get(layer, level, ordinal)
-            .is_some_and(|record| record.view.as_deref().is_none_or(|own| own == view))
+            .is_some_and(|record| record.drawn_in(view, incarnation))
     }
 
     /// Every artifact of every layer, as `(layer, level, ordinal, record)`.
@@ -3420,7 +3518,7 @@ impl ArtifactStore {
                 for (rank, content) in held.contents.iter().enumerate() {
                     let lost = content.generated_from.and_cardinality(points);
                     if lost > 0 {
-                        contents_lost.push((rank as u32, lost));
+                        contents_lost.push((held.content_position(rank) as u32, lost));
                     }
                 }
                 if members_lost == 0 && contents_lost.is_empty() {
@@ -3569,9 +3667,10 @@ impl ArtifactStore {
     /// where the slice is this store's own, the record keeps nothing of the shard's members or
     /// generating sets. Its key and edges stay with the record.
     ///
-    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key
-    /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
-    /// republication onto the identity of the artifact this fold just removed.
+    /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key goes
+    /// with it where the key still names it — the key indexes an ordinal, and a key left behind
+    /// would resolve a caller's republication onto the identity of the artifact this fold just
+    /// removed. A key given to a new artifact since the deletion stays.
     ///
     /// **Only the levels this actually changed have their versions moved**, each by one, and those
     /// levels are returned: the records version and every slice's where a record changed, the
@@ -3622,16 +3721,7 @@ impl ArtifactStore {
                 continue;
             };
             if let Some(record) = slot.take() {
-                if let Some(key) = &record.key {
-                    if let Some(keys) = self
-                        .keys
-                        .get_mut(layer.as_str())
-                        .and_then(|levels| levels.get_mut(level))
-                        .and_then(|views| views.get_mut(&record.view))
-                    {
-                        keys.remove(key.as_str());
-                    }
-                }
+                self.unkey(layer, *level, &record.view, record.key.as_deref(), *ordinal);
                 gone.extend(edge(space, &record));
             }
             self.clear_other_slices(layer, *level, *ordinal);
@@ -3724,72 +3814,29 @@ impl ArtifactStore {
             .and_then(|slots| slots.get_mut(ordinal as usize))
     }
 
-    /// Remove every artifact of a view incarnation that `live` rejects, leaving a hole at each.
-    /// `live` is asked `(layer, view, incarnation)` for each artifact that belongs to a view.
+    /// Every artifact of a view incarnation that `live` rejects, by space and entity. `live` is
+    /// asked `(layer, view, incarnation)` for each artifact that belongs to a view.
     ///
-    /// A view dropped and created again under the same key is a new incarnation, so this is what
-    /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
-    /// where it still names the removed artifact, since a republication into the new view may
-    /// hold it. An artifact attached to a removed one is removed by its own stamp: the
-    /// publication refused it unless its layer shares a view with its target's, so its view key
-    /// was dropped with its target's and its own incarnation is dead too. Returns the levels it
-    /// changed.
-    pub fn retire_dead_views(
-        &mut self,
+    /// A view dropped and created again under the same key is a new incarnation, so these are the
+    /// artifacts a drop deletes. An artifact attached to one of them is among them by its own
+    /// stamp: the publication refused it unless its layer shares a view with its target's, so its
+    /// view key was dropped with its target's and its own incarnation is dead too.
+    pub fn dead_view_artifacts(
+        &self,
         live: impl Fn(&str, &str, mosaica_types::view::ViewIncarnation) -> bool,
-    ) -> Vec<(String, u32)> {
-        let dead: Vec<(String, u32, u32)> = self
-            .levels
+    ) -> Vec<(LayerSpace, EntityId)> {
+        let live = &live;
+        self.levels
             .iter()
-            .flat_map(|((layer, level), slots)| {
-                slots.iter().enumerate().filter_map(|(ordinal, slot)| {
+            .flat_map(|((layer, _), slots)| {
+                let space = self.spaces[layer.as_str()];
+                slots.iter().filter_map(move |slot| {
                     let record = slot.as_ref()?;
                     let view = record.view.as_deref()?;
-                    (!live(layer, view, record.incarnation))
-                        .then(|| (layer.clone(), *level, ordinal as u32))
+                    (!live(layer, view, record.incarnation)).then_some((space, record.entity))
                 })
             })
-            .collect();
-        let mut moved: Vec<(String, u32)> = Vec::new();
-        for (layer, level, ordinal) in dead {
-            let Some(record) = self.slot_mut(&layer, level, ordinal).and_then(Option::take) else {
-                continue;
-            };
-            if let Some(key) = &record.key {
-                if let Some(keys) = self
-                    .keys
-                    .get_mut(layer.as_str())
-                    .and_then(|levels| levels.get_mut(&level))
-                    .and_then(|views| views.get_mut(&record.view))
-                {
-                    if keys.get(key.as_str()) == Some(&ordinal) {
-                        keys.remove(key.as_str());
-                    }
-                }
-            }
-            if let Some(shape) = self
-                .shapes
-                .get_mut(layer.as_str())
-                .and_then(|levels| levels.get_mut(&level))
-                .and_then(|shapes| shapes.get_mut(ordinal as usize))
-            {
-                *shape = None;
-            }
-            self.content_pending
-                .remove(&(layer.clone(), level, ordinal));
-            let space = self.spaces[layer.as_str()];
-            self.forget_dependency(space, &record);
-            self.dependents.remove(&(space, record.entity));
-            self.clear_other_slices(&layer, level, ordinal);
-            if moved.last() != Some(&(layer.clone(), level)) {
-                moved.push((layer, level));
-            }
-        }
-        for (layer, level) in &moved {
-            self.bump(layer, *level);
-            self.bump_lineage(layer, *level);
-        }
-        moved
+            .collect()
     }
 
     /// The supplied content of every artifact not yet in a manifest, for its layer's space.
@@ -3803,10 +3850,10 @@ impl ArtifactStore {
     /// the layer's declaration alone.
     ///
     /// **A record whose content was filled since its last content extent is written beside the
-    /// tail** ([`Self::content_pending`]), whichever side of the high-water it sits. Such a record
-    /// held no content when it was packed, so its entity is in no content extent and the row this
-    /// writes is the first; the registry refuses a fill that would need a second
-    /// ([`Self::content_row_is_packed`]).
+    /// tail** ([`Self::content_pending`]), whichever side of the high-water it sits, with the
+    /// values of every content it holds in memory. A content restored from an extent holds none
+    /// and is not written again: its values stay in the extent that has them, at their own tags,
+    /// and the record stack reads an artifact's row as the union of its tags in every extent.
     pub fn unpublished_content(&self) -> Vec<ContentRow> {
         let mut out = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -4630,7 +4677,9 @@ impl ArtifactStore {
                     }
                     let (joining, leaving) = replaced(&content.generated_from);
                     let (joining, leaving) = (in_shard(joining), in_shard(leaving));
-                    let rank = rank as u16;
+                    let Ok(rank) = u16::try_from(record.content_position(rank)) else {
+                        continue;
+                    };
                     let Some((_, cardinality)) =
                         self.paged(layer, *level, ordinal, rank, &joining, &leaving)
                     else {
@@ -4906,6 +4955,47 @@ mod tests {
         );
     }
 
+    /// Put an artifact keyed `k` at `ordinal` of `clusters/a`'s level 0.
+    fn put_keyed(store: &mut ArtifactStore, ordinal: u32, entity: u64) {
+        let record = ArtifactRecord {
+            key: Some("k".into()),
+            ..record(entity, &[1])
+        };
+        store.put("clusters/a", space("clusters/a"), 0, ordinal, record, None);
+    }
+
+    #[test]
+    fn a_released_key_leaves_only_where_it_names_the_released_artifact() {
+        let mut store = ArtifactStore::new();
+        put_keyed(&mut store, 0, 100);
+        store.release_key("clusters/a", 0, 0);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), None);
+        let held = store.get("clusters/a", 0, 0);
+        assert!(held.is_some(), "the record is held");
+
+        put_keyed(&mut store, 1, 101);
+        store.release_key("clusters/a", 0, 0);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(1));
+        store.retire(&artifacts_of("clusters/a", &[100]));
+        let held = store.get("clusters/a", 0, 0);
+        assert!(held.is_none(), "the record is retired");
+        assert_eq!(
+            store.ordinal_of_key("clusters/a", 0, None, "k"),
+            Some(1),
+            "the retirement leaves the key of the artifact it was given to"
+        );
+    }
+
+    #[test]
+    fn a_key_two_records_hold_names_the_higher_ordinal() {
+        let mut store = ArtifactStore::new();
+        put_keyed(&mut store, 1, 101);
+        put_keyed(&mut store, 0, 100);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(1));
+        put_keyed(&mut store, 2, 102);
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "k"), Some(2));
+    }
+
     #[test]
     fn a_retirement_tells_a_point_and_each_layers_artifacts_apart() {
         let mut store = ArtifactStore::new();
@@ -5000,11 +5090,11 @@ mod tests {
         assert_eq!(record.members, Bitmap::of(&[7]));
     }
 
-    /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
-    /// incarnation already holds again stays with it. Entity-scoped records are never asked about,
-    /// and a label in the dead view goes with the artifact it is attached to.
+    /// A dead incarnation's artifacts are named, with a label in the dead view on one of them,
+    /// and nothing is changed; entity-scoped records are never asked about. Releasing their keys
+    /// leaves a key the live incarnation holds again with it.
     #[test]
-    fn a_dead_views_artifacts_leave_holes_and_a_republished_key_stays() {
+    fn a_dead_views_artifacts_are_named_and_a_republished_key_stays() {
         let scoped = |entity: u64, key: &str, incarnation| ArtifactRecord {
             key: Some(key.into()),
             view: Some("q2".into()),
@@ -5026,17 +5116,16 @@ mod tests {
         store.put("labels/t", space("labels/t"), 0, 1, label(201, 102, 2, 2), None);
         let before = store.level_version("clusters/q", 0);
 
-        let retired = store.retire_dead_views(|_, _, incarnation| incarnation == 2);
-        assert_eq!(
-            retired,
-            vec![("clusters/q".to_string(), 0), ("labels/t".to_string(), 0)]
-        );
-        assert!(store.level_version("clusters/q", 0) > before);
-        let held: Vec<u32> = store
-            .level("clusters/q", 0)
-            .map(|(ordinal, _)| ordinal)
-            .collect();
-        assert_eq!(held, vec![2]);
+        let dead = store.dead_view_artifacts(|_, _, incarnation| incarnation == 2);
+        let mut dead: Vec<u64> = dead.iter().map(|(_, entity)| entity.raw()).collect();
+        dead.sort_unstable();
+        assert_eq!(dead, vec![100, 101, 200]);
+        assert_eq!(store.level_version("clusters/q", 0), before);
+        assert_eq!(store.level("clusters/q", 0).count(), 3);
+        assert_eq!(store.level("labels/t", 0).count(), 2);
+
+        store.release_key("clusters/q", 0, 0);
+        store.release_key("clusters/q", 0, 1);
         assert_eq!(
             store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"),
             Some(2)
@@ -5045,17 +5134,7 @@ mod tests {
             store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"),
             None
         );
-        assert_eq!(store.next_ordinal("clusters/q", 0), 3);
         assert_eq!(store.level("clusters/p", 0).count(), 1);
-        let labels: Vec<u32> = store
-            .level("labels/t", 0)
-            .map(|(ordinal, _)| ordinal)
-            .collect();
-        assert_eq!(labels, vec![1]);
-        assert!(store.cascade_from(&[at("clusters/q", 101)]).is_empty());
-        assert!(store
-            .retire_dead_views(|_, _, incarnation| incarnation == 2)
-            .is_empty());
     }
 
     #[test]
@@ -5715,7 +5794,8 @@ mod tests {
 
     /// A withdrawn content's position is kept and never taken again, whether a fold or a page
     /// withdrew it: each remaining content's values are written at its own position, the record
-    /// round-trips the positions, and a later fill takes a new one.
+    /// round-trips the positions, a later fill takes a new one, and a page, a fill and a set
+    /// comparison name a content by its position.
     #[test]
     fn a_withdrawn_contents_position_is_kept_and_never_taken_again() {
         let mut store = ArtifactStore::new();
@@ -5777,15 +5857,71 @@ mod tests {
         assert_eq!(positions(&store), vec![2]);
         assert_eq!(rows(&store), vec![(2, "c".into())]);
 
-        let values = vec!["d".to_string()];
-        let fill = crate::wal::ArtifactPart::Content {
-            rank: 1,
-            digest: content_digest(&values),
-            values,
+        let fill = |rank: u16, value: &str| crate::wal::ArtifactPart::Content {
+            rank,
+            digest: content_digest(&[value.to_string()]),
+            values: vec![value.to_string()],
+            generated_from: Vec::new(),
         };
-        assert_eq!(store.fill("clusters/a", 0, 0, &fill), FillOutcome::Filled);
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(2, "d")),
+            FillOutcome::Differs,
+            "position 2 holds `c`"
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(4, "d")),
+            FillOutcome::Undecodable,
+            "a fill past the next position names nothing"
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(3, "d")),
+            FillOutcome::Filled
+        );
         assert_eq!(positions(&store), vec![2, 3]);
         assert_eq!(rows(&store), vec![(2, "c".into()), (3, "d".into())]);
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &fill(1, "b")),
+            FillOutcome::Identical,
+            "a fill the log carries for a withdrawn position changes nothing and is not damage"
+        );
+        assert_eq!(positions(&store), vec![2, 3]);
+
+        let c = in_shards(&[(0, &[3])]);
+        let joining = in_shards(&[(0, &[9])]);
+        let none = ShardSets::default();
+        assert!(store.set_is("clusters/a", 0, 0, 2, &c));
+        assert!(!store.set_is("clusters/a", 0, 0, 0, &ShardSets::default()));
+        assert_eq!(
+            store.paged("clusters/a", 0, 0, 2, &joining, &none),
+            Some((true, 2))
+        );
+        for withdrawn in [0, 1] {
+            assert_eq!(
+                store.paged("clusters/a", 0, 0, withdrawn, &joining, &none),
+                None
+            );
+        }
+        let mut paged = page(0, &joining, &none, 2);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut paged {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 2,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(store.apply(&paged, 0), 0);
+        assert!(store.set_is("clusters/a", 0, 0, 2, &in_shards(&[(0, &[3, 9])])));
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut paged {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 1,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(
+            store.apply(&paged, 0),
+            0,
+            "a page the log carries for a withdrawn position changes nothing and is not damage"
+        );
+        assert!(store.set_is("clusters/a", 0, 0, 2, &in_shards(&[(0, &[3, 9])])));
     }
 
     #[test]
@@ -6352,6 +6488,7 @@ mod tests {
                     rank: 0,
                     values: values.clone(),
                     digest: content_digest(&values),
+                    generated_from: Vec::new(),
                 },
             ),
             fill_record(
@@ -6430,6 +6567,7 @@ mod tests {
                         rank: 0,
                         values: other.clone(),
                         digest: content_digest(&other),
+                        generated_from: Vec::new(),
                     }
                 ),
                 72
@@ -6520,6 +6658,7 @@ mod tests {
                         rank: 0,
                         values: content.clone(),
                         digest: content_digest(&content),
+                        generated_from: Vec::new(),
                     }
                 ),
                 24
@@ -6556,8 +6695,8 @@ mod tests {
     }
 
     /// **A filled content's values reach the content extent and hold the log until they do**,
-    /// wherever the artifact sits against the high-water — and once packed, a further rank is
-    /// refused at the registry on [`ArtifactStore::content_row_is_packed`]'s answer.
+    /// wherever the artifact sits against the high-water, and a further content after that
+    /// extent is durable reaches the next one the same way.
     #[test]
     fn a_content_fill_is_written_beside_the_tail_and_pins_the_log_until_its_extent_is_durable() {
         use crate::wal::ArtifactPart;
@@ -6565,10 +6704,6 @@ mod tests {
         assert_eq!(store.apply(&publication("topics/x", 0, 100, &[1]), 0), 0);
         store.mark_published("topics/x", 0, 1);
         assert_eq!(store.oldest_wal_pos(), None, "packed, nothing pinned");
-        assert!(
-            !store.content_row_is_packed("topics/x", 0, 0),
-            "no content, no row"
-        );
 
         let values = vec!["shipping".to_string()];
         assert_eq!(
@@ -6580,6 +6715,7 @@ mod tests {
                         rank: 0,
                         values: values.clone(),
                         digest: content_digest(&values),
+                        generated_from: Vec::new(),
                     }
                 ),
                 40
@@ -6596,10 +6732,6 @@ mod tests {
             "a filled record below the high-water is written beside the tail"
         );
         assert_eq!(store.oldest_wal_pos(), Some(40), "pinned at the fill");
-        assert!(
-            !store.content_row_is_packed("topics/x", 0, 0),
-            "pending, not yet a row"
-        );
 
         // The fold's rewrite releases the fill's pin but not the content's: the fold carries
         // content extents forward and writes no values.
@@ -6610,7 +6742,34 @@ mod tests {
         store.mark_content_published();
         assert_eq!(store.oldest_wal_pos(), None);
         assert!(store.unpublished_content().is_empty());
-        assert!(store.content_row_is_packed("topics/x", 0, 0));
+
+        let further = vec!["docks".to_string()];
+        assert_eq!(
+            store.apply(
+                &fill_record(
+                    "topics/x",
+                    0,
+                    ArtifactPart::Content {
+                        rank: 1,
+                        values: further.clone(),
+                        digest: content_digest(&further),
+                        generated_from: Vec::new(),
+                    }
+                ),
+                50
+            ),
+            0
+        );
+        assert_eq!(
+            store.unpublished_content(),
+            vec![(
+                "topics/x".to_string(),
+                EntityId::new(100),
+                vec![(0u16, "shipping".to_string()), (1u16, "docks".to_string())]
+            )],
+            "a further content on an artifact whose content is durable is written again"
+        );
+        assert_eq!(store.oldest_wal_pos(), Some(50));
     }
 
     /// **The pin's name is what an operator acts on, and it has to agree with the bound.**
@@ -7185,6 +7344,7 @@ mod tests {
             rank: 0,
             digest: content_digest(&values),
             values,
+            generated_from: Vec::new(),
         };
         assert_eq!(store.apply(&fill_record("clusters/a", 0, content), 0), 0);
         let pending = store.unpublished();
@@ -7208,6 +7368,26 @@ mod tests {
             .collect();
         assert!(slices_hold_their_sets(&slices.iter().collect::<Vec<_>>()));
         assert!(slices.iter().all(|slice| slice.contents.len() == 1));
+
+        // A content filled with a set reaches each slice with that shard's part of it.
+        let values = vec!["another topic".to_string()];
+        let content = ArtifactPart::Content {
+            rank: 1,
+            digest: content_digest(&values),
+            values,
+            generated_from: in_shards(&[(0, &[1]), (1, &[2])]).to_wal(),
+        };
+        assert_eq!(store.apply(&fill_record("clusters/a", 0, content), 0), 0);
+        for (at, member) in [(0, 1), (1, 2)] {
+            let held = store
+                .slice(shard(at))
+                .unwrap()
+                .get("clusters/a", 0, 0)
+                .unwrap();
+            let content = &held.contents[1];
+            assert_eq!(content.generated_from.to_vec(), vec![member]);
+            assert_eq!(content.cardinality, 2);
+        }
 
         let attachment = ArtifactPart::AttachedTo(PublishedAttachment {
             layer: "clusters/a".to_string(),

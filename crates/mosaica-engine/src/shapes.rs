@@ -59,6 +59,7 @@ use mosaica_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
 use mosaica_store::manifest::{DerivedExtent, DerivedForm};
 use mosaica_store::read::{Bundle, SegmentData, ViewData};
 use mosaica_types::layer::{MembershipSource, RegisteredLayer};
+use mosaica_types::view::ViewIncarnation;
 use mosaica_types::ShardId;
 
 use crate::row_column::RowColumn;
@@ -118,6 +119,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// against them.
 pub struct ShapeLevel {
     pub view: String,
+    /// The incarnation of the view's key whose artifacts the level holds.
+    pub incarnation: ViewIncarnation,
     pub layer: String,
     pub level: u32,
     /// The level version the shapes were read at. A publication into the level moves it, and
@@ -158,11 +161,12 @@ pub struct ResolutionCost {
 }
 
 impl ShapeLevel {
-    /// Build from the store's record blobs: every shape of `(layer, level)` canonicalised for
-    /// `view`, decoded and decomposed — or, where `persisted` holds an entry descended from the
-    /// same canonical bytes, assembled from it.
+    /// Build from the store's record blobs: every shape of `(layer, level)` drawn in `view` at
+    /// `incarnation`, canonicalised for `view`, decoded and decomposed — or, where `persisted`
+    /// holds an entry descended from the same canonical bytes, assembled from it.
     pub fn build(
         view: &str,
+        incarnation: ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -186,7 +190,8 @@ impl ShapeLevel {
             // space, which would give one quarter's polygon a membership and a masked count on
             // every quarter's map. An entity-scoped layer's records are drawn in every view it
             // names and pass this.
-            if !store.drawn_in_view(layer, level, ordinal, crate::artifacts::view_key(view)) {
+            let key = crate::artifacts::view_key(view);
+            if !store.drawn_in_view(layer, level, ordinal, key, incarnation) {
                 shapes.push(None);
                 continue;
             }
@@ -237,6 +242,7 @@ impl ShapeLevel {
         let index = ShapeIndex::build(&shapes);
         ShapeLevel {
             view: view.to_string(),
+            incarnation,
             layer: layer.to_string(),
             level,
             level_version: store.level_version(layer, level),
@@ -432,12 +438,14 @@ impl ShapeStore {
             .cloned()
     }
 
-    /// The level's held structures at the store's current level version, built if absent or
-    /// stale. The build runs outside the lock — it is the expensive step — and a concurrent build
-    /// of the same level at the same version is harmless, the two being equal.
+    /// The level's held structures for `view` at `incarnation` and the store's current level
+    /// version, built if absent or stale. The build runs outside the lock — it is the expensive
+    /// step — and a concurrent build of the same level at the same version is harmless, the two
+    /// being equal.
     pub fn level(
         &self,
         view: &str,
+        incarnation: ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -445,12 +453,19 @@ impl ShapeStore {
     ) -> Arc<ShapeLevel> {
         let version = store.level_version(layer, level);
         if let Some(held) = self.get(view, layer, level) {
-            if held.level_version == version {
+            if held.level_version == version && held.incarnation == incarnation {
                 return held;
             }
         }
         let entries = persisted.held_entries(view, layer, level, version, store);
-        let built = Arc::new(ShapeLevel::build(view, layer, level, store, entries));
+        let built = Arc::new(ShapeLevel::build(
+            view,
+            incarnation,
+            layer,
+            level,
+            store,
+            entries,
+        ));
         let (interior, boundary, max_interior, max_boundary) = built.decomposition_size();
         tracing::info!(
             layer = %layer,
@@ -567,7 +582,14 @@ impl ShapeStore {
                         continue;
                     };
                     for level in 0..registered.runs.len() as u32 {
-                        let held = self.level(view, &declaration.name, level, store, persisted);
+                        let held = self.level(
+                            view,
+                            view_data.incarnation,
+                            &declaration.name,
+                            level,
+                            store,
+                            persisted,
+                        );
                         let cost = Self::stage_missing(
                             &held,
                             shard.record.id,
@@ -628,10 +650,10 @@ pub struct WarmReport {
 /// derived file beside the shard it was written for. A level's held decompositions are its layer
 /// space's, and read whichever shard they are listed beside.
 ///
-/// Two forms, both written by the build and by every fold and both keyed by the level version:
-/// the `shape-rows` row form, which also names its segment and the segment's row count; and the
-/// row-major column, which is over the view's base rows and so is the base segment's piece —
-/// inverted here into the same per-ordinal bitmaps. **Equality on every key, never anything
+/// Two forms, both written by the build and by every fold and both keyed by their shard's slice
+/// version of the level: the `shape-rows` row form, which also names its segment and the
+/// segment's row count; and the row-major column, which is over the view's base rows and so is
+/// the base segment's piece — inverted here into the same per-ordinal bitmaps. **Equality on every key, never anything
 /// weaker** (I11): a piece that does not match is resolved again from the geometry, and the
 /// refusal is said.
 #[derive(Clone, Copy, Default)]
@@ -699,7 +721,8 @@ impl PersistedPieces<'_> {
     }
 
     /// The piece for `shard`'s `segment` under `level`, if a persisted form supplies it. `base`
-    /// says whether `segment` is the view's base, the one segment a row-major column covers.
+    /// says whether `segment` is the view's base, the one segment a row-major column covers. A
+    /// form is keyed by `shard`'s slice version of the level.
     fn claim(
         &self,
         level: &ShapeLevel,
@@ -709,6 +732,7 @@ impl PersistedPieces<'_> {
         store: &ArtifactStore,
     ) -> Option<Vec<Option<Bitmap>>> {
         let prefix_dir = self.prefix_dir?;
+        let version = store.slice(shard)?.level_version(&level.layer, level.level);
         let same_level = |held: &ShardId, e: &DerivedExtent| {
             *held == shard
                 && e.view.as_deref() == Some(level.view.as_str())
@@ -724,14 +748,14 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, row_count)) = shape_rows {
-            if extent.slice_version != level.level_version || row_count != segment.row_count {
+            if extent.slice_version != version || row_count != segment.row_count {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     seg_id = %segment.seg_id,
                     written_at = extent.slice_version,
-                    now = level.level_version,
+                    now = version,
                     written_rows = row_count,
                     rows = segment.row_count,
                     "a persisted shape row form is refused: its key is not this level version \
@@ -741,7 +765,7 @@ impl PersistedPieces<'_> {
             }
             match mosaica_store::derived::read_shape_rows(
                 &prefix_dir.join(&extent.path),
-                level.level_version,
+                version,
                 &segment.seg_id,
                 segment.row_count,
             ) {
@@ -776,13 +800,13 @@ impl PersistedPieces<'_> {
             _ => None,
         });
         if let Some((extent, layout)) = column {
-            if extent.slice_version != level.level_version {
+            if extent.slice_version != version {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     written_at = extent.slice_version,
-                    now = level.level_version,
+                    now = version,
                     "a persisted row-major column is not this level version's; the base segment \
                      is resolved again from the geometry"
                 );
@@ -855,6 +879,7 @@ fn invert_column(
         &level.layer,
         level.level,
         crate::artifacts::view_key(&level.view),
+        level.incarnation,
     ) {
         if let Some(slot) = rows.get_mut(ordinal as usize) {
             *slot = Some(Bitmap::new());

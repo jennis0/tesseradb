@@ -115,18 +115,19 @@ pub(super) fn growth_receipt(
                 .get(layer, level, ordinal)
                 .expect("a resolved ordinal names a record");
             // The set this row moves, which is the membership on a row with no rank and the
-            // content's generating set on a row with one, each shard's part counted against that
-            // shard's slice. A rank naming no content refused the batch in `prepare_grow` above,
-            // so the `unranked` branch answering nothing is unreachable, and does not panic on a
-            // thread that must acknowledge.
+            // generating set of the content at that position on a row with one, each shard's part
+            // counted against that shard's slice. A rank naming no content refused the batch in
+            // `prepare_grow` above, so the `unranked` branch answering nothing is unreachable, and
+            // does not panic on a thread that must acknowledge.
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
             // page took out. Both counts are taken from how much of a bitmap the set holds, so
             // neither the set nor the set after the joins is built.
-            let unranked = join
+            let rank = join
                 .rank
-                .is_some_and(|rank| record.contents.get(rank as usize).is_none());
+                .map(|position| record.rank_at(usize::from(position)));
+            let unranked = rank.is_some_and(|rank| rank.is_none());
             let shards: std::collections::BTreeSet<ShardId> = join
                 .joining
                 .iter()
@@ -143,12 +144,11 @@ pub(super) fn growth_receipt(
                         let slice = store
                             .slice(shard)
                             .and_then(|slice| slice.get(layer, level, ordinal));
-                        let held = |other: &croaring::Bitmap| match (slice, join.rank) {
+                        let held = |other: &croaring::Bitmap| match (slice, rank) {
                             (None, _) => 0,
                             (Some(slice), None) => slice.members.and_cardinality(other),
-                            (Some(slice), Some(rank)) => slice
-                                .contents
-                                .get(rank as usize)
+                            (Some(slice), Some(rank)) => rank
+                                .and_then(|rank| slice.contents.get(rank))
                                 .map_or(0, |content| content.generated_from.and_cardinality(other)),
                         };
                         let joining = join.joining.get(shard).unwrap_or(&nothing);
@@ -934,26 +934,40 @@ impl Executor {
         reply.ack(false);
     }
 
-    /// `PUT /control/shards`: declare the point shard's size while the service runs.
+    /// `PUT /control/shards`: declare the point shard's size while the service runs. A size the
+    /// open shard's high water has reached seals it in the same append, and queues its closing
+    /// compaction as a window's seal does.
     pub(super) fn commit_shards_declare(&mut self, size: u64, reply: Reply<bool>) {
-        let held = self.live.shard_size();
-        let high_water = self.live.open_shard().high_water();
-        if let Err(e) = mosaica_types::check_shard_size(size, high_water) {
+        if let Err(e) = mosaica_types::check_shard_size(size) {
             reply.fail(ExecError::ShardSize(e));
             return;
         }
-        if size == held {
+        if size == self.live.shard_size() {
             reply.ack(true);
             return;
         }
-        let record = WalRecord::ShardsDeclare { size };
-        if let Err(e) = self.make_durable(&[&record], "a shard size declaration") {
-            reply.fail(e);
-            return;
-        }
+        let last = self.live.last_shard();
+        let sealed = (last.state() == mosaica_types::ShardState::Open
+            && mosaica_types::reached_size(last.high_water(), size))
+        .then_some(last.id);
+        let declare = WalRecord::ShardsDeclare { size };
+        let seal = sealed.map(|shard| WalRecord::ShardSeal { shard });
+        let records: Vec<&WalRecord> = std::iter::once(&declare).chain(&seal).collect();
+        let positions = match self.make_durable(&records, "a shard size declaration") {
+            Ok(positions) => positions,
+            Err(e) => {
+                reply.fail(e);
+                return;
+            }
+        };
         self.live
             .size
             .store(size, std::sync::atomic::Ordering::Relaxed);
+        if sealed.is_some() {
+            last.with_allocator(|alloc| alloc.seal());
+        }
+        let appended_to = *positions.last().expect("the declaration is appended");
+        self.compactions.sealed(sealed, appended_to);
         // Durable in the log and not yet in a manifest: the next publication restates it.
         self.side_manifests.behind_live = true;
         reply.ack(false);
@@ -1317,7 +1331,8 @@ impl Executor {
     }
 
     /// `DELETE /control/views/{group}/{key}`: drop a view, freeing its key and killing its
-    /// incarnation, and delete every item the drop leaves with a row in no view.
+    /// incarnation, and delete every item the drop leaves with a row in no view and every
+    /// artifact of the dropped incarnation, whose keys are free from the acknowledgement.
     ///
     /// The deletions are ordinary ones: they enter the overlay and retire at the fold that
     /// executes them. They travel in the drop's own record, so no log holds the drop without them,
@@ -1351,9 +1366,22 @@ impl Executor {
                     .map(|entity| Target::Item(shard.id(), entity))
             })
             .collect();
+        // The artifacts dead once the key leaves the owner and every sharing group.
+        let manifest = &generation.bundle.manifest;
+        let artifacts = self.live.with_publication_state(|registry, store| {
+            crate::write::dead_view_artifacts(registry, store, |group, view| {
+                let dropped = view == key && manifest.owner_of_group(group) == owner;
+                (!dropped)
+                    .then(|| manifest.incarnation_of_key(group, view))
+                    .flatten()
+            })
+        });
+        let deleted = dangling.len() as u64;
+        let mut targets = dangling;
+        targets.extend(artifacts.iter().copied());
         let prepared = self
             .live
-            .with_roster(|roster| roster.prepare_drop(&owner, &key, dangling.clone()));
+            .with_roster(|roster| roster.prepare_drop(&owner, &key, targets.clone()));
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
@@ -1367,25 +1395,22 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         self.publish_roster(&generation, started, &ids);
-        let served = self.generation.load_full();
-        let retired = self.live.with_publication_state(|registry, store| {
-            crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
-        });
-        for (layer, _) in &retired {
-            self.pending_forms.retain(|(held, _, _), _| held != layer);
-            self.deps.artifact_projections.forget(layer);
-            self.deps.lineages.forget(layer);
-            self.deps.level_contents.forget(layer);
-        }
-        let deleted = dangling.len() as u64;
-        if !dangling.is_empty() {
+        if !targets.is_empty() {
             self.apply_changes(
-                dangling
+                targets
                     .into_iter()
                     .map(|target| (target, mosaica_lifecycle::ChangeOp::Delete))
                     .collect(),
             );
         }
+        let artifacts: Vec<(LayerSpace, EntityId)> = artifacts
+            .into_iter()
+            .filter_map(|target| match target {
+                Target::Artifact(space, entity) => Some((space, entity)),
+                Target::Item(..) => None,
+            })
+            .collect();
+        self.live.release_artifact_keys(&artifacts);
         self.side_manifests.behind_live = true;
         reply.ack(ViewDropped { deleted });
     }

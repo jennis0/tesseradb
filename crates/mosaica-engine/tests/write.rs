@@ -42,12 +42,12 @@ use mosaica_engine::{
 };
 use mosaica_lifecycle::command::{SubmitError, UnallocatedRow};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
-use mosaica_lifecycle::ChangeOp;
+use mosaica_lifecycle::{ChangeOp, IncomingArtifact};
 use mosaica_types::EntityId;
 
 use common::{
-    build_fixture, full_coverage_credential, item, item_of_id, item_of_key, keyed_row, open_engine,
-    tick, IngestRows, N_ITEMS,
+    artifact_target, build_fixture, flat_declaration, full_coverage_credential, item, item_of_id,
+    item_of_key, keyed_row, open_engine, tick, IngestRows, N_ITEMS,
 };
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -768,13 +768,66 @@ fn a_deny_whose_retries_are_exhausted_is_hidden_now_and_visible_after_a_restart(
     );
 }
 
+/// **An artifact deletion that missed the log keeps its key.** The deletion is applied anyway, and
+/// a restart without its record brings the artifact back under the key, so until then a
+/// publication under the key reaches that artifact rather than creating a second one beside it.
+#[test]
+fn an_artifact_deletion_whose_retries_are_exhausted_keeps_its_key() {
+    let tmp = TempDir::new().unwrap();
+    let wal_path = tmp.path().join("wal.log");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    engine
+        .register_layer(flat_declaration("clusters/a"))
+        .unwrap();
+    let members: Vec<EntityId> = (0..10).map(|id| entity_of(&engine, id)).collect();
+    let publish = |engine: &Engine| {
+        engine
+            .put_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![IncomingArtifact::from_entities(
+                    Some("k".into()),
+                    members.clone(),
+                )],
+            )
+            .expect("the publication is taken")
+    };
+    let id = publish(&engine).mosaica_ids[0];
+
+    faults.fail_next_fsyncs(DENY_DURABILITY_ATTEMPTS);
+    engine
+        .accept_changes(vec![(artifact_target(&engine, id), ChangeOp::Delete)])
+        .expect_err("every attempt failed, so the answer is an error");
+    let again = publish(&engine);
+    assert_eq!(
+        (again.created, again.mosaica_ids),
+        (0, vec![id]),
+        "the key still names the artifact whose deletion missed the log"
+    );
+    drop(engine);
+
+    let mut reopened = open_engine(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache-reopened"),
+        &wal_path,
+    );
+    reopened
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    let again = publish(&reopened);
+    assert_eq!(
+        (again.created, again.mosaica_ids),
+        (0, vec![id]),
+        "after a restart the artifact is back under its key, and it is the only one"
+    );
+}
+
 /// The negative control for the rule above: **the apply-anyway exception is deny-scoped**.
 ///
 /// An ingest whose append failed applies nothing — applying un-fsynced ingest would make items
-/// appear and vanish across a crash, and that holds per window as it does per command. The extra
-/// assertion that the high-water *did* advance keeps "nothing applied" from being satisfied
-/// vacuously by a failure that happened before assignment: it pins that the batch reached
-/// allocation and burned its ids, which is the documented, I9-safe behaviour.
+/// appear and vanish across a crash, and that holds per window as it does per command. The window
+/// reached its append, so it had been given its ids; it gives them back, and the next window is
+/// given them.
 #[test]
 fn an_ingest_append_failure_applies_nothing() {
     let tmp = TempDir::new().unwrap();
@@ -785,15 +838,23 @@ fn an_ingest_append_failure_applies_nothing() {
     let err = engine
         .ingest_rows(vec![keyed_row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose append failed must be refused");
+    assert!(
+        matches!(err, AcceptError::Exec(mosaica_lifecycle::ExecError::Wal(_))),
+        "the window reached its append: {err}"
+    );
 
     assert!(
         item_of_key(&engine, "never-lands").is_none(),
         "nothing may be applied for an ingest that was never made durable ({err})"
     );
+    assert_eq!(engine.allocator_high_water(), before_hw);
+    let given = engine
+        .ingest_rows(vec![keyed_row("lands")], "after".to_string(), [4u8; 32])
+        .expect("the next ingest is accepted");
     assert_eq!(
-        engine.allocator_high_water(),
-        before_hw + 1,
-        "the batch did reach assignment and burned its ids — monotone, never reused (I9)"
+        given,
+        vec![EntityId::new(before_hw)],
+        "the failed window's id is issued again"
     );
 }
 
@@ -2416,6 +2477,30 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
         one.fragmentation.runs,
         many.fragmentation.runs
     );
+}
+
+/// A window whose log write fails gives its ids back, so the counters see only the retry that
+/// takes them again.
+#[test]
+fn a_window_that_never_became_durable_is_not_counted_in_the_fragmentation_figures() {
+    let tmp = TempDir::new().expect("tempdir");
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let rows = || vec![keyed_row("frag-retry-a"), keyed_row("frag-retry-b")];
+
+    faults.fail_next_fsyncs(1);
+    assert!(engine
+        .ingest_rows(rows(), "failed".to_string(), [5u8; 32])
+        .is_err());
+    wait_until("the executor discarded the undurable region", || {
+        engine.write_executor_stats().wal_recoveries == 1
+    });
+    engine
+        .ingest_rows(rows(), "retried".to_string(), [6u8; 32])
+        .expect("the retry is accepted");
+
+    let stats = engine.write_executor_stats();
+    assert_eq!(stats.fragmentation_windows, 1);
+    assert_eq!(stats.fragmentation.rows, 2);
 }
 
 /// **A poisoned node publishes no deny state.** The dispositions it is still applying were

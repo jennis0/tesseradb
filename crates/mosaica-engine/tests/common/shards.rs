@@ -1,6 +1,6 @@
 //! The two-shard fixture and what the several-shard cases read of it: a bundle built past its
-//! `[shards] size`, an engine opened to write several shards, and what a viewer is served, to
-//! compare with the same items built as one shard.
+//! `[shards] size`, an engine opened over it to write, and what a viewer is served, to compare
+//! with the same items built as one shard.
 
 #![allow(dead_code)]
 
@@ -54,7 +54,7 @@ pub fn entity_ids(set: &EntitySet) -> Vec<u32> {
 }
 
 fn open_several(root: &Path, cache: &Path, wal: &Path, config: EngineConfig) -> Engine {
-    Engine::open_writing_several_shards(root, cache, wal, config).expect("the engine opens")
+    Engine::open(root, cache, wal, config).expect("the engine opens")
 }
 
 /// An engine over `root` that writes several shards, its executor running.

@@ -28,6 +28,7 @@ mod common;
 use common::*;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -580,8 +581,9 @@ fn publish_near_above_wide(engine: &Engine, fx: &Fixture) {
 /// Between a page that withdraws `near` and the tick that publishes it, the served form still
 /// ranks `near` first while `wide` now stands first in the store. The subset principal, who holds
 /// `near`'s set and not `wide`'s, is never served `wide` on any route that reads content, and a
-/// point names `t0` for each principal exactly where the artifact is served; nobody is served
-/// `near` once the page is accepted. `near_set` is `near`'s generating set.
+/// point names `t0`, and a `member_of` filter resolves it, for each principal exactly where the
+/// artifact is served; nobody is served `near` once the page is accepted. `near_set` is `near`'s
+/// generating set.
 fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: Vec<EntityId>) {
     let id = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
@@ -589,8 +591,9 @@ fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: V
         .expect("t0 is served")
         .mosaica_id;
     // Per route, what this principal is served for `t0`: the viewport's artifacts, the artifact
-    // read by its identifier, and whether a point of the viewport names it.
-    let routes = |credential: &[u8]| -> (Option<String>, Option<String>, bool) {
+    // read by its identifier, whether a point of the viewport names it, and whether a `member_of`
+    // filter on it matches anything.
+    let routes = |credential: &[u8]| -> (Option<String>, Option<String>, bool, bool) {
         let session = engine.authorise(credential).unwrap();
         let single = engine
             .artifact(&session, id, "s0", None)
@@ -613,17 +616,37 @@ fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: V
             .iter()
             .flat_map(|column| &column.ids)
             .any(|tag| *tag == Some(id.raw()));
-        (label_for(engine, credential), single, tagged)
+        let member_of =
+            mosaica_engine::filter::FilterExpr::MemberOf(mosaica_engine::filter::MemberOfLeaf {
+                layer: LAYER.to_string(),
+                artifact: id,
+            });
+        let matched = engine
+            .viewport(
+                &session,
+                mosaica_engine::viewport::ViewportRequest::new(
+                    "s0",
+                    0,
+                    WHOLE_MAP,
+                    N_ITEMS as usize,
+                )
+                .filter(member_of),
+            )
+            .expect("a viewport")
+            .tiles
+            .iter()
+            .any(|tile| tile.matched > 0);
+        (label_for(engine, credential), single, tagged, matched)
     };
     let near = Some("near".to_string());
     let wide = Some("wide".to_string());
     assert_eq!(
         routes(&subset_credential()),
-        (near.clone(), near.clone(), true)
+        (near.clone(), near.clone(), true, true)
     );
     assert_eq!(
         routes(&full_coverage_credential()),
-        (near.clone(), near, true)
+        (near.clone(), near, true, true)
     );
 
     let withdrawing = IncomingGrowth::page_of_entities("t0".into(), Some(0), Vec::new(), near_set);
@@ -635,7 +658,7 @@ fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: V
         (subset_credential(), false),
         (full_coverage_credential(), true),
     ] {
-        let (listed, single, tagged) = routes(&credential);
+        let (listed, single, tagged, matched) = routes(&credential);
         for served in [&listed, &single] {
             assert!(
                 served.is_none() || (holds_wides_set && *served == wide),
@@ -649,13 +672,18 @@ fn withdrawing_near_never_serves_wide_to_the_subset(engine: &Engine, near_set: V
             listed.is_some(),
             "a point names t0 exactly where it is served"
         );
+        assert_eq!(
+            matched,
+            listed.is_some(),
+            "a member_of filter resolves t0 exactly where it is served"
+        );
     }
 
     tick(engine);
-    assert_eq!(routes(&subset_credential()), (None, None, false));
+    assert_eq!(routes(&subset_credential()), (None, None, false, false));
     assert_eq!(
         routes(&full_coverage_credential()),
-        (wide.clone(), wide, true)
+        (wide.clone(), wide, true, true)
     );
 }
 
@@ -683,4 +711,200 @@ fn a_page_that_withdraws_a_restored_content_never_serves_the_next_ones_value_bef
     }
     let engine = fx.open();
     withdrawing_near_never_serves_wide_to_the_subset(&engine, near_set);
+}
+
+// ---- ranks are positions -----------------------------------------------------------------------
+
+/// Publish `t0` with three contents, `near`, `wide` and `far` in that order, each generated from
+/// the sources `sets` gives it, and tick so they are served.
+fn publish_three(engine: &Engine, fx: &Fixture, sets: [&[u64]; 3]) {
+    engine.register_layer(label_layer(LAYER)).unwrap();
+    let contents = ["near", "wide", "far"]
+        .into_iter()
+        .zip(sets)
+        .map(|(value, set)| {
+            IncomingContent::new(vec![value.to_string()], fx.members(set.iter().copied()))
+        })
+        .collect();
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                fx.members(0..300),
+                contents,
+            )],
+        )
+        .unwrap();
+    tick(engine);
+}
+
+/// **A page still in the log when a compaction withdraws a lower rank replays onto the content it
+/// named.** `wide` is generated from two documents the subset principal cannot see, and `far` from
+/// one it can and one of those two. A page takes that shared document out of `wide`. The
+/// compaction then withdraws `near`, whose one document was deleted, and the service stops before
+/// the log is rotated, so the restart replays the page over the compacted record.
+///
+/// What each principal is owed: the subset principal holds neither `wide`'s set nor `far`'s and is
+/// served nothing; the full principal is served `wide`. A page replayed one rank down would take
+/// the shared document out of `far` instead, with the same cardinality, and serve `far` to the
+/// subset principal, who cannot see a document it was generated from.
+#[test]
+fn a_page_replayed_after_a_compaction_withdrew_a_lower_rank_moves_the_same_set() {
+    let fx = fixture();
+    let (deleted, visible, hidden, shared) = (6, 3, 2, 1);
+    assert!(seen_by_subset(visible) && !seen_by_subset(hidden) && !seen_by_subset(shared));
+    let served = |engine: &Engine| -> Vec<Option<String>> {
+        [full_coverage_credential(), subset_credential()]
+            .iter()
+            .map(|credential| label_for(engine, credential))
+            .collect()
+    };
+    let owed = vec![Some("wide".to_string()), None];
+    let log = {
+        let engine = fx.open();
+        publish_three(
+            &engine,
+            &fx,
+            [&[deleted], &[hidden, shared], &[visible, shared]],
+        );
+        // The publication leaves the log, so the restart reads the record from the prefix alone.
+        reclaim_log(&engine);
+        let receipt = engine
+            .grow_memberships(
+                LAYER.into(),
+                0,
+                vec![IncomingGrowth::page_of_entities(
+                    "t0".into(),
+                    Some(1),
+                    Vec::new(),
+                    fx.members([shared]),
+                )],
+            )
+            .expect("a page of `wide`'s set");
+        assert_eq!((receipt[0].joined, receipt[0].left), (0, 1));
+        engine
+            .accept_change(fx.members([deleted])[0], ChangeOp::Delete)
+            .expect("the delete is accepted");
+        tick(&engine);
+        assert_eq!(served(&engine), owed, "after the page");
+        let log = snapshot_wal(fx._tmp.path());
+        fold(&engine);
+        assert_eq!(
+            engine.last_fold_report()[0].contents_lost,
+            vec![(0, 1)],
+            "the compaction withdrew `near`"
+        );
+        assert_eq!(served(&engine), owed, "after the compaction");
+        log
+    };
+    // A crash between the compaction's publication and the log's rotation.
+    restore_wal(fx._tmp.path(), &log);
+    let engine = fx.open();
+    assert_eq!(
+        served(&engine),
+        owed,
+        "across a restart that replays the page"
+    );
+}
+
+/// **A fill after a withdrawal takes the next position, whatever has been published.** On a layer
+/// whose content serves on the artifact's own gate, `x` and `y` are withdrawn by pages that join a
+/// document to each set and take it out again. With a tick after every write, so each fill finds
+/// the artifact's content published: `z` at withdrawn rank 0 lands at position 2 and is served,
+/// `v` at rank 4, past the next, lands at 3, and `w` at withdrawn rank 1 lands at 4. Withdrawing
+/// each in turn serves the next, across a restart and a compaction, which leaves one content
+/// extent, and a restart after it.
+#[test]
+fn a_fill_after_a_withdrawal_takes_the_next_position() {
+    let fx = fixture();
+    let fill = |engine: &Engine, rank: u16, value: &str| {
+        let mut growth = IncomingGrowth::from_entities("t0".into(), Vec::new());
+        growth.parts.contents = vec![(rank, vec![value.to_string()])];
+        let filled = engine
+            .grow_memberships(LAYER.into(), 0, vec![growth])
+            .expect("a new content")[0]
+            .filled;
+        tick(engine);
+        filled
+    };
+    let page = |engine: &Engine, rank: u16, joining, leaving| {
+        engine
+            .grow_memberships(
+                LAYER.into(),
+                0,
+                vec![IncomingGrowth::page_of_entities(
+                    "t0".into(),
+                    Some(rank),
+                    joining,
+                    leaving,
+                )],
+            )
+            .expect("a page")
+            .remove(0)
+    };
+    // Read before the compaction, which moves the files the fixture reads it from.
+    let document = fx.members([0]);
+    let withdraw = |engine: &Engine, rank: u16| {
+        page(engine, rank, document.clone(), Vec::new());
+        let receipt = page(engine, rank, Vec::new(), document.clone());
+        assert_eq!(receipt.withdrawn, Some(rank));
+        tick(engine);
+    };
+    let label = |engine: &Engine| label_for(engine, &subset_credential());
+    {
+        let engine = fx.open();
+        let mut layer = label_layer(LAYER);
+        layer.content.supplied[0].require_member_visibility = SuppliedRequirement::Inherited;
+        engine.register_layer(layer).unwrap();
+        let contents = ["x", "y"]
+            .map(|value| IncomingContent::new(vec![value.to_string()], Vec::new()))
+            .into();
+        engine
+            .publish_artifacts(
+                LAYER.into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some("t0".into()),
+                    fx.members(0..300),
+                    contents,
+                )],
+            )
+            .unwrap();
+        tick(&engine);
+        withdraw(&engine, 0);
+        withdraw(&engine, 1);
+
+        assert_eq!(fill(&engine, 0, "z"), 1);
+        assert_eq!(label(&engine).as_deref(), Some("z"));
+        assert_eq!(fill(&engine, 4, "v"), 1);
+        assert_eq!(fill(&engine, 1, "w"), 1);
+        assert_eq!(label(&engine).as_deref(), Some("z"));
+        withdraw(&engine, 2);
+        assert_eq!(label(&engine).as_deref(), Some("v"));
+    }
+    {
+        let engine = fx.open();
+        assert_eq!(label(&engine).as_deref(), Some("v"), "across a restart");
+        fold(&engine);
+        assert_eq!(label(&engine).as_deref(), Some("v"), "across a compaction");
+        let extents: usize = side_manifest(&fx.root)
+            .layer_spaces
+            .iter()
+            .map(|space| space.content_extents.len())
+            .sum();
+        assert_eq!(
+            extents, 1,
+            "the compaction folds the content extents into one"
+        );
+    }
+    let engine = fx.open();
+    assert_eq!(
+        label(&engine).as_deref(),
+        Some("v"),
+        "across a restart after the compaction"
+    );
+    withdraw(&engine, 3);
+    assert_eq!(label(&engine).as_deref(), Some("w"));
 }

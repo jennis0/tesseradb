@@ -147,6 +147,7 @@ from oracle.harness import (
     spawn_server,
     stop_server,
 )
+from oracle.tenancy import HolderCount
 from oracle.wire import decode_viewport
 
 VIEW = "s0"
@@ -533,6 +534,53 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             stop_server(proc2)
     finally:
         if proc is not None:
+            stop_server(proc)
+
+
+#: Deleted from the first block: the many-shard mode's threshold, `SHARD_SIZE_MANY >> 10`, and
+#: three over, so the deleted items' shard keeps a pool new items take for both batches below in
+#: both modes.
+FREED = (catalogue.SHARD_SIZE_MANY >> 10) + 3
+
+
+def test_numbers_a_compaction_frees_are_issued_again_after_each_restart(
+    catalogue_bundle_root: Path, restart_paths
+):
+    """Items of the first block are deleted and compacted away, which frees their numbers in the
+    shard that held them. After a restart the high water is what it was, and a batch's new items
+    take the lowest freed numbers one tenancy higher; after a second restart, the next ones."""
+    oracle_bundle = open_catalogue_bundle(catalogue_bundle_root)
+    numbers = HolderCount.of_bundle(oracle_bundle)
+    (base_term,) = catalogue.dict_terms(oracle_bundle, ["filler_head"])
+    deleted = sorted(mask_mod.mask_of({base_term}, oracle_bundle.pairs()))[:FREED]
+    paths = {"cache_dir": restart_paths["cache"], "wal_path": restart_paths["wal"]}
+    served_root, tmp_dir = restart_paths["bundle"], restart_paths["root"]
+
+    srv, proc = spawn_server(served_root, tmp_dir, **paths)
+    try:
+        ids = [oracle_bundle.mosaica_id_of(item) for item in deleted]
+        resp = srv.changes(
+            [{"op": "delete", "match": {"mosaica_id": str(t)}} for t in ids], strict=True
+        )
+        assert resp.status_code == 200, resp.text
+        for t in ids:
+            numbers.delete(t)
+        srv.compact()
+        high_water = srv.status()["entity_id_high_water"]
+    finally:
+        stop_server(proc)
+
+    for restart in range(2):
+        srv, proc = spawn_server(served_root, tmp_dir, **paths)
+        try:
+            assert srv.status()["entity_id_high_water"] == high_water
+            resp = srv.ingest(_build_ingest_batch(), f"{BATCH_ID}-freed-{restart}", strict=True)
+            assert resp.status_code == 200, resp.text
+            taken = numbers.receipt(resp.json())
+            assert sorted(taken) == deleted[3 * restart : 3 * restart + 3]
+            assert {numbers.latest(item) for item in taken} == {1}
+            assert srv.status()["entity_id_high_water"] == high_water
+        finally:
             stop_server(proc)
 
 

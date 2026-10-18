@@ -12,7 +12,9 @@ water once, at tenancy 0. Each new item an acknowledged ingest reports must carr
 above every earlier holder's: one above, unless a restart replayed the deletion after the
 compaction that freed the number, which frees it again one tenancy higher. The number's previous
 holder must have been seen deleted first. A row naming an item answers the
-identifier of its number's latest holder.
+identifier of its number's latest holder. A new item may be the first of a shard the count does
+not know only where that shard takes the next number after every shard it knows: a service opens
+shards in number order.
 
 Every check raises `AssertionError`, since a disagreement is the service's.
 """
@@ -37,6 +39,12 @@ class HolderCount:
     built: dict[int, int]
     deleted: set[int] = field(default_factory=set)
     _latest: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    #: Each known shard's least possible high water: its built one, raised past every number a new
+    #: item of it took. A shard opened since the build is known from its first new item.
+    _high_water: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._high_water = dict(self.built)
 
     @classmethod
     def of_bundle(cls, bundle) -> "HolderCount":
@@ -59,21 +67,31 @@ class HolderCount:
         shard, number = item_of_key(item)
         return forward_item(self.key, shard, latest, number)
 
-    def _item(self, mosaica_id: int) -> tuple[int, int] | None:
+    def high_water_floor(self) -> int:
+        """The least `entity_id_high_water` a service can report: each known shard's high water,
+        summed."""
+        return sum(self._high_water.values())
+
+    def _item(self, mosaica_id: int, *, opening: bool = False) -> tuple[int, int] | None:
         """The tenancy and [`item_key`] `mosaica_id` inverts to, or `None` where it names no item
-        of a shard this count knows."""
+        of a shard this count knows, or, if `opening`, of the shard opened next."""
         item = invert_item(self.key, mosaica_id)
-        if item is None or item[0] not in self.built:
+        if item is None:
+            return None
+        if item[0] not in self._high_water and not (
+            opening and item[0] == max(self._high_water, default=-1) + 1
+        ):
             return None
         return item[1], item_key(item[0], item[2])
 
-    def item_of(self, mosaica_id: int) -> tuple[int, int]:
+    def item_of(self, mosaica_id: int, *, opening: bool = False) -> tuple[int, int]:
         """The tenancy and [`item_key`] an item's identifier inverts to. An identifier of another
-        kind or of a shard this count does not know names no item here and is refused."""
-        item = self._item(mosaica_id)
+        kind or of a shard this count does not know names no item here and is refused; if
+        `opening`, the shard opened next is known."""
+        item = self._item(mosaica_id, opening=opening)
         if item is None:
             raise AssertionError(
-                f"mosaica_id {mosaica_id} names no item of shards {sorted(self.built)}"
+                f"mosaica_id {mosaica_id} names no item of shards {sorted(self._high_water)}"
             )
         return item
 
@@ -107,7 +125,7 @@ class HolderCount:
 
     def created(self, mosaica_id: int) -> int:
         """Check and count the identifier issued to a new item, and answer its item."""
-        tenancy, item = self.item_of(mosaica_id)
+        tenancy, item = self.item_of(mosaica_id, opening=True)
         latest = self.latest(item)
         if latest is None and tenancy != 0:
             raise AssertionError(
@@ -126,6 +144,8 @@ class HolderCount:
                 "not deleted"
             )
         self._latest[item] = tenancy
+        shard, number = item_of_key(item)
+        self._high_water[shard] = max(self._high_water.get(shard, 0), number + 1)
         return item
 
     def delete(self, mosaica_id: int) -> None:

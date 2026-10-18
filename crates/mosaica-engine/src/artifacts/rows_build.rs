@@ -371,12 +371,13 @@ impl ArtifactRows {
         slice: &LevelSlice<'_>,
         space: &RowSpace,
         view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
     ) -> usize {
         let store = slice.shard();
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         let scratch = &mut ProjectScratch::default();
-        for (ordinal, record) in slice.in_view(view) {
+        for (ordinal, record) in slice.in_view(view, incarnation) {
             if !mosaica_lifecycle::membership::borrows_membership(record) {
                 continue;
             }
@@ -390,7 +391,7 @@ impl ArtifactRows {
             }
             if taken == 0 && !self.membership.rows_held() {
                 // A column-only form holds no bitmap to overwrite; rebuild artifact-major first.
-                self.membership = MembershipRows::build(slice.in_view(view), space);
+                self.membership = MembershipRows::build(slice.in_view(view, incarnation), space);
             }
             self.membership.put_rows(
                 ordinal as usize,

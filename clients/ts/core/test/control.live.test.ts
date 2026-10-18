@@ -352,12 +352,15 @@ describe('Control against a live server', () => {
     expect((await figures()).spaces).toEqual(before.spaces);
   });
 
-  it('declares the shard size, refuses a page that would take the shard past it, and takes the page once the size is raised', async (ctx) => {
+  it('declares the shard size, seals the shard at a size at or below its high water, and takes a page past it into another shard', async (ctx) => {
     live(ctx);
     const highWater = Number((await control.status()).body.entity_id_high_water);
     expect((await control.declareShards({size: highWater})).status).toBe(201);
     expect((await control.declareShards({size: highWater})).body).toMatchObject({size: highWater, existing: true});
     expect((await control.status()).body.shards).toEqual({size: highWater});
+    expect((await control.declareShards({size: highWater - 1})).status).toBe(201);
+    expect((await control.status()).body.shards).toEqual({size: highWater - 1});
+    expect((await control.declareShards({size: 0})).status).toBe(422);
     const q = meta.views.find((v) => v.id === 's0')!.quantisation;
     const page = tableToIPC(
       new Table({
@@ -368,13 +371,10 @@ describe('Control against a live server', () => {
       }),
       'stream'
     );
-    const refused = await control.ingest(page, {view: 's0'});
-    expect(refused.status).toBe(409);
-    expect(Number((await control.status()).body.entity_id_high_water)).toBe(highWater);
-    expect((await control.declareShards({size: highWater - 1})).status).toBe(409);
-    expect((await control.declareShards({size: 0})).status).toBe(422);
+    const past = await control.ingest(page, {view: 's0'});
+    expect(past).toMatchObject({status: 200, body: {created: 1}});
+    expect(Number((await control.status()).body.entity_id_high_water)).toBe(highWater + 1);
     expect((await control.declareShards({size: highWater + 1000})).status).toBe(201);
-    expect((await control.ingest(page, {view: 's0', batch: refused.batch})).body).toMatchObject({created: 1});
   });
 
   it('revokes a session, after which its token is refused', async (ctx) => {

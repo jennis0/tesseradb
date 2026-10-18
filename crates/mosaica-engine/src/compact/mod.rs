@@ -23,4 +23,4 @@ pub(crate) use execute::{execute, next_prefix_name, CompletedFold, FoldContext};
 pub(crate) use plan::{plan_fold, FoldPlan, FoldResources, NoFold};
 pub(crate) use retire::{executed, CarriedForward};
 pub use schedule::CompactionSchedule;
-pub(crate) use schedule::{due, rank, DeadBytes, FoldTrigger, Gauges};
+pub(crate) use schedule::{due, past_floor, rank, DeadBytes, FoldTrigger, Gauges};

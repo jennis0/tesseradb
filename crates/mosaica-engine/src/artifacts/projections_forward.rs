@@ -50,6 +50,7 @@ impl ArtifactProjections {
         prefix: &str,
         shard: ShardId,
         view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
         layer: &str,
         level: u32,
         store: &ArtifactStore,
@@ -80,7 +81,15 @@ impl ArtifactProjections {
         let amended = Arc::make_mut(&mut rows);
         // The copy alone; every arm below is timed by `elapsed_ms`.
         let cloned_ms = started.elapsed().as_millis() as u64;
-        let applied = Self::applied(amended, &address, (store, records), space, &pending, source);
+        let applied = Self::applied(
+            amended,
+            &address,
+            incarnation,
+            (store, records),
+            space,
+            &pending,
+            source,
+        );
         self.share_records(
             &address,
             prefix,
@@ -260,6 +269,7 @@ impl ArtifactProjections {
     fn applied(
         amended: &mut ArtifactRows,
         address: &LevelAddress,
+        incarnation: mosaica_types::view::ViewIncarnation,
         (slice, records): (&ArtifactStore, &ArtifactStore),
         space: &RowSpace,
         pending: &[&LevelDelta],
@@ -269,7 +279,7 @@ impl ArtifactProjections {
         let level = *level;
         let slice = LevelSlice::new(slice, records, layer, level, None);
         let drawn = |ordinal: u32| {
-            let record = drawn_record(records, layer, level, ordinal, view)?;
+            let record = drawn_record(records, layer, level, ordinal, (view, incarnation))?;
             Some((record, slice.held(ordinal, record)))
         };
         let row_major = amended.layout.is_row_major();
@@ -302,7 +312,12 @@ impl ArtifactProjections {
                             continue;
                         }
                         // A join alone: the same set a projection would produce, by one union.
-                        if amended.grow_generating(page.ordinal, page.rank, &page.joining, space) {
+                        if amended.grow_generating(
+                            page.ordinal,
+                            page.position,
+                            &page.joining,
+                            space,
+                        ) {
                             applied.unions += 1;
                         }
                     }
@@ -385,6 +400,7 @@ impl ArtifactProjections {
         prefix: &str,
         shard: ShardId,
         view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
         store: &ArtifactStore,
         previous: &RowSpace,
         next: &RowSpace,
@@ -417,9 +433,10 @@ impl ArtifactProjections {
             let make_mut_ms = started.elapsed().as_millis() as u64;
             let swept = std::time::Instant::now();
             let (added, rows_taken) = match source {
-                SegmentRows::Projected => {
-                    amended.extend_by(store.level_in_view(layer, *level, view_key(view)), next)
-                }
+                SegmentRows::Projected => amended.extend_by(
+                    store.level_in_view(layer, *level, view_key(view), incarnation),
+                    next,
+                ),
                 SegmentRows::Resolved(piece) => {
                     // The one segment resolved is the one this flush published, so a form more
                     // than one segment short has nothing here for the others.
@@ -433,7 +450,7 @@ impl ArtifactProjections {
                     };
                     amended.extend_by_resolved(
                         &piece,
-                        store.level_in_view(layer, *level, view_key(view)),
+                        store.level_in_view(layer, *level, view_key(view), incarnation),
                         next,
                         extent.row_base,
                     )
@@ -483,6 +500,7 @@ impl ArtifactProjections {
         prefix: &str,
         shard: ShardId,
         view: &str,
+        incarnation: mosaica_types::view::ViewIncarnation,
         store: &ArtifactStore,
         previous: &RowSpace,
         next: &RowSpace,
@@ -520,13 +538,13 @@ impl ArtifactProjections {
             let amended = Arc::make_mut(&mut rows);
             let (lo, hi, added, rows_taken) = match source {
                 SegmentRows::Projected => amended.rebase_span(
-                    store.level_in_view(layer, *level, view_key(view)),
+                    store.level_in_view(layer, *level, view_key(view), incarnation),
                     next,
                     start,
                 ),
                 SegmentRows::Resolved(piece) => amended.rebase_span_resolved(
                     &piece,
-                    store.level_in_view(layer, *level, view_key(view)),
+                    store.level_in_view(layer, *level, view_key(view), incarnation),
                     next,
                     start,
                 ),

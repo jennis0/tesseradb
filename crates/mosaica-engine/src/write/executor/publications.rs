@@ -137,76 +137,14 @@ fn write_content_extent(
     Ok(extent)
 }
 
-/// What a fold does with one content extent of a space whose deleted artifacts it removes.
-enum ContentCarry {
-    /// The extent holds none of their rows, and is linked into the new prefix as it is.
-    Link,
-    /// The extent written again without their rows.
-    Rewritten(mosaica_store::manifest::RecordExtent),
-    /// Every row the extent held was theirs.
-    Emptied,
-}
-
-/// `extent` of `from_prefix` without the rows of the entities `retired`: [`ContentCarry::Link`]
-/// where it holds none, and otherwise its other rows written under `layout` in `to_prefix`, named
-/// for publication `n` and the extent's position `index` in its space's list.
-fn content_without(
-    from_prefix: &std::path::Path,
-    to_prefix: &std::path::Path,
-    layout: mosaica_store::LayerSpaceLayout<'_>,
-    (n, index): (u64, usize),
-    extent: &mosaica_store::manifest::RecordExtent,
-    retired: &croaring::Bitmap,
-) -> mosaica_store::Result<ContentCarry> {
-    let paths = crate::filter::record_extent_paths(from_prefix, extent);
-    let unreadable = |e: mosaica_filter::RecordError| mosaica_store::StoreError::Io {
-        path: paths.blocks.clone(),
-        source: e.into(),
-    };
-    let blob = mosaica_filter::RecordBlob::open(
-        &paths.blocks,
-        &paths.hasrow,
-        &paths.directory,
-        mosaica_filter::Access::Read,
-    )
-    .map_err(unreadable)?;
-    let hasrow = blob.hasrow().map_err(unreadable)?;
-    if hasrow.and_cardinality(retired) == 0 {
-        return Ok(ContentCarry::Link);
-    }
-    if hasrow.andnot_cardinality(retired) == 0 {
-        return Ok(ContentCarry::Emptied);
-    }
-    let dir = to_prefix.join(layout.content_rel());
-    let rewritten = layout.content_extent(&format!("artifacts-{n:06}-{index}"));
-    let to = crate::filter::record_extent_paths(to_prefix, &rewritten);
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| {
-            mosaica_filter_write::fold_record_blob(
-                &[&blob],
-                retired,
-                &to.blocks,
-                &to.hasrow,
-                &to.directory,
-                mosaica_filter::RECORD_BLOCK_TARGET,
-            )
-        })
-        .map_err(|source| mosaica_store::StoreError::Io {
-            path: to.blocks.clone(),
-            source,
-        })?;
-    // `finish` synced the blocks; the addressing files and the directory are synced here.
-    mosaica_store::fsync_written(&[to.hasrow, to.directory])?;
-    Ok(ContentCarry::Rewritten(rewritten))
-}
-
 /// Each layer space's content extents.
 pub(super) type SpaceContents =
     std::collections::BTreeMap<LayerSpace, Vec<mosaica_store::manifest::RecordExtent>>;
 
 /// Each registered space's content extents, carried into the fold's new prefix `to` from `from`:
-/// an extent holding a deleted artifact's row (`executed`) is written again without it, and the
-/// rest are returned as rels to link.
+/// a space holding one extent that holds no deleted artifact's row (`executed`) keeps it, linked,
+/// and any other space's extents are written again as one without those rows, each artifact's row
+/// the union of its rows across them. Returns the extents and the rels to link.
 pub(super) fn carry_space_contents(
     from: &std::path::Path,
     to: &std::path::Path,
@@ -217,23 +155,68 @@ pub(super) fn carry_space_contents(
 ) -> mosaica_store::Result<(SpaceContents, Vec<String>)> {
     let mut contents = SpaceContents::new();
     let mut linked = Vec::new();
+    let nothing = croaring::Bitmap::new();
     for (space, held) in held {
-        let layout = mosaica_store::LayerSpaceLayout::new(partition, *space);
         let kept: &mut Vec<_> = contents.entry(*space).or_default();
-        for (index, extent) in held.content_extents.iter().enumerate() {
-            let carry = match executed.get(space) {
-                Some(retired) => content_without(from, to, layout, (n, index), extent, retired)?,
-                None => ContentCarry::Link,
+        let retired = match (held.content_extents.as_slice(), executed.get(space)) {
+            ([extent], None) => {
+                linked.extend(extent.files().map(String::from));
+                kept.push(extent.clone());
+                continue;
+            }
+            (_, retired) => retired.unwrap_or(&nothing),
+        };
+        let mut blobs = Vec::with_capacity(held.content_extents.len());
+        let mut rows = croaring::Bitmap::new();
+        for extent in &held.content_extents {
+            let paths = crate::filter::record_extent_paths(from, extent);
+            let unreadable = |e: mosaica_filter::RecordError| mosaica_store::StoreError::Io {
+                path: paths.blocks.clone(),
+                source: e.into(),
             };
-            match carry {
-                ContentCarry::Link => {
-                    linked.extend(extent.files().map(String::from));
-                    kept.push(extent.clone());
-                }
-                ContentCarry::Rewritten(rewritten) => kept.push(rewritten),
-                ContentCarry::Emptied => {}
+            let blob = mosaica_filter::RecordBlob::open(
+                &paths.blocks,
+                &paths.hasrow,
+                &paths.directory,
+                mosaica_filter::Access::Read,
+            )
+            .map_err(unreadable)?;
+            rows.or_inplace(blob.hasrow().map_err(unreadable)?);
+            blobs.push(blob);
+        }
+        if let [extent] = held.content_extents.as_slice() {
+            if !rows.intersect(retired) {
+                linked.extend(extent.files().map(String::from));
+                kept.push(extent.clone());
+                continue;
             }
         }
+        if rows.andnot_cardinality(retired) == 0 {
+            continue;
+        }
+        let layout = mosaica_store::LayerSpaceLayout::new(partition, *space);
+        let dir = to.join(layout.content_rel());
+        let folded = layout.content_extent(&format!("artifacts-{n:06}-0"));
+        let paths = crate::filter::record_extent_paths(to, &folded);
+        let layers: Vec<&mosaica_filter::RecordBlob> = blobs.iter().collect();
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| {
+                mosaica_filter_write::fold_record_blob(
+                    &layers,
+                    retired,
+                    &paths.blocks,
+                    &paths.hasrow,
+                    &paths.directory,
+                    mosaica_filter::RECORD_BLOCK_TARGET,
+                )
+            })
+            .map_err(|source| mosaica_store::StoreError::Io {
+                path: paths.blocks.clone(),
+                source,
+            })?;
+        // `finish` synced the blocks; the addressing files and the directory are synced here.
+        mosaica_store::fsync_written(&[paths.hasrow, paths.directory])?;
+        kept.push(folded);
     }
     Ok((contents, linked))
 }
@@ -827,17 +810,20 @@ impl Executor {
         // spatial level's is the merged segment resolved whole against its shapes, in
         // `ArtifactProjections::rebase_merged`.
         let plan = &completed.plan;
-        if let (Some(previous), Some(space)) = (
+        if let (Some(previous), Some(next_view)) = (
             view_row_space(&live.bundle, &plan.partition, plan.shard, &plan.view),
-            view_row_space(&next_bundle, &plan.partition, plan.shard, &plan.view),
+            view_data(&next_bundle, &plan.partition, plan.shard, &plan.view),
         ) {
-            let merged_segment = view_data(&next_bundle, &plan.partition, plan.shard, &plan.view)
-                .and_then(|v| v.segments.iter().find(|s| s.seg_id == merged_seg_id))
+            let space = &next_view.row_space;
+            let merged_segment = next_view
+                .segments
+                .iter()
+                .find(|s| s.seg_id == merged_seg_id)
                 .map(|s| s.as_ref());
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
                     self.segment_rows_of(
-                        &completed.plan.view,
+                        (&completed.plan.view, next_view.incarnation),
                         layer,
                         level,
                         merged_segment,
@@ -852,6 +838,7 @@ impl Executor {
                     &live.prefix,
                     completed.plan.shard,
                     &completed.plan.view,
+                    next_view.incarnation,
                     slice,
                     previous,
                     space,
@@ -1673,6 +1660,7 @@ impl Executor {
                         &generation.prefix,
                         shard,
                         view,
+                        data.incarnation,
                         layer,
                         level,
                         slice,
@@ -1704,6 +1692,7 @@ impl Executor {
                 let ordinals = &ordinals;
                 let held = self.deps.shapes.level(
                     view,
+                    data.incarnation,
                     layer,
                     level,
                     store,
@@ -1747,6 +1736,7 @@ impl Executor {
                     &generation.prefix,
                     shard,
                     view,
+                    data.incarnation,
                     layer,
                     level,
                     slice,
@@ -1759,15 +1749,15 @@ impl Executor {
         });
     }
 
-    /// Where a geometry publication's rows come from, per level of one view: what
-    /// `ArtifactProjections::extend_flushed` and `rebase_merged` are told
+    /// Where a geometry publication's rows come from, per level of one view at its incarnation:
+    /// what `ArtifactProjections::extend_flushed` and `rebase_merged` are told
     /// (`crate::artifacts::SegmentRows`). A stored level projects; a spatial level takes
     /// `resolved` where the flush's pool resolved the segment against the shapes now held, and
     /// resolves the segment here otherwise, for a level rebuilt by a publication since the flush
     /// was planned, or one no flush plan saw. An attribute predicate takes nothing.
     pub(super) fn segment_rows_of(
         &self,
-        view: &str,
+        (view, incarnation): (&str, mosaica_types::view::ViewIncarnation),
         layer: &str,
         level: u32,
         segment: Option<&mosaica_store::read::SegmentData>,
@@ -1785,6 +1775,7 @@ impl Executor {
         }
         let held = self.deps.shapes.level(
             view,
+            incarnation,
             layer,
             level,
             store,
@@ -2593,34 +2584,32 @@ impl Executor {
         //
         // A values-only publication added no rows, so it extends no form: `seg_id` is `None` and
         // the row space it publishes is the one it found.
-        if let (Some(previous), Some(space)) = (
+        if let (Some(previous), Some(next_view)) = (
             view_row_space(
                 &live.bundle,
                 &completed.partition,
                 completed.shard,
                 &completed.view,
             ),
-            view_row_space(
+            view_data(
                 &next_bundle,
                 &completed.partition,
                 completed.shard,
                 &completed.view,
             ),
         ) {
+            let space = &next_view.row_space;
             let segment = seg_id.as_ref().and_then(|seg_id| {
-                view_data(
-                    &next_bundle,
-                    &completed.partition,
-                    completed.shard,
-                    &completed.view,
-                )
-                .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
-                .map(|s| s.as_ref())
+                next_view
+                    .segments
+                    .iter()
+                    .find(|s| &s.seg_id == seg_id)
+                    .map(|s| s.as_ref())
             });
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
                     self.segment_rows_of(
-                        &completed.view,
+                        (&completed.view, next_view.incarnation),
                         layer,
                         level,
                         segment,
@@ -2635,6 +2624,7 @@ impl Executor {
                     &live.prefix,
                     completed.shard,
                     &completed.view,
+                    next_view.incarnation,
                     slice,
                     previous,
                     space,

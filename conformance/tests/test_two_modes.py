@@ -33,9 +33,20 @@ one-shard answer, which is how this module looks for them.
    θ-live (`theta_target_marks = 16`), where the counts are compared and those three are not.
 6. *Status figures of the process and of the layout:* the caches, the heap and the sessions,
    which the control plane keeps per shard and per process; `segments[].count`, since each shard
-   has its base segment; `shards.size`; and the write executor's counters, its log and
-   `publication`, since a bundle of several shards takes no write and its executor idles. The
-   corpus figures, summed over shards, are compared.
+   has its base segment, and `fragmentation`, a figure of each shard's postings; `shards.size`;
+   the write executor's counters, buffer and log, `publication` and each partition's
+   `segments_version`, since a flush publishes one shard of one view at a time, so how many rows
+   are still buffered after a visible flush depends on the shards; and the compaction's counters,
+   times and shard, since a compaction request compacts each shard with something to reclaim and
+   counts one for each. The corpus figures, summed over shards, are compared.
+
+**The write script.** Each corpus is compared as built, after a write script, and after a
+compaction and a restart. The script is the same requests to every server of both modes: an
+ingest of new items, an ingest row moving an item and changing a value, a deletion and a
+suppression, a layer registered and published into, naming members by their unique values, and a
+flush waited on. A new item's stable key is the unique value its row carries, paired with the
+identifier its receipt answers. Over several shards the new items of the shapes and labels corpora
+open a shard, since their builds fill the last.
 
 **The byte scanner.** Every many-shard answer is swept as `test_byte_scan.py` sweeps the
 catalogue: the identifier columns, the identifiers in JSON and the bytes of every cursor hold no
@@ -84,7 +95,7 @@ from test_shape_membership import (
     build_with_layers,
 )
 
-pytestmark = pytest.mark.two_modes
+pytestmark = pytest.mark.own_shards
 
 MODES = (("one", False), ("many", True))
 WHOLE = [0.0, 0.0, 65536.0, 65536.0]
@@ -110,8 +121,11 @@ STATUS_PROCESS = frozenset(
         "sessions",
         "shards",
         "publication",
+        "fragmentation",
     }
 )
+#: The `compaction` figures of `/control/status` compared (module doc, item 6).
+COMPACTION_CORPUS = ("live_rows", "fold_requested", "fold_failures")
 #: The differing fields a failure shows per request, and the report holds.
 SHOWN = 12
 REPORTED = 1_000
@@ -138,6 +152,19 @@ class Request:
         return f"{self.route} as {self.principal} on the {self.server} server{body}"
 
 
+@dataclass(frozen=True)
+class Write:
+    """One control request of the write script, as every server of both modes is sent it. A
+    string `"@<stable key>"` anywhere in `body` is the identifier that key names in the mode."""
+
+    method: str
+    path: str
+    body: object = None
+    expect: tuple[int, ...] = (200,)
+    #: An ingest's batch id. Its rows name items by the corpus's unique field.
+    batch: str | None = None
+
+
 @dataclass
 class Corpus:
     name: str
@@ -152,6 +179,10 @@ class Corpus:
     #: The servers each mode starts, by name, with their `spawn_server` options.
     servers: dict[str, dict]
     battery: Callable[["Side"], list[Request]]
+    #: The write script (module doc).
+    writes: list[Write]
+    #: Whether the many-shard build fills its last shard, so the script's new items open one.
+    opens: bool
 
 
 # ---- one mode's servers, and its identifiers ---------------------------------------------------
@@ -173,6 +204,7 @@ class Side:
         self.corpus = corpus
         self.bundle = Bundle(root)
         self.key_raw = bytes.fromhex(self.bundle.manifest["identity"]["key"])
+        self.tmp = tmp
         self.servers: dict[str, tuple[Server, object]] = {}
         for name, options in corpus.servers.items():
             copy = tmp / f"{name}-bundle"
@@ -184,10 +216,11 @@ class Side:
         self.stable: dict[int, str] = {}
         self.unknown: set[int] = set()
         self.scan = Scan()
+        #: Each new item's identifier, as (shard, tenancy, number).
+        self.placed: dict[int, tuple[int, int, int]] = {}
         for value, item in self.bundle.unique_entities(corpus.key_field).items():
             self.stable[self.bundle.mosaica_id_of(item)] = f"item {corpus.key_field}={value}"
-        self._name_artifacts()
-        self.raw = {stable: raw for raw, stable in self.stable.items()}
+        self.name_artifacts()
 
     def server(self, name: str) -> Server:
         return self.servers[name][0]
@@ -202,9 +235,56 @@ class Side:
         for _server, proc in self.servers.values():
             stop_server(proc)
 
-    def _name_artifacts(self) -> None:
+    def restart(self) -> None:
+        """Stop every server and start it again over the same bundle copy and state."""
+        for name, options in self.corpus.servers.items():
+            stop_server(self.servers[name][1])
+            self.servers[name] = spawn_server(
+                self.tmp / f"{name}-bundle", self.tmp / name, **options
+            )
+        self._tokens.clear()
+        self._members.clear()
+
+    def write(self, write: Write) -> None:
+        """Send `write` to every server, and name the new items its receipts answer."""
+        body = self.resolve(write.body)
+        for name in self.servers:
+            server = self.server(name)
+            headers = {"Authorization": f"Bearer {server.operator_credential}"}
+            if write.batch is not None:
+                headers["x-mosaica-batch-id"] = write.batch
+            resp = requests.request(
+                write.method,
+                f"{server.control_base}{write.path}",
+                headers=headers,
+                json=body,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            assert resp.status_code in write.expect, f"{write.method} {write.path}: {resp.text}"
+            if write.path.startswith("/control/flush"):
+                assert resp.json()["visible"], resp.text
+            if write.batch is not None:
+                self._receipt(name, body, resp.json())
+        if write.path.startswith("/control/layers"):
+            self._members.clear()
+
+    def _receipt(self, server: str, rows: list[dict], receipt: dict) -> None:
+        key = self.corpus.key_field
+        assert len(receipt["mosaica_ids"]) == len(rows), receipt
+        for row, raw in zip(rows, receipt["mosaica_ids"]):
+            raw, stable = int(raw), f"item {key}={row[key]}"
+            if stable in self.raw:
+                assert self.raw[stable] == raw, f"{stable} answered {raw} on the {server} server"
+                continue
+            self.stable[raw] = stable
+            self.raw[stable] = raw
+            self.placed[raw] = identity_mod.invert_item(self.bundle.identity_key, raw)
+
+    def name_artifacts(self) -> None:
         """Every artifact, by layer, level and key, from the bulk reads of the principal holding
         every term."""
+        self.stable = {raw: name for raw, name in self.stable.items() if name.startswith("item ")}
         server = self.server("saturated")
         token = self.token("saturated", self.corpus.everyone)
         for layer in server.meta(token)["layers"]:
@@ -214,6 +294,7 @@ class Side:
                     name = f"artifact {layer['name']}/{row['level']}/{row['key']}"
                     assert name not in self.stable.values(), f"two artifacts are named {name}"
                     self.stable[row["mosaica_id"]] = name
+        self.raw = {stable: raw for raw, stable in self.stable.items()}
 
     def members(self, tags: "Tags", layer: str, artifact: str) -> frozenset[str]:
         """The items of `artifact` the principal of `tags` may see, by stable key."""
@@ -244,6 +325,7 @@ class Side:
         items = identity_mod.numbers_of(
             self.bundle.unique_entities(self.corpus.key_field).values()
         )
+        items |= {number for _shard, _tenancy, number in self.placed.values()}
         artifacts = {
             identity_mod.invert_artifact(self.bundle.identity_key, raw)[1]
             for raw, name in self.stable.items()
@@ -654,12 +736,10 @@ def send_status(side, server, token, body, request):
     status = {k: v for k, v in server.status().items() if k not in STATUS_PROCESS}
     for segments in status["segments"]:
         del segments["count"]
-    flush = status["write_executor"]["flush"]
-    status["write_executor"] = {
-        "posture": status["write_executor"]["posture"],
-        "buffered_items": flush["buffered_items"],
-        "flushable_items": flush["flushable_items"],
-    }
+    for partition in status["partitions"]:
+        del partition["segments_version"]
+    status["write_executor"] = {"posture": status["write_executor"]["posture"]}
+    status["compaction"] = {k: status["compaction"][k] for k in COMPACTION_CORPUS}
     return side.rekey(status)
 
 
@@ -707,6 +787,8 @@ def differences(one, many, path: str = "$", out: list | None = None, limit: int 
 @dataclass
 class Comparison:
     corpus: str
+    #: `built`, `written` or `compacted` (module doc, the write script).
+    stage: str
     shards: dict[str, int]
     compared: int
     #: `(request, one-shard answer, many-shard answer)` for each request answered differently.
@@ -717,9 +799,13 @@ class Comparison:
     numbers: set[int]
     identity_key: identity_mod.IdentityKey
     report: Path
+    #: The (shard, tenancy, number) of each new item's identifier, by mode.
+    placed: dict[str, list[tuple[int, int, int]]]
 
 
-def compare(corpus: Corpus, sides: dict[str, Side], report: Path) -> Comparison:
+def compare(corpus: Corpus, sides: dict[str, Side], report: Path, stage: str) -> Comparison:
+    for side in sides.values():
+        side.scan, side.unknown = Scan(), set()
     named = {
         mode: {k for k in side.raw if k.startswith("artifact ")} for mode, side in sides.items()
     }
@@ -728,6 +814,8 @@ def compare(corpus: Corpus, sides: dict[str, Side], report: Path) -> Comparison:
         f"{sorted(named['one'] ^ named['many'])}"
     )
     battery = corpus.battery(sides["one"])
+    if stage != "built":
+        battery += written_reads(corpus, sides["one"])
     battery += [
         Request("GET /control/status", corpus.everyone, server=name) for name in corpus.servers
     ]
@@ -747,6 +835,7 @@ def compare(corpus: Corpus, sides: dict[str, Side], report: Path) -> Comparison:
                 out.write(f"-- {mode}\n{text[:REPORTED_BYTES]}{cut}\n")
     return Comparison(
         corpus=corpus.name,
+        stage=stage,
         shards={mode: len(side.bundle.shards) for mode, side in sides.items()},
         compared=len(battery),
         differing=differing,
@@ -755,6 +844,7 @@ def compare(corpus: Corpus, sides: dict[str, Side], report: Path) -> Comparison:
         numbers=sides["many"].numbers(),
         identity_key=sides["many"].bundle.identity_key,
         report=report,
+        placed={mode: sorted(side.placed.values()) for mode, side in sides.items()},
     )
 
 
@@ -1155,6 +1245,178 @@ def labels_battery(side: Side) -> list[Request]:
     return out
 
 
+# ---- the write script --------------------------------------------------------------------------
+
+#: The layer the write script registers and publishes into.
+WRITTEN = "written"
+#: How many new items the script ingests.
+N_WRITTEN = 6
+
+
+def write_script(
+    key: str,
+    view: str,
+    new_rows: list[dict],
+    edit_row: dict,
+    deleted: int,
+    suppressed: int,
+    members: list[int],
+) -> list[Write]:
+    """The script over a corpus whose items are named by `key` (module doc): `new_rows`, then
+    `edit_row`, then the deletion and suppression of the items holding `deleted` and `suppressed`,
+    then [`WRITTEN`] with one artifact of the built items holding `members` and one of the first
+    three new items and the first of `members`."""
+    new = [row[key] for row in new_rows]
+    declaration = {
+        "name": WRITTEN,
+        "title": WRITTEN,
+        "views": [view],
+        "membership": "enumerated",
+        "value_set": "closed",
+        "visibility": None,
+        "artifact_visibility": {"field": None, "default": "inherited"},
+        "require_member_visibility": {"count": 1},
+        "hierarchy": {"kind": "flat", "prune_children": False},
+        "content": {"computed": [], "supplied": []},
+        "depends_on": [],
+        "levels": [],
+    }
+    artifacts = [
+        {"key": "w-built", "members": {key: [str(v) for v in members]}},
+        {"key": "w-new", "members": {key: [str(v) for v in new[:3] + members[:1]]}},
+    ]
+    return [
+        Write("POST", "/control/ingest?strict=true", new_rows, batch="two-modes-new"),
+        Write("POST", "/control/ingest?strict=true", [edit_row], batch="two-modes-edit"),
+        Write(
+            "POST",
+            "/control/changes?strict=true",
+            [
+                {"op": "delete", "match": {"mosaica_id": f"@item {key}={deleted}"}},
+                {"op": "suppress", "match": {"mosaica_id": f"@item {key}={suppressed}"}},
+            ],
+        ),
+        Write("PUT", "/control/layers", declaration, expect=(201,)),
+        Write(
+            "PUT",
+            f"/control/layers/{WRITTEN}/artifacts?strict=true",
+            {"artifacts": artifacts},
+            expect=(201,),
+        ),
+        Write("POST", "/control/flush?wait=visible", expect=(202,)),
+    ]
+
+
+def script_items(corpus: Corpus) -> list[str]:
+    """The stable key of every item the script names."""
+    key = corpus.key_field
+    named = []
+    for write in corpus.writes:
+        if write.batch is not None:
+            named += [f"item {key}={row[key]}" for row in write.body]
+        elif write.path.startswith("/control/changes"):
+            named += [change["match"]["mosaica_id"][1:] for change in write.body]
+    return named
+
+
+def written_reads(corpus: Corpus, side: Side) -> list[Request]:
+    """Each principal's cards of every item the script names, and its reads of [`WRITTEN`]."""
+    values = [name.split("=", 1)[1] for name in script_items(corpus)]
+    filters = {corpus.key_field: {"in": [int(v) for v in values]}}
+    out = []
+    for principal in corpus.principals:
+        out += [
+            Request("POST /v1/items/{id}", principal, {"id": f"@{name}"})
+            for name in script_items(corpus)
+        ]
+        out += layer_reads(side, principal, corpus.view, [WRITTEN], set(), filters)
+    return out
+
+
+def catalogue_writes() -> list[Write]:
+    fx_keys = cat.ingest_fx_keys(N_WRITTEN + 1)
+    high_tail = cat.BLOCKS["high_tail"]
+    new_rows = [
+        {
+            "serial": 2_000_000 + i,
+            "fx_key": fx_keys[i],
+            "x": 1000.5 + 9000.0 * i,
+            "y": 50000.25 - 7000.0 * i,
+            "access": [high_tail.descriptor] if i % 2 else [],
+            "department": "alpha" if i % 2 else "beta",
+            "archive": "red",
+            "title": f"written {i}",
+            "submitter": "hub-written",
+            "shelf": "north",
+            "abstract": "a harbour written at a running service",
+            "note": f"written-note-{i}",
+            "pages": 10 + i,
+        }
+        for i in range(N_WRITTEN)
+    ]
+    base = cat.PLANTED_ID_BASE
+    edit_row = {
+        "serial": base + cat.BLOCKS["cross_lo"].start + 5,
+        "x": 33333.5,
+        "y": 22222.25,
+        "fx_key": fx_keys[N_WRITTEN],
+    }
+    return write_script(
+        "serial",
+        cat.VIEW_ID,
+        new_rows,
+        edit_row,
+        deleted=base + cat.BLOCKS["filler_head"].start + 7,
+        suppressed=base + high_tail.start + 3,
+        members=[base + b.start + 1 for b in cat.BLOCKS.values()],
+    )
+
+
+def shapes_writes() -> list[Write]:
+    new_rows = [
+        {
+            JOIN_FIELD: N_POINTS + 1000 + i,
+            "x": 2000.5 + 9000.0 * i,
+            "y": 60000.25 - 9000.0 * i,
+            "access": ["1" if i % 2 else "2"],
+            "fx_key": 9000 + i,
+        }
+        for i in range(N_WRITTEN)
+    ]
+    edit_row = {JOIN_FIELD: 5, "x": 10000.5, "y": 10000.25, "fx_key": 77_777}
+    return write_script(
+        JOIN_FIELD,
+        SHAPE_VIEW,
+        new_rows,
+        edit_row,
+        deleted=211,
+        suppressed=N_POINTS - 3,
+        members=[0, 422, N_POINTS - 10],
+    )
+
+
+def labels_writes() -> list[Write]:
+    new_rows = [
+        {
+            JOIN_FIELD: 1000 + i,
+            "x": 3000.5 + 9000.0 * i,
+            "y": 50000.25 - 8000.0 * i,
+            "access": ["3"] if i % 2 else ["1"],
+        }
+        for i in range(N_WRITTEN)
+    ]
+    edit_row = {JOIN_FIELD: 10, "x": 40000.5, "y": 30000.25, "access": ["2"]}
+    return write_script(
+        JOIN_FIELD,
+        lfx.VIEW_ID,
+        new_rows,
+        edit_row,
+        deleted=120,
+        suppressed=lfx.N_ITEMS - 1,
+        members=[0, 55, 150],
+    )
+
+
 CORPORA = [
     Corpus(
         name="catalogue",
@@ -1165,6 +1427,8 @@ CORPORA = [
         everyone="everyone",
         servers={"saturated": {}, "live": {"theta_target_marks": 16}},
         battery=catalogue_battery,
+        writes=catalogue_writes(),
+        opens=False,
     ),
     Corpus(
         name="shapes",
@@ -1175,6 +1439,8 @@ CORPORA = [
         everyone="1 and 2",
         servers={"saturated": {}},
         battery=shapes_battery,
+        writes=shapes_writes(),
+        opens=True,
     ),
     Corpus(
         name="labels",
@@ -1185,33 +1451,71 @@ CORPORA = [
         everyone=", ".join(lfx.PRINCIPALS[4]),
         servers={"saturated": {}},
         battery=labels_battery,
+        writes=labels_writes(),
+        opens=True,
     ),
 ]
 
 
+STAGES = ("built", "written", "compacted")
+
+
 @pytest.fixture(scope="module", params=CORPORA, ids=[c.name for c in CORPORA])
-def comparison(request, tmp_path_factory) -> Comparison:
-    """Both modes of one corpus, built, served and sent the battery; the servers are stopped
-    before the tests read the result."""
+def comparisons(request, tmp_path_factory) -> dict[str, Comparison]:
+    """Both modes of one corpus, built, served and sent the battery as built, after the write
+    script, and after a compaction and a restart; the servers are stopped before the tests read
+    the results."""
     corpus: Corpus = request.param
     sides: dict[str, Side] = {}
+    reports = tmp_path_factory.mktemp("two-modes-reports")
+    out: dict[str, Comparison] = {}
     try:
         for mode, many in MODES:
             work = tmp_path_factory.mktemp(f"two-modes-{corpus.name}-{mode}")
             with shards_mode(many):
                 root = corpus.build(work)
             sides[mode] = Side(root, corpus, work)
-        report = tmp_path_factory.mktemp("two-modes-reports") / f"{corpus.name}.txt"
-        result = compare(corpus, sides, report)
+        out["built"] = compare(corpus, sides, reports / f"{corpus.name}-built.txt", "built")
+        for side in sides.values():
+            for write in corpus.writes:
+                side.write(write)
+            side.name_artifacts()
+        out["written"] = compare(corpus, sides, reports / f"{corpus.name}-written.txt", "written")
+        for side in sides.values():
+            for name in side.servers:
+                side.server(name).compact()
+            side.restart()
+        out["compacted"] = compare(
+            corpus, sides, reports / f"{corpus.name}-compacted.txt", "compacted"
+        )
     finally:
         for side in sides.values():
             side.stop()
-    return result
+    return out
+
+
+@pytest.fixture(params=STAGES)
+def comparison(comparisons: dict[str, Comparison], request) -> Comparison:
+    if request.param not in comparisons:
+        pytest.fail(f"the {request.param} comparison was not reached")
+    return comparisons[request.param]
 
 
 def test_the_many_shard_build_spans_several_shards(comparison: Comparison):
     assert comparison.shards["one"] == 1
     assert comparison.shards["many"] >= 2, comparison.shards
+
+
+def test_the_write_script_opens_a_shard_in_the_many_mode(comparisons: dict[str, Comparison]):
+    """The script's new items go into the one shard's high water, and over several shards into
+    the last built shard, or into the next where the build filled the last."""
+    written = comparisons["written"]
+    corpus = next(c for c in CORPORA if c.name == written.corpus)
+    one, many = written.placed["one"], written.placed["many"]
+    assert len(one) == len(many) == N_WRITTEN, written.placed
+    assert {(shard, tenancy) for shard, tenancy, _ in one} == {(0, 0)}, one
+    last = written.shards["many"] - 1
+    assert {(shard, tenancy) for shard, tenancy, _ in many} == {(last + corpus.opens, 0)}, many
 
 
 def test_every_answer_is_the_one_shard_answer(comparison: Comparison):

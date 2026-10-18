@@ -245,10 +245,10 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
     );
 }
 
-/// **A batch past the shard's size is `409`** and takes no id; `/control/status` reports the size
-/// `PUT /control/shards` declared.
+/// **A batch past the shard's size goes in**: the open shard takes it to the size and the rest open
+/// the next shard; `/control/status` reports the size `PUT /control/shards` declared.
 #[tokio::test]
-async fn a_batch_past_the_shard_size_is_refused_and_writes_nothing() {
+async fn a_batch_past_the_shard_size_goes_in() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let high_water = control_status(&server).await["entity_id_high_water"]
@@ -268,18 +268,49 @@ async fn a_batch_past_the_shard_size_is_refused_and_writes_nothing() {
         Some(high_water + 1)
     );
 
-    let two = build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0"), (N_ITEMS + 2, 2.0, 2.0, "0")]);
-    let (status, refusal) = post_body(&server, "past-the-size", two).await;
+    // The fixture's points sit on whole coordinates, so this box holds only these rows.
+    let two = build_ingest_batch(&[
+        (N_ITEMS + 1, 20.4, 20.4, "0"),
+        (N_ITEMS + 2, 20.6, 20.6, "0"),
+    ]);
+    let (status, answer) = post_body(&server, "past-the-size", two).await;
     assert_eq!(
-        (status, refusal["error"].as_str()),
-        (409, Some("conflict")),
-        "{refusal}"
+        (status, answer["created"].as_u64()),
+        (200, Some(2)),
+        "{answer}"
     );
     assert_eq!(
         control_status(&server).await["entity_id_high_water"].as_u64(),
-        Some(high_water),
-        "the refused batch took no id"
+        Some(high_water + 2)
     );
+    let answered = ingested_ids(&answer);
+    let shards: std::collections::BTreeSet<u32> = answered
+        .iter()
+        .map(|&id| {
+            let (high, _) = test_key()
+                .invert(mosaica_types::MosaicaId::new(id))
+                .expect("a receipt names an item");
+            high.shard.raw()
+        })
+        .collect();
+    assert_eq!(shards, [0, 1].into(), "one item in each shard");
+
+    drain(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [20.3, 20.3, 20.7, 20.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: std::collections::BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, answered.into_iter().collect());
 }
 
 /// A row carrying the `id` of an item the build stored edits that item, as one ingested at the
@@ -1772,6 +1803,11 @@ async fn control_flush_is_accepted_and_deferred() {
 async fn control_compact_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
+    assert_eq!(
+        control_status(&server).await["compaction"]["shard"],
+        serde_json::Value::Null,
+        "no compaction has run"
+    );
 
     let response = server
         .client
@@ -1823,6 +1859,13 @@ async fn control_compact_is_accepted_and_deferred() {
     assert!(
         compaction["last_rss_bytes"].is_u64() && compaction["passes"].is_array(),
         "the memory gauges are present before the first fold: {compaction}"
+    );
+
+    flush_and_fold(&server, None).await;
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["compaction"]["shard"], 0,
+        "the one shard compacted: {status}"
     );
 }
 
@@ -3579,6 +3622,7 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/compaction/passes/*/ms", "integer"),
     ("/compaction/passes/*/pass", "string"),
     ("/compaction/passes/*/rss_bytes", "integer"),
+    ("/compaction/shard", "integer|null"),
     ("/compute", "object"),
     ("/compute/admission", "integer"),
     ("/compute/in_flight", "integer"),

@@ -35,8 +35,6 @@ from .battery import (
 )
 from .canonical import Json, Streamed
 
-pytestmark = pytest.mark.writes_nothing
-
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
 K = 64
 ZOOMS = (0, 3)

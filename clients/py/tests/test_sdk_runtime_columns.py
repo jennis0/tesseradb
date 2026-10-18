@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import small, viewport
+from mosaica._database import open as reopen
 from mosaica._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -363,30 +364,34 @@ def test_a_size_declared_after_the_first_commit_is_sent_where_the_server_reports
         plan = db.check()
         assert plan.ok, plan
         assert plan.plan[0] == "declare shard size 3"
-        report = db.commit()
-        # The two rows would take the high water from 2 to 4, past the size 3 sent before them.
-        assert not report.ok
-        assert [one["status"] for one in report.refusals] == [409]
-        assert db.status()["shards"] == {"size": 3}
-        assert [line for line in db.check().plan if line.startswith("declare")] == []
-
-        db.declare_shards(4)
-        db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
+        # The two rows take the high water from 2 to the size 3 sent before them, and a second
+        # shard holds the one past it.
         assert db.commit().ok
-        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 4}, 4)
+        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 3}, 4)
+        assert [line for line in db.check().plan if line.startswith("declare")] == []
     finally:
         db.close()
 
 
-def test_a_size_below_the_high_water_is_refused_at_the_commit(tmp_path):
-    db, _ = small(tmp_path / "db")
+def test_a_size_below_the_high_water_seals_the_shard_at_the_commit_and_after_a_reopen(tmp_path):
+    db, rows = small(tmp_path / "db")
     try:
         assert db.commit().ok
-        held = db.status()["shards"]["size"]
         db.declare_shards(1)
-        with pytest.raises(Refusal) as raised:
-            db.commit()
-        assert [one["status"] for one in raised.value.report.refusals] == [409]
-        assert db.status()["shards"]["size"] == held
+        assert db.commit().ok
+        assert db.status()["shards"] == {"size": 1}
+        db.insert("map", rows.head(1).assign(id=[3]), x="x", y="y", access="access")
+        assert db.commit().ok
+        assert db.status()["entity_id_high_water"] == 3
     finally:
         db.close()
+
+    again = reopen(tmp_path / "db")
+    try:
+        assert again.status()["shards"] == {"size": 1}
+        again.insert("map", rows.head(1).assign(id=[4]), x="x", y="y", access="access")
+        assert again.commit().ok
+        assert again.status()["entity_id_high_water"] == 4
+        assert [line for line in again.check().plan if line.startswith("declare")] == []
+    finally:
+        again.close()

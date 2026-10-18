@@ -1,13 +1,11 @@
 //! A bundle a build wrote past its `[shards] size`, opened by a running service: it answers every
 //! read as the same items built as one shard answer it, names each item in its own shard, and
-//! refuses every write unless the engine is opened to write several shards.
+//! answers every write as a bundle of one shard does.
 
 mod common;
 
 use common::*;
-use mosaica_engine::{
-    AcceptError, Engine, EngineError, ExecutorPosture, RecordsOrder, ViewportRequest,
-};
+use mosaica_engine::{AcceptError, Engine, ExecutorPosture, RecordsOrder, ViewportRequest};
 use mosaica_lifecycle::resolve::Refusal;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
@@ -139,9 +137,10 @@ fn status_sums_the_shards() {
     );
 }
 
-/// Every write kind, through the engine.
+/// Every write kind, through the engine, naming items of shard 0, which holds the same items
+/// whether the fixture is built as one shard or two.
 fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
-    let item = item_in(1, 0);
+    let item = item_in(0, 1);
     let frame = mosaica_engine::DeclaredFrame {
         x_min: 0.0,
         x_max: 1000.0,
@@ -154,10 +153,6 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
             engine
                 .ingest_rows(vec![keyed_row("new")], "b".into(), [1; 32])
                 .map(drop),
-        ),
-        (
-            "change",
-            engine.accept_change(EntityId::new(0), ChangeOp::Suppress),
         ),
         (
             "changes",
@@ -173,7 +168,6 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
             "layer",
             engine.register_layer(flat_declaration("l")).map(drop),
         ),
-        ("layer drop", engine.drop_layer("l".into())),
         (
             "attribute",
             engine
@@ -190,10 +184,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                 })
                 .map(drop),
         ),
-        (
-            "shards",
-            engine.declare_shards(TWO_SHARD_SIZE + 1).map(drop),
-        ),
+        ("shards", engine.declare_shards(TWO_SHARD_N + 1).map(drop)),
         (
             "vocabulary",
             engine
@@ -280,7 +271,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                         view: None,
                         joining: mosaica_lifecycle::ShardSets::in_shard(
                             ShardId::ZERO,
-                            croaring::Bitmap::of(&[0]),
+                            croaring::Bitmap::of(&[2]),
                         ),
                         leaving: Default::default(),
                         rank: None,
@@ -289,70 +280,62 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                 )
                 .map(drop),
         ),
+        ("layer drop", engine.drop_layer("l".into())),
     ]
 }
 
-#[test]
-fn every_write_is_refused_and_a_restart_reopens_the_bundle() {
-    let built = two_shards();
-    let engine = built.open();
-    let before = served_to(&engine, &full_coverage_credential());
-
-    assert!(matches!(
-        engine.writable(),
-        Err(AcceptError::SeveralShards { shards: 2 })
-    ));
-    for (kind, answered) in writes(&engine) {
-        assert!(
-            matches!(answered, Err(AcceptError::SeveralShards { shards: 2 })),
-            "{kind}: {answered:?}"
-        );
-    }
-    assert_eq!(
-        engine.allocator_high_water(),
-        TWO_SHARD_N,
-        "nothing was allocated"
-    );
-    assert_eq!(
-        served_to(&engine, &full_coverage_credential()),
-        before,
-        "nothing changed"
-    );
-
-    drop(engine);
-    let engine = built.open();
-    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
+/// What an answer was: `ok`, or the names of the error's variants, outermost first.
+fn kind(answered: &Result<(), AcceptError>) -> String {
+    let Err(e) = answered else {
+        return "ok".into();
+    };
+    let debug = format!("{e:?}");
+    let named = debug.split('"').next().unwrap_or_default();
+    named
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| word.starts_with(|c: char| c.is_ascii_uppercase()))
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
+/// Every write kind answers over a bundle of two shards as over the same items built as one, the
+/// executor runs over both, and a restart replays the log the writes left to the same answers.
 #[test]
-fn a_bundle_of_one_shard_takes_every_write() {
-    let built = fixture_sized(TWO_SHARD_N, None);
-    let engine = built.open();
-    assert!(engine.writable().is_ok());
-    let refused: Vec<&str> = writes(&engine)
-        .into_iter()
-        .filter(|(_, answered)| matches!(answered, Err(AcceptError::SeveralShards { .. })))
-        .map(|(kind, _)| kind)
-        .collect();
-    assert!(refused.is_empty(), "{refused:?}");
-}
-
-/// No write to a bundle of several shards can be in a log, so a log beside one that holds a
-/// record is another bundle's, and the open refuses it.
-#[test]
-fn a_log_holding_records_is_refused_beside_several_shards() {
+fn every_write_answers_over_two_shards_as_over_one_and_a_restart_replays_it() {
     let one = fixture_sized(TWO_SHARD_N, None);
-    let engine = one.open();
-    ingest(&engine, "a");
-    drop(engine);
-
     let several = two_shards();
-    let opened = Engine::open(&several.root, &several.cache, &one.wal, config());
+    let mut answered = Vec::new();
+    for built in [&one, &several] {
+        let engine = built.open();
+        assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
+        let kinds: Vec<(&str, String)> = writes(&engine)
+            .iter()
+            .map(|(route, answer)| (*route, kind(answer)))
+            .collect();
+        let served = served_to(&engine, &full_coverage_credential());
+        drop(engine);
+        let logged = mosaica_lifecycle::wal::Wal::open(&built.wal)
+            .unwrap()
+            .records()
+            .count();
+        assert!(logged > 0, "the writes are in the log");
+        let engine = built.open();
+        assert_eq!(
+            served_to(&engine, &full_coverage_credential()),
+            served,
+            "the restart serves what the writes left"
+        );
+        answered.push((kinds, served));
+    }
+    let [(one_kinds, one_served), (several_kinds, several_served)] = &answered[..] else {
+        unreachable!()
+    };
+    assert_eq!(several_kinds, one_kinds);
     assert!(
-        matches!(opened, Err(EngineError::SeveralShardsLogged { shards: 2 })),
-        "{:?}",
-        opened.err()
+        one_kinds.iter().any(|(_, kind)| kind == "ok"),
+        "{one_kinds:?}"
     );
+    assert_eq!(several_served, one_served);
 }
 
 /// A table naming each of `read`'s items by its `mosaica_id` and by its unique `id`.
@@ -437,37 +420,6 @@ fn each_item_is_named_in_its_own_shard() {
     );
 }
 
-/// An engine opened to write several shards admits writes and starts its executor, and opens a
-/// log holding a record beside the shards, which [`Engine::open`] refuses.
-#[test]
-fn an_engine_writing_several_shards_admits_writes_and_a_log() {
-    let several = two_shards();
-    let engine = several.open_writing();
-    assert!(engine.writable().is_ok());
-    assert_eq!(engine.write_executor_posture(), ExecutorPosture::Running);
-    let before = served_to(&engine, &full_coverage_credential());
-    drop(engine);
-
-    // A log naming no shard: a layer's registration.
-    let one = fixture_sized(TWO_SHARD_N, None);
-    let engine = one.open();
-    engine.register_layer(flat_declaration("l")).unwrap();
-    drop(engine);
-
-    let refused = Engine::open(&several.root, &several.cache, &one.wal, config());
-    assert!(
-        matches!(refused, Err(EngineError::SeveralShardsLogged { shards: 2 })),
-        "{:?}",
-        refused.err()
-    );
-    let engine = open_writing(&several.root, &several.cache, &one.wal, config());
-    assert!(
-        engine.registered_layer("l").is_some(),
-        "the log is replayed"
-    );
-    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
-}
-
 /// An insert into a bundle built as two shards lands in the open one, shard 1, at its high
 /// water: its `mosaica_id` and its unique value name it there, and a restart replays it there.
 #[test]
@@ -503,6 +455,21 @@ fn an_insert_lands_in_the_open_shard_and_replays_there() {
         vec![Some(item_in(1, TWO_SHARD_N - TWO_SHARD_SIZE + 1))],
         "shard 1's high water came back from its own rows"
     );
+}
+
+/// A change naming an entity and no shard is refused over two shards, where the entity is an
+/// item in each, and changes nothing.
+#[test]
+fn a_change_naming_an_entity_alone_is_refused_over_two_shards() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    let before = served_to(&engine, &full_coverage_credential());
+    let answered = engine.accept_change(EntityId::new(1), ChangeOp::Delete);
+    assert!(
+        matches!(answered, Err(AcceptError::Contract(_))),
+        "{answered:?}"
+    );
+    assert_eq!(served_to(&engine, &full_coverage_credential()), before);
 }
 
 /// A bundle of two shards whose log holds deletions and suppressions in both reopens with each
@@ -1003,14 +970,140 @@ fn a_view_drop_deletes_the_items_it_leaves_in_no_view_in_every_shard() {
     assert_eq!(served_to(&engine, &full_coverage_credential()), expected);
 }
 
+/// A scoped artifact with members in both shards, in a view dropped and created again, is a held
+/// deletion: its key publishes a new artifact in the recreated view, the only one served and the
+/// only one each shard's form of the view holds, and the old record is held until the compaction
+/// of the second shard listing it. A restart before any compaction and one after each agree.
+#[test]
+fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
+    use mosaica_lifecycle::ShardSets;
+    let several = grouped_fixture(Some(TWO_SHARD_SIZE));
+    let engine = several.open_writing();
+    let mut layer = flat_declaration("t");
+    layer.scope = mosaica_types::layer::LayerScope::Group("g".into());
+    layer.views = vec!["g:k".into()];
+    engine.register_layer(layer).unwrap();
+    let in_view = |members: Vec<Option<ItemAt>>| IncomingArtifact {
+        view: Some("k".into()),
+        members: ShardSets::of_items(members.into_iter().map(|item| item.expect("an item"))),
+        ..IncomingArtifact::from_entities(Some("c".into()), Vec::<EntityId>::new())
+    };
+    let members = items_by_id(&engine, GROUPED_FROM..GROUPED);
+    let shards: std::collections::BTreeSet<ShardId> =
+        members.iter().flatten().map(|item| item.shard).collect();
+    assert_eq!(
+        shards.len(),
+        2,
+        "the old artifact has members in both shards"
+    );
+    let old = engine
+        .publish_artifacts("t".into(), 0, vec![in_view(members)])
+        .unwrap()[0];
+    let old = artifact_target(&engine, old);
+    tick(&engine);
+
+    engine.drop_view("g".into(), "k".into()).unwrap();
+    engine
+        .create_view("g".into(), "k".into(), None, Default::default())
+        .unwrap();
+    let keys = ["new-0", "new-1"];
+    engine
+        .ingest(mosaica_engine::IngestRequest {
+            batch_id: "recreated".to_string(),
+            body_hash: [7; 32],
+            view: Some("g:k".to_string()),
+            rows: keys
+                .iter()
+                .map(|key| mosaica_lifecycle::IngestRow {
+                    mosaica_id: None,
+                    labels: Some(vec![b"0".to_vec()]),
+                    position: Some((5.0, 5.0)),
+                    scalars: keyed(key),
+                    scoped: Vec::new(),
+                    omitted: Vec::new(),
+                })
+                .collect(),
+            artifacts: Default::default(),
+            strict: true,
+            mosaica_id_column: false,
+        })
+        .expect("the insert is accepted");
+    publish_buffered(&engine);
+    let members = items_by_id(&engine, keys.iter().map(|key| key_id(key)));
+    let new = engine
+        .publish_artifacts("t".into(), 0, vec![in_view(members)])
+        .unwrap()[0];
+    tick(&engine);
+
+    let check = |engine: &Engine, held: bool, when: &str| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let request =
+            mosaica_engine::ViewportArtifactsRequest::new("g:k", 0, WHOLE_MAP, usize::MAX);
+        let served: Vec<MosaicaId> = engine
+            .viewport_artifacts(&session, request)
+            .unwrap()
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.mosaica_id)
+            .collect();
+        assert_eq!(served, vec![new], "{when}: only the new artifact is served");
+        for held_in in [ShardId::ZERO, shard(1)] {
+            let form = engine
+                .held_artifact_form_for_test(held_in, "g:k", "t", 0)
+                .expect("the viewport built the form");
+            assert_eq!(
+                (form.holds(0), form.holds(1)),
+                (false, true),
+                "{when}: shard {held_in}'s form holds the new artifact alone"
+            );
+        }
+        assert_eq!(
+            engine.locate_artifact(old).and_then(|at| at.key).is_some(),
+            held,
+            "{when}: whether the old record is held"
+        );
+        assert_eq!(
+            engine.generation_status().layer_spaces.retirable,
+            u64::from(held),
+            "{when}"
+        );
+    };
+    check(&engine, true, "before any compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, true, "across a restart before any compaction");
+    compact(&engine, Some(shard(1)));
+    check(&engine, true, "after shard 1's compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, true, "across a restart after shard 1's compaction");
+    compact(&engine, Some(ShardId::ZERO));
+    check(&engine, false, "after shard 0's compaction");
+    drop(engine);
+    let engine = several.open_writing();
+    check(&engine, false, "across a restart after both compactions");
+}
+
 /// A group-scoped column of a view created at a running service has a base only in the shard a
 /// flush wrote one in: the other shard holds the column empty, so a filter on it is admitted and
 /// answered in both shards. Each shard's compaction gives it a base, and the family leaves for
 /// `MANIFEST.json` at the second; the view serves the same at every step and after each restart.
 #[test]
 fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
-    let several = two_shards();
-    let engine = several.open_writing();
+    scoped_column_through_each_compaction(true);
+}
+
+/// As above with no restart between the compactions: the second shard's compaction reads the
+/// family's views from the generation the first one published, and a restart after both serves
+/// the same.
+#[test]
+fn a_scoped_column_serves_through_each_shards_compaction_without_a_restart() {
+    scoped_column_through_each_compaction(false);
+}
+
+/// A group `g`, a group-scoped column `heat` of it and a view `g:k` under it, declared at the
+/// running `engine`, with one item of `g:k` holding the value 7 flushed into shard 1.
+fn scoped_value_in_shard_one(engine: &Engine) {
     engine
         .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
             name: "g".into(),
@@ -1062,7 +1155,16 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
             mosaica_id_column: false,
         })
         .expect("the insert is accepted");
-    publish_buffered(&engine);
+    publish_buffered(engine);
+}
+
+/// A group, a group-scoped column of it and a view under it, all declared at a running service,
+/// with one value flushed into shard 1, through the compaction of shard 0 and then shard 1,
+/// restarting after each where `restart`, and after both.
+fn scoped_column_through_each_compaction(restart: bool) {
+    let several = two_shards();
+    let engine = several.open_writing();
+    scoped_value_in_shard_one(&engine);
     let named: Vec<Vec<String>> = side_manifest(&several.root)
         .shards
         .records
@@ -1109,10 +1211,17 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
             .collect()
     };
     let k = || vec!["g:k".to_string()];
+    let reopened = |engine: Engine| match restart {
+        true => {
+            drop(engine);
+            let engine = several.open_writing();
+            assert_eq!(in_view(&engine), (1, 1));
+            engine
+        }
+        false => engine,
+    };
     assert_eq!(in_view(&engine), (1, 1));
-    drop(engine);
-    let engine = several.open_writing();
-    assert_eq!(in_view(&engine), (1, 1));
+    let engine = reopened(engine);
 
     compact(&engine, Some(ShardId::ZERO));
     assert_eq!(
@@ -1121,9 +1230,7 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
         "shard 0 holds the column's base now, and shard 1 not the family's"
     );
     assert_eq!(in_view(&engine), (1, 1));
-    drop(engine);
-    let engine = several.open_writing();
-    assert_eq!(in_view(&engine), (1, 1));
+    let engine = reopened(engine);
 
     compact(&engine, Some(shard(1)));
     assert_eq!(
@@ -1135,6 +1242,30 @@ fn a_scoped_column_flushed_in_one_shard_reopens_in_every_shard() {
     drop(engine);
     let engine = several.open_writing();
     assert_eq!(in_view(&engine), (1, 1));
+}
+
+/// A dropped view's group-scoped column, listed by both shards, leaves both shards' records at
+/// their compactions.
+#[test]
+fn a_dropped_views_scoped_column_leaves_every_shards_record() {
+    let several = two_shards();
+    let engine = several.open_writing();
+    scoped_value_in_shard_one(&engine);
+    compact(&engine, Some(ShardId::ZERO));
+    let listed = |root: &std::path::Path| -> Vec<usize> {
+        side_manifest(root)
+            .shards
+            .records
+            .iter()
+            .map(|record| record.scoped_columns.len())
+            .collect()
+    };
+    assert_eq!(listed(&several.root), [1, 1], "both shards list the pair");
+
+    engine.drop_view("g".into(), "k".into()).unwrap();
+    compact(&engine, Some(shard(1)));
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(listed(&several.root), [0, 0]);
 }
 
 /// A label layer whose content is served only to a viewer seeing every item it was generated from.
@@ -1157,7 +1288,7 @@ fn label_layer(name: &str) -> mosaica_types::layer::LayerDeclaration {
 /// items its `member_of` leaf matches.
 type ServedArtifact = (Option<String>, u64, Vec<String>, u64);
 
-/// What each credential is served of the layer `t`.
+/// What each credential is served of every layer.
 fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
     use mosaica_engine::filter::{FilterExpr, MemberOfLeaf};
     [full_coverage_credential(), subset_credential()]
@@ -1169,10 +1300,9 @@ fn served_layer(engine: &Engine) -> Vec<Vec<ServedArtifact>> {
                 .map(|artifact| {
                     let request = ViewportRequest::new("s0", 0, WHOLE_MAP, TWO_SHARD_N as usize)
                         .filter(FilterExpr::MemberOf(MemberOfLeaf {
-                            layer: "t".to_string(),
+                            layer: artifact.layer.clone(),
                             artifact: artifact.mosaica_id,
-                        }),
-                    );
+                        }));
                     let out = engine.viewport(&session, request).unwrap();
                     let matched = out.tiles.iter().map(|tile| tile.matched).sum();
                     (
@@ -1394,6 +1524,127 @@ fn a_compaction_of_shard_one_retires_its_members_from_its_slice_alone() {
         expected,
         "after shard 0's compaction"
     );
+    drop(engine);
+    let engine = several.open_writing();
+    assert_eq!(served_layer(&engine), expected, "across a restart");
+}
+
+/// A content's rank is its position at two shards as at one. On a layer whose content requires
+/// every member visible, a page withdraws `near` and the deletion of a shard-1 item withdraws
+/// `wide`, which it generated; on a layer whose content serves on the artifact's own gate the
+/// deletion takes a member and withdraws nothing. Shard 0's compaction reports nothing, shard 1's
+/// reports `wide` at its position, 1, and the member each artifact lost, as one shard's
+/// compaction does, and a page of `far` at rank 2 then serves what one shard serves, before and
+/// after a restart.
+#[test]
+fn a_withdrawn_rank_keeps_its_position_at_the_compaction_of_the_shard_holding_its_set() {
+    use mosaica_lifecycle::membership::IncomingContent;
+    use mosaica_lifecycle::ShardSets;
+    use mosaica_types::layer::SuppliedRequirement;
+    let one = fixture_sized(TWO_SHARD_N, None);
+    let several = two_shards();
+    let (one_engine, engine) = (one.open(), several.open_writing());
+    let (zero, first) = (
+        ids_in_shard(&engine, TWO_SHARD_N, 0),
+        ids_in_shard(&engine, TWO_SHARD_N, 1),
+    );
+    let gone = first[1];
+    let members = [zero[0], zero[1], zero[2], first[0], gone];
+    let sets_in = |engine: &Engine, ids: &[u64]| {
+        let items = items_by_id(engine, 0..TWO_SHARD_N);
+        ShardSets::of_items(ids.iter().map(|id| items[*id as usize].unwrap()))
+    };
+    let write = |engine: &Engine| {
+        let sets = |ids: &[u64]| sets_in(engine, ids);
+        engine.register_layer(label_layer("t")).unwrap();
+        let mut permissive = label_layer("p");
+        permissive.content.supplied[0].require_member_visibility = SuppliedRequirement::Inherited;
+        engine.register_layer(permissive).unwrap();
+        let contents = ["near", "wide", "far"]
+            .map(|value| IncomingContent::new(vec![value.to_string()], Vec::new()))
+            .into();
+        let mut strict = IncomingArtifact::with_content(Some("a".into()), Vec::new(), contents);
+        strict.members = sets(&members);
+        strict.contents[0].generated_from = sets(&[zero[2]]);
+        strict.contents[1].generated_from = sets(&[zero[0], gone]);
+        strict.contents[2].generated_from = sets(&[zero[1], first[0]]);
+        let mut held = IncomingArtifact::with_content(
+            Some("b".into()),
+            Vec::new(),
+            vec![IncomingContent::new(vec!["note".to_string()], Vec::new())],
+        );
+        held.members = sets(&members);
+        engine
+            .publish_artifacts("t".into(), 0, vec![strict])
+            .unwrap();
+        engine.publish_artifacts("p".into(), 0, vec![held]).unwrap();
+        let mut page = IncomingGrowth::from_entities("a".into(), Vec::new());
+        page.rank = Some(0);
+        page.leaving = sets(&[zero[2]]);
+        let grown = engine.grow_memberships("t".into(), 0, vec![page]).unwrap();
+        assert_eq!(grown[0].withdrawn, Some(0));
+        let target = item_by_id(engine, gone).target();
+        engine
+            .accept_changes(vec![(target, ChangeOp::Delete)])
+            .unwrap();
+        tick(engine);
+    };
+    write(&one_engine);
+    write(&engine);
+    let reported = |engine: &Engine| {
+        let mut lost: Vec<_> = engine
+            .last_fold_report()
+            .into_iter()
+            .map(|lost| (lost.key, lost.members_lost, lost.contents_lost))
+            .collect();
+        lost.sort();
+        lost
+    };
+    fold(&one_engine);
+    let report = vec![
+        (Some("a".to_string()), 1, vec![(1, 1)]),
+        (Some("b".to_string()), 1, Vec::new()),
+    ];
+    assert_eq!(reported(&one_engine), report);
+    let expected = served_layer(&one_engine);
+    assert!(
+        expected[0]
+            .iter()
+            .any(|a| a.0.as_deref() == Some("a") && a.2 == ["far"]),
+        "`far` is served once `near` and `wide` are withdrawn: {expected:?}"
+    );
+
+    compact(&engine, Some(ShardId::ZERO));
+    assert_eq!(
+        reported(&engine),
+        Vec::new(),
+        "shard 0 holds nothing the deletion took"
+    );
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 0's compaction"
+    );
+    compact(&engine, Some(shard(1)));
+    assert_eq!(reported(&engine), report, "shard 1's compaction");
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "after shard 1's compaction"
+    );
+
+    let page = |engine: &Engine| {
+        let mut page = IncomingGrowth::from_entities("a".into(), Vec::new());
+        page.rank = Some(2);
+        page.joining = sets_in(engine, &[zero[0]]);
+        let grown = engine.grow_memberships("t".into(), 0, vec![page]).unwrap();
+        assert_eq!((grown[0].joined, grown[0].withdrawn), (1, None));
+        tick(engine);
+    };
+    page(&one_engine);
+    page(&engine);
+    let expected = served_layer(&one_engine);
+    assert_eq!(served_layer(&engine), expected, "after a page at rank 2");
     drop(engine);
     let engine = several.open_writing();
     assert_eq!(served_layer(&engine), expected, "across a restart");
@@ -2048,8 +2299,10 @@ fn a_join_a_membership_row_and_an_edit_in_the_sealed_shard_serve_as_one_shard_do
 
 /// New items past the open shard's size, some joining an artifact, open shard 2 and serve as the
 /// same items in one shard serve: before a tick, across a restart that replays the opening, after
-/// a tick and a flush, and across a restart that reads it from a manifest. The opened shard holds
-/// an empty member pack beside each record pack.
+/// a tick and a flush, across a restart that reads it from a manifest, and after shard 2's
+/// compaction. The opened shard holds an empty member pack beside each record pack, and a base
+/// postings file of no record, which its compaction writes again with a record for every term; the
+/// bundle then verifies.
 #[test]
 fn items_in_a_shard_opened_while_the_service_runs_serve_as_one_shard_does() {
     let one = layered_fixture(None);
@@ -2124,4 +2377,21 @@ fn items_in_a_shard_opened_while_the_service_runs_serve_as_one_shard_does() {
     drop(engine);
     let engine = several.open_writing();
     compare(&engine, "across a restart that reads the manifest");
+
+    let base_terms = || {
+        let path = several
+            .root
+            .join(current_prefix(&several.root))
+            .join(mosaica_store::ShardLayout::new(PARTITION, shard(2)).postings_rel());
+        mosaica_authz::PostingsReader::open(&path, false)
+            .unwrap()
+            .term_count()
+    };
+    assert_eq!(base_terms(), 0);
+    assert_eq!(compact(&engine, Some(shard(2))), 1);
+    compare(&engine, "after shard 2's compaction");
+    assert_eq!(base_terms(), engine.generation().dict.len());
+    drop(engine);
+    mosaica_build::verify_deep(&several.root, &mosaica_build::VerifyOpts::default())
+        .expect("the bundle verifies");
 }

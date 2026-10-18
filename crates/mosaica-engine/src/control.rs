@@ -441,26 +441,35 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Refuses every write to a bundle of several shards
-    /// ([`crate::write::WritePath::writable`]). A caller asks it before reading a write's body.
-    pub fn writable(&self) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.writable()
-    }
-
     /// The stamp of the generation served now: what a write naming entities taken from it, rather
     /// than from [`Engine::name_items`], carries.
     fn stamp_now(&self) -> Stamp {
         Stamp::of(&self.generation.load())
     }
 
-    /// [`Engine::accept_changes`] for one change to the item `entity` of the one shard served.
+    /// [`Engine::accept_changes`] for one change to the item `entity` of a bundle of one shard.
+    /// Over several shards an entity names no item alone, so this answers
+    /// [`crate::write::AcceptError::Contract`] and changes nothing.
     pub fn accept_change(
         &self,
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.writable()?;
-        let shard = self.generation.load().only_shard().id();
+        let only = {
+            let generation = self.generation.load();
+            let mut shards = generation.shards();
+            match (shards.next(), shards.next()) {
+                (Some(shard), None) => Some(shard.id()),
+                _ => None,
+            }
+        };
+        let Some(shard) = only else {
+            return Err(crate::write::AcceptError::Contract(
+                "an entity alone names no item in a bundle of several shards; name its shard with \
+                 `accept_changes`"
+                    .into(),
+            ));
+        };
         self.accept_changes(vec![(Target::Item(shard, entity), op)])
     }
 
@@ -665,8 +674,8 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view, deleting the items it leaves in no view. Its key may be created again, as a
-    /// new incarnation with none of the dropped view's rows or artifacts.
+    /// Drop a view, deleting the items it leaves in no view and its artifacts. Its key may be
+    /// created again, as a new incarnation with none of the dropped view's rows or artifacts.
     pub fn drop_view(
         &self,
         group: String,
@@ -803,8 +812,8 @@ pub struct GrownMembership {
     pub filled: u64,
     /// How many of the leaving members a generating-set page took out of it.
     pub left: u64,
-    /// The rank this page emptied, where it emptied one: the content is withdrawn and the caller
-    /// supplies it again.
+    /// The rank this page emptied, where it emptied one: the content is withdrawn, its rank is
+    /// never taken again, and the caller supplies it again at a new one.
     pub withdrawn: Option<u16>,
 }
 

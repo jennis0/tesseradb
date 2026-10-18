@@ -149,10 +149,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         // flushing and compaction need `write` as a write does.
         .route("/control/flush", post(flush))
         .route("/control/compact", post(compact))
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            require_writable,
-        ))
         .route_layer(axum::middleware::from_fn(require_write));
     let admin_routes = Router::new().route("/control/status", get(status));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
@@ -229,17 +225,6 @@ async fn require_write(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     caller(&request).require(mosaica_catalogue::Permission::Write)?;
-    Ok(next.run(request).await)
-}
-
-/// The engine's write rule, asked before a write's body is read, so a bundle that takes no write
-/// refuses every write the same way whatever the body holds.
-async fn require_writable(
-    State(state): State<Arc<AppState>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, ApiError> {
-    state.engine.writable().map_err(map_accept_error)?;
     Ok(next.run(request).await)
 }
 
@@ -2630,8 +2615,9 @@ struct GrowingArtifactBody {
     /// The attachment, under the same fill rule.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
-    /// Contents by rank, each filled, identical or 409. A content here carries no generating set,
-    /// so it is refused on a layer whose content requires every member visible.
+    /// Contents by rank, each identical or 409 where the rank holds a content, and otherwise a
+    /// new content at the next free rank. A content here carries no generating set, so it is
+    /// refused on a layer whose content requires every member visible.
     #[serde(default)]
     content: Vec<ContentFillBody>,
     /// The shape, as on a publication; absent where the row fills none.
@@ -3145,6 +3131,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
+            "shard": executor.compaction_shard.map(|shard| shard.raw()),
             "fold_refusals": executor.fold_refusals,
             "fold_refusals_by_gate": mosaica_engine::FOLD_GATES
                 .iter()

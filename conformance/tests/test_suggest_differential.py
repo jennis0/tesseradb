@@ -67,8 +67,6 @@ import requests
 import suggest_fixture as sf
 from oracle.harness import spawn_server, stop_server
 
-pytestmark = pytest.mark.writes_nothing
-
 
 @pytest.fixture(scope="session")
 def suggest_bundle(tmp_path_factory):

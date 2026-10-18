@@ -16,8 +16,6 @@ from oracle import catalogue as cat
 from .driver import Build, Stage, SuiteHarness, poll, run_plan, server_diagnostics
 from .test_stage_invariance import BBOX, GRANTS, K
 
-pytestmark = pytest.mark.writes_nothing
-
 HANGS = """
 import threading, time
 for _ in range(2):

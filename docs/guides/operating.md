@@ -333,6 +333,10 @@ starts one straight away. A compaction that was refused does not count. Writing 
 `compaction_dead_rows_fraction` or `compaction_dead_bytes_ratio` turns that condition off and leaves
 the others.
 
+A bundle whose items fill more than one shard (`[shards] size` in the declaration) is compacted one
+shard at a time. Each shard is checked against these conditions on its own counts, and the interval
+applies to each shard on its own.
+
 A compaction needs free space on the bundle's disc of one and a half times the bundle's current
 size, and enough memory for its own estimate, which respects the cap you set. Without either it is
 refused, and `/control/status` records the reason under `compaction.last_refusal`.
@@ -346,8 +350,9 @@ mosaica$ curl -sS -X POST --unix-socket /run/mosaica/control.sock \
 202
 ```
 
-The server picks the request up at its next tick. A request made while a compaction is running is
-dropped, with a warning in the log. Read the outcome a few seconds later:
+The server picks the request up at its next tick and compacts every shard with something to
+reclaim, one after another. A request made while a compaction is running is held until that
+compaction finishes. Read the outcome a few seconds later:
 
 ```console
 mosaica$ curl -sS --unix-socket /run/mosaica/control.sock \

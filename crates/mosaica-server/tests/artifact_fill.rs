@@ -124,7 +124,16 @@ async fn served(server: &TestServer, layer: &str) -> Vec<(String, u64)> {
 
 /// The drill-down's body for one artifact, or its status where it is withheld.
 async fn drill(server: &TestServer, mosaica_id: &str) -> (u16, serde_json::Value) {
-    let auth = authorise(server, &["0"]).await;
+    drill_as(server, mosaica_id, &["0"]).await
+}
+
+/// [`drill`] for a principal holding `terms`.
+async fn drill_as(
+    server: &TestServer,
+    mosaica_id: &str,
+    terms: &[&str],
+) -> (u16, serde_json::Value) {
+    let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
         .client
@@ -474,7 +483,8 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         assert_eq!(body["error"], "contract", "{part}: {body}");
     }
 
-    // A key repeated with a rank is refused: a withdrawal in one row moves the rank another names.
+    // A key repeated with a rank is refused: two pages of one set would each be read against the
+    // set the batch found.
     let (status, body) = patch(
         &server,
         TOPICS,
@@ -502,4 +512,220 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         served(&server, TOPICS).await.is_empty(),
         "an artifact with none of the content its layer declares is withheld whole"
     );
+}
+
+/// `content` is what the card serves a principal seeing every document, and a principal seeing
+/// a third of them is served nothing.
+async fn served_only_whole(server: &TestServer, id: &str, content: &str) {
+    assert_eq!(drill(server, id).await.1["content"], json!([content]));
+    assert_eq!(
+        drill_as(server, id, &["1"]).await.0,
+        404,
+        "a viewer who cannot see every document `{content}` was generated from"
+    );
+}
+
+/// **A rank keeps its number after a lower one is withdrawn, and a content restated at a withdrawn
+/// rank is a new content at the next free one.** `near`, `wide` and `far` are ranks 0, 1 and 2;
+/// pages withdraw `near` and then `wide`, so `far` is served and is still paged at rank 2, and a
+/// withdrawn rank names no set to page. A `PUT` restating the contents holds `far` at 2, with the
+/// set the page gave it, and gives `near` and `wide` positions 3 and 4 with the sets they were
+/// sent with. The card serves each in turn to a viewer who can see its set and nothing to one who
+/// cannot, across a restart too.
+#[tokio::test]
+async fn a_rank_keeps_its_number_after_a_lower_one_is_withdrawn() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = declaration(TOPICS, true, "flat");
+    declaration["content"]["supplied"][0]["require_member_visibility"] = json!("all");
+    register(&server, declaration).await;
+    let contents = json!([
+        { "values": ["near"], "generated_from": members(0..5) },
+        { "values": ["wide"], "generated_from": members(0..20) },
+        { "values": ["far"], "generated_from": members(0..50) }
+    ]);
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": contents }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["artifacts"][0]["mosaica_id"]
+        .as_str()
+        .expect("an identifier")
+        .to_string();
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["near"]));
+
+    for (rank, leaving, next) in [(0, members(0..5), "wide"), (1, members(0..20), "far")] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "leaving": leaving }]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["artifacts"][0]["withdrawn"], rank, "{body}");
+        assert_eq!(drill(&server, &id).await.1["content"], json!([next]));
+    }
+
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 2, "members": members(50..60) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["joined"], 10, "{body}");
+    assert_eq!(
+        drill(&server, &id).await.1["content"],
+        json!(["far"]),
+        "the page joined `far`'s set, which this principal sees whole"
+    );
+    for rank in [0, 1] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "members": members(60..61) }]),
+        )
+        .await;
+        assert_eq!(status, 422, "rank {rank}: {body}");
+        assert_eq!(body["error"], "contract", "{body}");
+    }
+
+    let mut restated = contents.clone();
+    restated[2]["generated_from"] = members(0..60);
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": restated }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["filled"], 2, "{body}");
+    served_only_whole(&server, &id, "far").await;
+
+    let server = restart(server, &tmp).await;
+    served_only_whole(&server, &id, "far").await;
+    for (rank, leaving, next) in [(2, members(0..60), "near"), (3, members(0..5), "wide")] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "leaving": leaving }]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["artifacts"][0]["withdrawn"], rank, "{body}");
+        served_only_whole(&server, &id, next).await;
+    }
+    for rank in [0, 1, 2, 3] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": rank, "members": members(60..61) }]),
+        )
+        .await;
+        assert_eq!(status, 422, "rank {rank}: {body}");
+    }
+}
+
+/// **A content past an artifact's last, sent with its set once the artifact's content is
+/// published, is taken and served whole.** `PUT` gives `t0` the content `first`, and the tick
+/// publishes it; a second `PUT` with `first` and `second` adds `second` at rank 1 with its set. A
+/// page withdrawing `first` leaves `second`, which the card serves to a viewer who can see its
+/// set and to no one else, across a restart, a compaction, and a restart after it.
+#[tokio::test]
+async fn a_further_content_with_its_set_is_served_whole_across_a_restart_and_a_compaction() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = declaration(TOPICS, true, "flat");
+    declaration["content"]["supplied"][0]["require_member_visibility"] = json!("all");
+    register(&server, declaration).await;
+    let first = json!({ "values": ["first"], "generated_from": members(0..5) });
+    let second = json!({ "values": ["second"], "generated_from": members(0..20) });
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": [first] }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["artifacts"][0]["mosaica_id"]
+        .as_str()
+        .expect("an identifier")
+        .to_string();
+    served_only_whole(&server, &id, "first").await;
+
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "members": members(0..100), "content": [first, second] }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["filled"], 1, "{body}");
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 0, "leaving": members(0..5) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["withdrawn"], 0, "{body}");
+    served_only_whole(&server, &id, "second").await;
+
+    let server = restart(server, &tmp).await;
+    served_only_whole(&server, &id, "second").await;
+    fold(&server).await;
+    served_only_whole(&server, &id, "second").await;
+    let server = restart(server, &tmp).await;
+    served_only_whole(&server, &id, "second").await;
+}
+
+/// **A `PATCH` fills a further content once the artifact's content is published**, at the next
+/// position, and holds it across a restart: the same values there again are held identically, and
+/// others are a `409`. A page withdrawing the first content leaves the further one served.
+#[tokio::test]
+async fn a_patch_fills_a_further_content_after_the_first_is_published() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(TOPICS, true, "flat")).await;
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{
+            "key": "t0",
+            "members": members(0..100),
+            "content": [{ "values": ["first"] }]
+        }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["artifacts"][0]["mosaica_id"]
+        .as_str()
+        .expect("an identifier")
+        .to_string();
+    let further =
+        |values: &str| json!([{ "key": "t0", "content": [{ "rank": 1, "values": [values] }] }]);
+    let (status, body) = patch(&server, TOPICS, further("second")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["filled"], 1, "{body}");
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["first"]));
+
+    let server = restart(server, &tmp).await;
+    let (status, body) = patch(&server, TOPICS, further("second")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["filled"], 0, "{body}");
+    let (status, body) = patch(&server, TOPICS, further("other")).await;
+    assert_eq!(status, 409, "{body}");
+    for (joining, leaving) in [(members(0..1), json!({})), (json!({}), members(0..1))] {
+        let (status, body) = patch(
+            &server,
+            TOPICS,
+            json!([{ "key": "t0", "rank": 0, "members": joining, "leaving": leaving }]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(drill(&server, &id).await.1["content"], json!(["second"]));
 }

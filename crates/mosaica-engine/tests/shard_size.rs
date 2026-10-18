@@ -1,5 +1,5 @@
-//! `[shards] size`, declared at a build or at a running service, and the inserts and edits it
-//! refuses.
+//! `[shards] size`, declared at a build or at a running service, and where the inserts and edits
+//! past it go.
 
 mod common;
 
@@ -12,8 +12,11 @@ use tempfile::TempDir;
 use common::*;
 use mosaica_engine::{AcceptError, Engine};
 use mosaica_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+use mosaica_lifecycle::wal::WalRecord;
 use mosaica_lifecycle::{ExecError, UnallocatedRow};
-use mosaica_types::{EntityId, ShardFull, ShardLimit, ShardSizeError, SHARD_SIZE_DEFAULT};
+use mosaica_types::{
+    EntityId, ItemAt, ShardId, ShardSizeError, ShardState, ShardsExhausted, SHARD_SIZE_DEFAULT,
+};
 
 /// Items the fixture builds.
 const N: u64 = 40;
@@ -56,19 +59,51 @@ fn rows(prefix: &str, n: usize) -> Vec<UnallocatedRow> {
     (0..n).map(|i| keyed_row(&format!("{prefix}-{i}"))).collect()
 }
 
-fn full(size: u64, high_water: u64, needed: u64) -> ShardFull {
-    ShardFull {
-        limit: ShardLimit::Size(size),
-        high_water,
-        needed,
-    }
+/// The item the test calls `key` holds, in its shard.
+fn item_at(engine: &Engine, key: &str) -> Option<ItemAt> {
+    items_by_id(engine, [key_id(key)])[0]
 }
 
-fn refused_for_room(result: Result<Vec<EntityId>, AcceptError>) -> ShardFull {
-    match result {
-        Err(AcceptError::Exec(ExecError::ShardFull(full))) => full,
-        other => panic!("expected a refusal for the shard's size, got {other:?}"),
+fn shard(id: u32) -> ShardId {
+    ShardId::new(id).unwrap()
+}
+
+/// Queues the batches `batches`, each `(name, items)`, behind a window parked after its fsync
+/// that takes one id, and answers each batch in the order given.
+fn queued_behind_a_parked_window(
+    engine: &Arc<Engine>,
+    faults: &FaultSwitchboard,
+    batches: &[(&'static str, usize)],
+) -> Vec<Result<Vec<EntityId>, AcceptError>> {
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let primer = Arc::clone(engine);
+    let prime =
+        std::thread::spawn(move || primer.ingest_rows(rows("prime", 1), "prime".into(), [9; 32]));
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+    // Already counts every write before and the priming batch.
+    let queued = engine.write_executor_stats().work_submitted;
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for (i, &(batch, n)) in batches.iter().enumerate() {
+        let e = Arc::clone(engine);
+        let out = Arc::clone(&results);
+        handles.push(std::thread::spawn(move || {
+            let answer = e.ingest_rows(rows(batch, n), batch.to_string(), [i as u8; 32]);
+            out.lock().unwrap().push((i, answer));
+        }));
+        wait_until("the batch reaches the queue", WAIT, || {
+            engine.write_executor_stats().work_submitted > queued + i as u64
+        });
     }
+    faults.release();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    prime.join().unwrap().expect("the priming batch goes in");
+    let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    results.sort_by_key(|(i, _)| *i);
+    results.into_iter().map(|(_, answer)| answer).collect()
 }
 
 fn size_refused(result: Result<bool, AcceptError>) -> ShardSizeError {
@@ -113,131 +148,214 @@ fn a_size_declared_at_a_running_service_survives_a_restart_a_fold_and_both() {
     assert_eq!(engine.shard_size(), size, "after a fold and a restart");
 }
 
-#[test]
-fn a_size_of_zero_or_below_the_high_water_is_refused() {
-    let tmp = built(None);
-    let (engine, _faults) = engine_over(tmp.path());
-    assert_eq!(size_refused(engine.declare_shards(0)), ShardSizeError::Zero);
-    assert_eq!(
-        size_refused(engine.declare_shards(N - 1)),
-        ShardSizeError::BelowHighWater {
-            size: N - 1,
-            high_water: N
-        }
-    );
-    assert_eq!(engine.shard_size(), SHARD_SIZE_DEFAULT);
-    assert!(
-        !engine.declare_shards(N).expect("a size at the high water"),
-        "a size at the high water is accepted"
-    );
-    let engine = restart(tmp.path(), engine);
-    assert_eq!(engine.shard_size(), N);
+/// The size declarations, openings and seals the log at `tmp` keeps, in order.
+fn shard_records(tmp: &Path) -> Vec<WalRecord> {
+    mosaica_lifecycle::wal::Wal::open(tmp.join("wal.log"))
+        .unwrap()
+        .records()
+        .map(|record| record.unwrap().1)
+        .filter(|record| {
+            matches!(
+                record,
+                WalRecord::ShardsDeclare { .. }
+                    | WalRecord::ShardOpen { .. }
+                    | WalRecord::ShardSeal { .. }
+            )
+        })
+        .collect()
 }
 
-/// Three batches queue behind a parked window: `a` fits, `b` fits neither beside `a` nor after it,
-/// and `c` fits after `a`.
+/// A size at or below the open shard's high water seals it in the declaration's own append. The
+/// next insert opens shard 1, a restart keeps shard 0 sealed, and so does a size raised past its
+/// high water.
 #[test]
-fn a_batch_past_the_size_is_refused_alone_and_goes_in_once_the_size_is_raised() {
+fn a_lowered_size_seals_the_open_shard() {
+    for lowered in [N - 1, N] {
+        let tmp = built(None);
+        let (engine, _faults) = engine_over(tmp.path());
+        assert_eq!(size_refused(engine.declare_shards(0)), ShardSizeError::Zero);
+        assert!(
+            !engine
+                .declare_shards(lowered)
+                .expect("the size is declared"),
+            "a size of {lowered} is new"
+        );
+        let seal = WalRecord::ShardSeal {
+            shard: ShardId::ZERO,
+        };
+        let declared = vec![WalRecord::ShardsDeclare { size: lowered }, seal.clone()];
+        assert_eq!(shard_records(tmp.path()), declared);
+        assert!(engine.declare_shards(lowered).expect("the same size again"));
+
+        let engine = restart(tmp.path(), engine);
+        assert_eq!(engine.shard_size(), lowered);
+        engine
+            .ingest_rows(rows("new", 1), "new".into(), [1; 32])
+            .expect("the insert goes in");
+        assert_eq!(
+            item_at(&engine, "new-0"),
+            Some(ItemAt::new(shard(1), EntityId::new(0)))
+        );
+
+        let raised = N + 10;
+        assert!(!engine.declare_shards(raised).expect("the size is raised"));
+        engine
+            .ingest_rows(rows("later", 1), "later".into(), [2; 32])
+            .expect("the insert goes in");
+        assert_eq!(
+            item_at(&engine, "later-0"),
+            Some(ItemAt::new(shard(1), EntityId::new(1)))
+        );
+        let mut logged = declared;
+        logged.extend([
+            WalRecord::ShardOpen { shard: shard(1) },
+            WalRecord::ShardsDeclare { size: raised },
+        ]);
+        assert_eq!(shard_records(tmp.path()), logged, "shard 0 is sealed once");
+
+        let engine = restart(tmp.path(), engine);
+        publish_buffered(&engine);
+        let (shards, next_id) = recorded(&side_manifest(&tmp.path().join("bundle")));
+        let states: Vec<_> = shards
+            .iter()
+            .map(|(id, state, high_water, ..)| (*id, *state, *high_water))
+            .collect();
+        assert_eq!(
+            (states, next_id),
+            (
+                vec![(0, ShardState::Sealed, N), (1, ShardState::Open, 2)],
+                2
+            ),
+            "after a restart and a raised size, at {lowered}"
+        );
+    }
+}
+
+/// Three batches queue behind a parked window and go in together: `a` fits the open shard, `b`
+/// takes it to the size and opens shard 1 for the rest, and `c` follows `b` there.
+#[test]
+fn a_batch_past_the_size_straddles_into_a_new_shard() {
     let tmp = built(None);
     let (engine, faults) = engine_over(tmp.path());
     let size = N + 4;
     engine.declare_shards(size).expect("the size is declared");
     let engine = Arc::new(engine);
 
-    // Park the executor inside a window of its own, one id past the build.
-    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
-    let primer = Arc::clone(&engine);
-    let prime =
-        std::thread::spawn(move || primer.ingest_rows(rows("prime", 1), "prime".into(), [9; 32]));
-    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
-    // Already counts the size's declaration and the priming batch.
-    let queued = engine.write_executor_stats().work_submitted;
-
-    let batches = [("a", 2usize), ("b", 3), ("c", 1)];
-    let results = Arc::new(Mutex::new(Vec::new()));
-    let mut handles = Vec::new();
-    for (i, (batch, n)) in batches.into_iter().enumerate() {
-        let e = Arc::clone(&engine);
-        let out = Arc::clone(&results);
-        handles.push(std::thread::spawn(move || {
-            let answer = e.ingest_rows(rows(batch, n), batch.to_string(), [i as u8; 32]);
-            out.lock().unwrap().push((batch, answer));
-        }));
-        wait_until("the batch reaches the queue", WAIT, || {
-            engine.write_executor_stats().work_submitted > queued + i as u64
-        });
-    }
-    faults.release();
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    prime.join().unwrap().expect("the priming batch goes in");
-
-    let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
-    results.sort_by_key(|(batch, _)| *batch);
-    let mut results = results.into_iter().map(|(_, answer)| answer);
-    assert_eq!(results.next().unwrap().expect("a fits").len(), 2);
+    let answers = queued_behind_a_parked_window(&engine, &faults, &[("a", 2), ("b", 3), ("c", 1)]);
+    let created: Vec<usize> = answers
+        .into_iter()
+        .map(|answer| answer.expect("nothing is refused").len())
+        .collect();
+    assert_eq!(created, [2, 3, 1]);
+    let placed = |engine: &Engine| -> Vec<(u32, u64)> {
+        ["a-0", "a-1", "b-0", "b-1", "b-2", "c-0"]
+            .iter()
+            .map(|key| {
+                let at = item_at(engine, key).expect("the item is held");
+                (at.shard.raw(), at.entity.raw())
+            })
+            .collect()
+    };
+    let expected = vec![(0, N + 1), (0, N + 2), (0, N + 3), (1, 0), (1, 1), (1, 2)];
+    assert_eq!(placed(&engine), expected);
     assert_eq!(
-        refused_for_room(results.next().unwrap()),
-        full(size, N + 3, 3),
-        "b is measured against the room a left"
-    );
-    assert_eq!(results.next().unwrap().expect("c fits after a").len(), 1);
-    assert_eq!(engine.allocator_high_water(), size);
-    assert!(
-        (0..3).all(|i| item_of_key(&engine, &format!("b-{i}")).is_none()),
-        "the refused batch created nothing"
+        engine.allocator_high_water(),
+        size + 3,
+        "the shards' high waters, summed"
     );
 
-    engine.declare_shards(size + 3).expect("the size is raised");
-    let again = engine
-        .ingest_rows(rows("b", 3), "b".into(), [1; 32])
-        .expect("the same batch goes in");
-    assert_eq!(again.len(), 3);
-    assert!((0..3).all(|i| item_of_key(&engine, &format!("b-{i}")).is_some()));
+    let engine = restart(tmp.path(), Arc::try_unwrap(engine).ok().unwrap());
+    assert_eq!(placed(&engine), expected);
     assert_eq!(engine.allocator_high_water(), size + 3);
 }
 
+/// Three batches queue behind a parked window when one shard number is left: `a` fits, `b` needs
+/// a shard past the last number and is refused alone, creating nothing, and `c` fits after `a`.
 #[test]
-fn a_build_at_its_size_refuses_an_insert_and_an_edit_past_it() {
+fn a_batch_needing_a_shard_past_the_last_number_is_refused_alone() {
+    let tmp = built(None);
+    edit_side_manifest(&tmp.path().join("bundle"), |manifest| {
+        manifest.shards.next_id = ShardId::LIMIT - 1;
+    });
+    let (engine, faults) = engine_over(tmp.path());
+    let size = N + 4;
+    engine.declare_shards(size).expect("the size is declared");
+    let engine = Arc::new(engine);
+
+    // `b` takes the last id of shard 0, all of the last shard, and needs one more.
+    let past = 1 + size as usize + 1;
+    let mut answers =
+        queued_behind_a_parked_window(&engine, &faults, &[("a", 2), ("b", past), ("c", 1)])
+            .into_iter();
+    assert_eq!(answers.next().unwrap().expect("a fits").len(), 2);
+    let refused = answers.next().unwrap();
+    assert!(
+        matches!(
+            refused,
+            Err(AcceptError::Exec(ExecError::ShardsExhausted(
+                ShardsExhausted { needed: 1 }
+            )))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(answers.next().unwrap().expect("c fits after a").len(), 1);
+    assert!(
+        (0..past).all(|i| item_at(&engine, &format!("b-{i}")).is_none()),
+        "the refused batch created nothing"
+    );
+    assert_eq!(
+        item_at(&engine, "c-0").map(|at| (at.shard, at.entity.raw())),
+        Some((shard(0), N + 3))
+    );
+    assert_eq!(engine.allocator_high_water(), size);
+    assert_eq!(
+        shard_records(tmp.path()),
+        [
+            WalRecord::ShardsDeclare { size },
+            WalRecord::ShardSeal {
+                shard: ShardId::ZERO
+            }
+        ],
+        "no shard opened, and a and c, filling shard 0, sealed it"
+    );
+}
+
+/// A build exactly at its size writes its shard sealed. It takes an insert, which opens shard 1,
+/// and an edit of a built item, which stays in shard 0 and takes the first id past the size; a
+/// restart keeps both.
+#[test]
+fn a_build_at_its_size_writes_it_sealed_and_takes_an_insert_and_an_edit_past_it() {
     let tmp = built(Some(N));
+    assert_eq!(
+        recorded(&side_manifest(&tmp.path().join("bundle"))),
+        (vec![(0, ShardState::Sealed, N, vec![], 0)], 1)
+    );
     let (engine, _faults) = engine_over(tmp.path());
     assert_eq!(engine.shard_size(), N);
     assert_eq!(shards_of(&tmp.path().join("bundle")).0, N);
     assert_eq!(engine.allocator_high_water(), N);
 
-    assert_eq!(
-        refused_for_room(engine.ingest_rows(rows("new", 1), "new".into(), [1; 32])),
-        full(N, N, 1)
-    );
-    let item = item_of_id(&engine, 1)
-        .unwrap()
-        .expect("the fixture holds item 1");
-    let moved = UnallocatedRow {
-        join: Some(mosaica_types::ItemAt::new(
-            mosaica_types::ShardId::ZERO,
-            item,
-        )),
-        x: 7.0,
-        y: 7.0,
-        scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(1)],
-        ..keyed_row("unused")
-    };
-    assert_eq!(
-        refused_for_room(engine.ingest_rows(vec![moved.clone()], "edit".into(), [2; 32])),
-        full(N, N, 1),
-        "an edit takes an id from the high water"
-    );
-    assert_eq!(engine.allocator_high_water(), N, "neither took an id");
-
-    let engine = restart(tmp.path(), engine);
-    assert_eq!(engine.shard_size(), N);
-    engine.declare_shards(N + 2).expect("the size is raised");
     engine
         .ingest_rows(rows("new", 1), "new".into(), [1; 32])
         .expect("the insert goes in");
-    engine
-        .ingest_rows(vec![moved], "edit".into(), [2; 32])
-        .expect("the edit goes in");
+    edit_by_id(&engine, "edit", 1).expect("the edit goes in");
+    let placed = |engine: &Engine| {
+        (
+            item_at(engine, "new-0").map(|at| (at.shard, at.entity.raw())),
+            items_by_id(engine, [1])[0].map(|at| (at.shard, at.entity.raw())),
+        )
+    };
+    let expected = (Some((shard(1), 0)), Some((ShardId::ZERO, N)));
+    assert_eq!(placed(&engine), expected);
     assert_eq!(engine.allocator_high_water(), N + 2);
+    assert_eq!(
+        shard_records(tmp.path()),
+        [WalRecord::ShardOpen { shard: shard(1) }],
+        "the insert opens shard 1 and seals nothing"
+    );
+
+    let engine = restart(tmp.path(), engine);
+    assert_eq!(placed(&engine), expected);
+    assert_eq!(engine.allocator_high_water(), N + 2);
+    assert_eq!(engine.shard_size(), N);
 }

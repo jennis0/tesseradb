@@ -1,5 +1,5 @@
 //! A server over a bundle a build wrote past its `[shards] size`: ready, serving reads, and
-//! refusing every write with a 409 before reading the write's body.
+//! answering every write as a server over the same items built as one shard answers it.
 
 mod common;
 
@@ -13,10 +13,13 @@ const N: u64 = 40;
 const SIZE: u64 = 25;
 
 #[tokio::test]
-async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
+async fn a_server_over_several_shards_is_ready_and_answers_every_write_as_over_one() {
     let dir = TempDir::new().unwrap();
     build_fixture_sized(dir.path(), N, Some(SIZE));
     let server = open(dir.path()).await;
+    let one_dir = TempDir::new().unwrap();
+    build_fixture_sized(one_dir.path(), N, None);
+    let one = open(one_dir.path()).await;
 
     for url in [server.viewer_url("/readyz"), server.session_url("/readyz")] {
         let status = server.client.get(&url).send().await.unwrap().status();
@@ -38,8 +41,7 @@ async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
     assert_eq!(status["partitions"][0]["watermark"], N);
     assert_eq!(status["write_executor"]["posture"], "running");
 
-    // Every route of the write router, each with a body that is not a write, so the refusal
-    // cannot have read it.
+    // Every route of the write router, each with a body that is not a write.
     let routes = [
         (Method::POST, "/control/ingest"),
         (Method::POST, "/control/changes"),
@@ -58,7 +60,7 @@ async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
         (Method::POST, "/control/flush"),
         (Method::POST, "/control/compact"),
     ];
-    let write = async |method: &Method, path: &str, credential: &str| {
+    let write = async |server: &TestServer, method: &Method, path: &str, credential: &str| {
         server
             .client
             .request(method.clone(), server.control_url(path))
@@ -70,14 +72,14 @@ async fn a_server_over_several_shards_is_ready_and_refuses_every_write() {
             .status()
     };
     for (method, path) in &routes {
+        let answered = write(&server, method, path, OPERATOR_CREDENTIAL).await;
         assert_eq!(
-            write(method, path, OPERATOR_CREDENTIAL).await,
-            409,
+            answered,
+            write(&one, method, path, OPERATOR_CREDENTIAL).await,
             "{method} {path}"
         );
-        // A caller who may not write learns nothing about the bundle.
         assert_eq!(
-            write(method, path, &server.integrator_key).await,
+            write(&server, method, path, &server.integrator_key).await,
             403,
             "{method} {path}"
         );

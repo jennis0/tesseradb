@@ -680,10 +680,10 @@ fn a_suppressed_values_key_never_mints_again() {
 ///
 /// The two removal rules are not the same event (write-path §5.4). A suppression retires only on
 /// unsuppress and touches no stored structure, so its key still resolves and mints nothing — the
-/// case above. A **deletion** retires at the fold that executes it, and that fold takes the key out
-/// of the store's index with the artifact's own entity. A point carrying the value afterwards
-/// therefore creates a *new* artifact on a *new* entity, which is precisely what a deletion means:
-/// the old identity is gone and no `mosaica_id` a caller holds names the new one.
+/// case above. A **deletion** frees the key at its acknowledgement, with no compaction between. A
+/// point carrying the value afterwards therefore creates a *new* artifact on a *new* entity, which
+/// is precisely what a deletion means: the old identity is gone and no `mosaica_id` a caller holds
+/// names the new one.
 #[test]
 fn a_deleted_values_key_returns_as_a_new_artifact() {
     let fx = own_fixture("\"none\"");
@@ -695,10 +695,9 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     fx.engine
         .accept_changes(vec![(target, mosaica_lifecycle::wal::ChangeOp::Delete)])
         .expect("a deletion is accepted");
-    fold(&fx.engine);
     assert!(
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
-        "a deleted band is still served after the fold that executed it"
+        "a deleted band is still served after the deletion's acknowledgement"
     );
 
     ingest_own(

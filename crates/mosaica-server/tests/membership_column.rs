@@ -1291,11 +1291,8 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
     .await;
     let id = published[0]["mosaica_id"].as_str().unwrap().to_string();
 
+    // The deletion's acknowledgement frees the key: no compaction runs before the key returns.
     suppress(&server, &id, "delete").await;
-    // **The fold is what frees the key**, and that is Rule F rather than anything about minting: a
-    // deletion retires at the compaction fold that executes it, and until then the store's key
-    // index still holds the artifact's own key.
-    fold(&server).await;
 
     let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
     let (status, detail) = post_ingest(

@@ -318,19 +318,21 @@ def _expected(stage: Stage, expr: dict) -> frozenset[int]:
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_three_states_are_reached_and_are_distinct(layers):
+def test_the_three_states_are_reached_and_are_distinct(layers, catalogue_bundle):
     """The fixture's own precondition. Each stage must have actually happened, or every assertion
     below is made against a corpus that never grew a second layer.
 
     The fold's evidence is the segment count collapsing: a fold rewrites the corpus into one
-    segment per partition-view, where two flushes had left three. The keyword column's own
-    single-layer-again claim is not visible from here — it is an artefact fact — and what this
-    suite can check is that every answer is still right afterwards, which the tests below do.
+    segment per partition-view and shard, where two flushes had left two more than the
+    build's one a shard. The keyword column's own single-layer-again claim is not visible from
+    here — it is an artefact fact — and what this suite can check is that every answer is still
+    right afterwards, which the tests below do.
     """
+    built = len(catalogue_bundle.shards)
     assert set(layers) == {"base+A", "base+A+B", "folded"}
-    assert layers["base+A"].segments == 2, layers["base+A"].segments
-    assert layers["base+A+B"].segments == 3, layers["base+A+B"].segments
-    assert layers["folded"].segments == 1, (
+    assert layers["base+A"].segments == built + 1, layers["base+A"].segments
+    assert layers["base+A+B"].segments == built + 2, layers["base+A+B"].segments
+    assert layers["folded"].segments == built, (
         f"the corpus still has {layers['folded'].segments} segments after a fold — no fold "
         "happened, and the folded column below is the layered one under another name"
     )

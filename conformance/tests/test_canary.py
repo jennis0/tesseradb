@@ -91,8 +91,6 @@ from oracle import wire
 from oracle.wire import decode_viewport, decode_viewport_points
 from suite.canonical import Streamed, canonicalise_viewport
 
-pytestmark = pytest.mark.writes_nothing
-
 GRID_MAX = 65536.0
 VIEW = "s0"
 # Zooms 0-6 of the grid's full 0-16 depth range (contracts §2.5) — deep enough that the corner

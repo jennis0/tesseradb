@@ -1,15 +1,12 @@
 //! Where a running service puts new items among several point shards: into the largest pool of
 //! freed ids a sealed shard holds, then the open shard's pool and high water, and past the open
 //! shard's size into a shard it opens; and what a restart keeps of it.
-//!
-//! Written through the engine's several-shard feature, whose admission lets a window's new items
-//! run past the open shard's size.
 
 mod common;
 
 use common::*;
 use mosaica_engine::Engine;
-use mosaica_lifecycle::wal::{Wal, WalRecord};
+use mosaica_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use mosaica_types::{MosaicaId, ShardId, ShardState, Target};
 
 /// [`Fixture::open_writing`], with a compaction a seal starts held before it publishes, so what
@@ -90,7 +87,7 @@ fn new_items_take_the_sealed_pool_lowest_first_then_the_open_shard() {
 /// and pools survive a restart that replays the opening and one that reads it from a manifest, and
 /// the next window takes the ids an engine that did not restart takes.
 #[test]
-fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
+fn a_window_crossing_the_size_opens_a_shard_that_survives_restarts() {
     let restarted = seeded();
     let unbroken = seeded();
     // Sixteen rows, the odd ones unlabelled, which sort first.
@@ -191,8 +188,8 @@ fn a_window_past_the_size_opens_a_shard_that_survives_restarts() {
 }
 
 /// A window whose records do not become durable opens and seals nothing: the next window seals the
-/// shard and opens the next itself, the log holding one opening and one seal, and the ids the
-/// failed window took are not issued again.
+/// shard and opens the next itself, the log holding one opening and one seal, and is given the ids
+/// the failed window took.
 #[test]
 fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
     let built = two_shards();
@@ -232,8 +229,11 @@ fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
     let accepted = insert_keyed(&engine, "after", &twelve);
     assert_eq!(
         placed(&engine, &accepted),
-        (0..12).map(|entity| (2, entity, 0)).collect::<Vec<_>>(),
-        "shard 1's ids the failed window took stay spent, and shard 2 opens once"
+        (15..25)
+            .map(|entity| (1, entity, 0))
+            .chain((0..2).map(|entity| (2, entity, 0)))
+            .collect::<Vec<_>>(),
+        "shard 1 issues again the ids the failed window took, and shard 2 opens once"
     );
     let logged: Vec<WalRecord> = Wal::open(&built.wal)
         .unwrap()
@@ -253,4 +253,56 @@ fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
             WalRecord::ShardSeal { shard: shard(1) },
         ]
     );
+}
+
+/// Ten rounds of deleting a random half of the items, compacting, and inserting as many: the new
+/// items take the freed ids, so the shard count and the summed high water stay within the first
+/// round's.
+#[test]
+fn rounds_of_deleting_and_reinserting_half_hold_the_shards_and_the_high_water_steady() {
+    use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+    let built = two_shards();
+    let engine = built.open_writing();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let held = |engine: &Engine| -> Vec<MosaicaId> {
+        read_items(
+            engine,
+            &session,
+            &Items::new(mosaica_engine::RecordsOrder::Stored),
+        )
+        .rows_with_ids
+        .into_iter()
+        .map(|(id, _)| MosaicaId::new(id))
+        .collect()
+    };
+    let mut rng = StdRng::seed_from_u64(0x0005_ca1e);
+    let mut first = None;
+    for round in 0..10 {
+        let mut items = held(&engine);
+        assert_eq!(items.len() as u64, TWO_SHARD_N, "round {round}");
+        items.shuffle(&mut rng);
+        let half = &items[..items.len() / 2];
+        let targets = engine.resolve_targets(half).unwrap();
+        engine
+            .accept_changes(
+                targets
+                    .into_iter()
+                    .map(|target| (target.expect("a held item"), ChangeOp::Delete))
+                    .collect(),
+            )
+            .unwrap();
+        fold(&engine);
+        publish_buffered(&engine);
+        insert_keyed(&engine, &format!("round-{round}"), &vec![true; half.len()]);
+        publish_buffered(&engine);
+
+        let shards = side_manifest(&built.root).shards.records.len();
+        let high_water = engine.allocator_high_water();
+        let (most_shards, most_high_water) = *first.get_or_insert((shards, high_water));
+        assert!(
+            shards <= most_shards && high_water <= most_high_water,
+            "round {round}: {shards} shards at {high_water}, and the first round's \
+             {most_shards} at {most_high_water}"
+        );
+    }
 }

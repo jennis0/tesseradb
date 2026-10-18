@@ -48,8 +48,6 @@ from oracle.harness import (
 )
 from oracle.wire import decode_viewport_artifacts, decode_viewport_points
 
-pytestmark = pytest.mark.writes_nothing
-
 VIEW_ID = "s0"
 SCALE = 4294967296.0
 SEED = 20260830

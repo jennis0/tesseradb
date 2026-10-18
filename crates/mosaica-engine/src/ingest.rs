@@ -163,7 +163,6 @@ impl Engine {
     ///
     /// Blocking: a tokio handler calls this inside `spawn_blocking`.
     pub fn ingest(&self, request: IngestRequest) -> Result<IngestReceipt, AcceptError> {
-        self.write.writable()?;
         #[cfg(feature = "fault-injection")]
         self.switches.park_ingest_while_wanted();
         // A stepped-down node would bury what it accepts under a manifest assembled from older

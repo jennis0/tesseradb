@@ -630,6 +630,51 @@ fn a_second_shards_compaction_keeps_the_held_shapes() {
     );
 }
 
+/// **A compaction that moves only shard 1's slice of a level leaves shard 1's row forms for a
+/// restart to claim**: each is keyed by its own shard's slice version, so no segment is resolved
+/// again from the geometry.
+#[test]
+fn a_restart_claims_the_row_forms_of_a_shard_whose_slice_alone_moved() {
+    let fx = fixture_sized("\"none\"", |toml| toml, Some(N / 2));
+    let writing = || {
+        let engine = open_writing(&fx.root, &fx.cache, &fx.wal, config_uncapped());
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let engine = writing();
+    let grant = "0,1";
+    let mut expected = served(&engine, grant, 0, WHOLE_MAP);
+    let key = expected
+        .keys()
+        .next()
+        .cloned()
+        .expect("the fixture serves a boundary");
+    engine
+        .accept_changes(vec![(
+            served_target(&engine, grant, &key),
+            ChangeOp::Delete,
+        )])
+        .expect("the deletion is accepted");
+    expected.remove(&key);
+    // The second writes the row forms of the base the first wrote, which the first resolved at
+    // its swap.
+    compact(&engine, Some(shard(1)));
+    compact(&engine, Some(shard(1)));
+    drop(engine);
+
+    let engine = writing();
+    let warm = engine.shape_warm_report();
+    assert!(
+        warm.pieces_claimed > 0 && warm.pieces_resolved == 0,
+        "a restart claims every segment's row form: {warm:?}"
+    );
+    assert_eq!(
+        served(&engine, grant, 0, WHOLE_MAP),
+        expected,
+        "across a restart"
+    );
+}
+
 /// **A suppressed member leaves the count, and a suppressed artifact leaves the map** — the same
 /// two rules a stored membership follows, reached through a membership nothing stores.
 #[test]

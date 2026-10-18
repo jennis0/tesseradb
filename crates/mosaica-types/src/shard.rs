@@ -181,11 +181,6 @@ pub const SHARD_SIZE_DEFAULT: u64 = (1 << 32) - (1 << 28);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShardSizeError {
     Zero,
-    /// Below the shard's high water.
-    BelowHighWater {
-        size: u64,
-        high_water: u64,
-    },
 }
 
 impl std::fmt::Display for ShardSizeError {
@@ -195,45 +190,41 @@ impl std::fmt::Display for ShardSizeError {
                 f,
                 "a shard size of 0 issues no id. Declare a size of 1 or more"
             ),
-            ShardSizeError::BelowHighWater { size, high_water } => write!(
-                f,
-                "a size of {size} is below the shard's high water {high_water}. Declare a size \
-                 of {high_water} or more"
-            ),
         }
     }
 }
 
 impl std::error::Error for ShardSizeError {}
 
-/// Checks `size` as the size of a shard whose high water is `high_water`. A build checks it with
-/// a high water of 0.
-pub fn check_shard_size(size: u64, high_water: u64) -> Result<(), ShardSizeError> {
+/// Checks `size` as a shard size. A size at or below an open shard's high water seals it
+/// ([`reached_size`]).
+pub fn check_shard_size(size: u64) -> Result<(), ShardSizeError> {
     if size == 0 {
         return Err(ShardSizeError::Zero);
     }
-    if size < high_water {
-        return Err(ShardSizeError::BelowHighWater { size, high_water });
-    }
     Ok(())
+}
+
+/// The high water at which an open shard of `size` seals: `size`, or [`ENTITY_END`] where the size
+/// runs past the end of the ids. A build splits its items into shards at it, and an ingest seals
+/// at it.
+pub fn sealing_high_water(size: u64) -> u64 {
+    size.min(ENTITY_END)
+}
+
+/// Whether a shard whose high water is `high_water` has reached `size`, where an open shard
+/// seals.
+pub fn reached_size(high_water: u64, size: u64) -> bool {
+    high_water >= sealing_high_water(size)
 }
 
 /// Where entity ids end, exclusive: `u32::MAX` is never issued, so a half-open range's end fits a
 /// `u32`.
 pub const ENTITY_END: u64 = u32::MAX as u64;
 
-/// What a shard's high water may not pass: its size, or the end of its id space where that is
-/// lower.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ShardLimit {
-    Size(u64),
-    End(u64),
-}
-
-/// Ids a batch needs from a shard's high water, past what the shard may issue.
+/// Ids a batch needs from a shard's high water, past [`ENTITY_END`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ShardFull {
-    pub limit: ShardLimit,
     pub high_water: u64,
     /// How many ids the batch takes from the high water: one for each new item and each edit that
     /// the shard's freed ids do not cover.
@@ -242,49 +233,26 @@ pub struct ShardFull {
 
 impl std::fmt::Display for ShardFull {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ShardFull {
-            limit,
-            high_water,
-            needed,
-        } = self;
-        match limit {
-            ShardLimit::Size(size) => write!(
-                f,
-                "this batch needs {needed} ids from the shard's high water {high_water}, past its \
-                 size {size}. Declare a shard size of at least {}, or send fewer new items and \
-                 edits",
-                high_water.saturating_add(*needed)
-            ),
-            ShardLimit::End(end) => write!(
-                f,
-                "this batch needs {needed} ids from the shard's high water {high_water}, past \
-                 {end}, where the shard's ids end. Send fewer new items and edits"
-            ),
-        }
+        let ShardFull { high_water, needed } = self;
+        write!(
+            f,
+            "this batch needs {needed} ids from the shard's high water {high_water}, past \
+             {ENTITY_END}, where the shard's ids end. Send fewer edits of this shard's items"
+        )
     }
 }
 
 impl std::error::Error for ShardFull {}
 
-/// Checks that a shard whose ids end at `end` and whose high water is `high_water` can issue
-/// `needed` more from it without passing `size`. A batch needing none always fits. The refusal
-/// names the lower of `size` and `end`.
-pub fn check_room(size: u64, end: u64, high_water: u64, needed: u64) -> Result<(), ShardFull> {
+/// Checks that a shard whose high water is `high_water` can issue `needed` more from it without
+/// passing [`ENTITY_END`]. A batch needing none always fits.
+pub fn check_room(high_water: u64, needed: u64) -> Result<(), ShardFull> {
     if needed == 0 {
         return Ok(());
     }
-    let (limit, bound) = if size <= end {
-        (ShardLimit::Size(size), size)
-    } else {
-        (ShardLimit::End(end), end)
-    };
     match high_water.checked_add(needed) {
-        Some(reached) if reached <= bound => Ok(()),
-        _ => Err(ShardFull {
-            limit,
-            high_water,
-            needed,
-        }),
+        Some(reached) if reached <= ENTITY_END => Ok(()),
+        _ => Err(ShardFull { high_water, needed }),
     }
 }
 
@@ -387,61 +355,44 @@ mod tests {
     }
 
     #[test]
-    fn a_shard_size_is_positive_and_not_below_the_high_water() {
-        assert_eq!(check_shard_size(0, 0), Err(ShardSizeError::Zero));
-        assert_eq!(check_shard_size(1, 0), Ok(()));
-        assert_eq!(
-            check_shard_size(40, 40),
-            Ok(()),
-            "a full shard may keep its size"
-        );
-        assert_eq!(
-            check_shard_size(39, 40),
-            Err(ShardSizeError::BelowHighWater {
-                size: 39,
-                high_water: 40
-            })
-        );
-        assert_eq!(check_shard_size(u64::MAX, 40), Ok(()));
+    fn a_shard_size_is_positive() {
+        assert_eq!(check_shard_size(0), Err(ShardSizeError::Zero));
+        assert_eq!(check_shard_size(1), Ok(()));
+        assert_eq!(check_shard_size(u64::MAX), Ok(()));
     }
 
     #[test]
-    fn a_batch_fits_up_to_the_size_and_no_further() {
-        assert_eq!(check_room(10, 100, 7, 3), Ok(()), "up to the size");
+    fn a_shard_reaches_its_size_at_it_or_at_the_end_of_the_ids() {
+        assert!(!reached_size(39, 40));
+        assert!(reached_size(40, 40), "at the size");
+        assert!(reached_size(41, 40), "past it, as a lowered size leaves it");
+        assert!(!reached_size(0, 1));
+        assert!(!reached_size(ENTITY_END - 1, u64::MAX));
+        assert!(reached_size(ENTITY_END, u64::MAX), "the end of the ids");
+    }
+
+    #[test]
+    fn a_batch_fits_up_to_the_end_of_the_ids_and_no_further() {
+        let near = ENTITY_END - 3;
+        assert_eq!(check_room(near, 3), Ok(()), "up to the end");
         assert_eq!(
-            check_room(10, 100, 7, 4),
+            check_room(near, 4),
             Err(ShardFull {
-                limit: ShardLimit::Size(10),
-                high_water: 7,
+                high_water: near,
                 needed: 4
             })
         );
         assert_eq!(
-            check_room(10, 100, 10, 0),
+            check_room(ENTITY_END, 0),
             Ok(()),
             "a batch needing no id fits a full shard"
         );
-        assert_eq!(check_room(10, 100, 12, 0), Ok(()));
-    }
-
-    #[test]
-    fn the_lower_of_the_size_and_the_end_of_the_ids_is_the_limit_named() {
         assert_eq!(
-            check_room(1_000, 100, 98, 3),
+            check_room(u64::MAX - 1, 2),
             Err(ShardFull {
-                limit: ShardLimit::End(100),
-                high_water: 98,
-                needed: 3
-            })
-        );
-        assert_eq!(
-            check_room(100, 100, 98, 3).map_err(|full| full.limit),
-            Err(ShardLimit::Size(100)),
-            "a size at the end is the size"
-        );
-        assert_eq!(
-            check_room(u64::MAX, u64::MAX, u64::MAX - 1, 2).map_err(|full| full.limit),
-            Err(ShardLimit::Size(u64::MAX)),
+                high_water: u64::MAX - 1,
+                needed: 2
+            }),
             "a count past every integer is refused, not wrapped"
         );
     }

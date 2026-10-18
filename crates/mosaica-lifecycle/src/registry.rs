@@ -266,9 +266,8 @@ pub enum RegistryError {
     /// and a second route would re-expose items a suppression or a deletion took out. The one set
     /// a page may shrink is a generating set, named by its rank.
     MembershipShrink { layer: String, key: String },
-    /// A page named a rank the artifact holds no content at (`ingest.md` §1.1). Ranks are
-    /// positions in the artifact's ranked contents, so a page past the last one names a content
-    /// between two that does not exist, or one a withdrawal removed.
+    /// A page named a rank the artifact holds no content at (`ingest.md` §1.1): past the last
+    /// content, or one withdrawn.
     NoSuchContent {
         layer: String,
         key: String,
@@ -654,10 +653,9 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{layer}: the key {key} appears more than once in this batch and a row of it \
                  carries a fixed part or pages a generating set. A fixed part is filled once, and \
-                 a page is read against the set as the batch found it while a withdrawal moves \
-                 the ranks above it — so name a key once per batch where it carries a parent, an \
-                 attachment, a content, a shape or a rank, and send a second page as a second \
-                 request"
+                 a page is read against the set as the batch found it, so name a key once per \
+                 batch where it carries a parent, an attachment, a content, a shape or a rank, \
+                 and send a second page as a second request"
             ),
             RegistryError::ViewIdentity {
                 layer,
@@ -836,6 +834,30 @@ fn scoped_view<'a>(
                  (views §3.5)"
             ),
         }),
+    }
+}
+
+/// The one rule on the generating set a new content starts with: one exactly where the layer's
+/// content requires every member visible. The refusal's detail, or `None` where the set is
+/// admitted.
+fn generating_set_refusal(
+    requires_all_members: bool,
+    rank: usize,
+    set_is_empty: bool,
+) -> Option<String> {
+    match (requires_all_members, set_is_empty) {
+        (false, false) => Some(format!(
+            "contents[{rank}] declares a generating set, and none of this layer's content \
+             requires its members visible; a set that is never tested is a claim the service \
+             would carry without meaning"
+        )),
+        (true, true) => Some(format!(
+            "contents[{rank}] declares no generating set, and this layer's content requires \
+             every member visible; such content is served only to a viewer who can see \
+             everything it was generated from, and an empty set is satisfied by everyone. Send \
+             it with its `generated_from` on a `PUT`"
+        )),
+        _ => None,
     }
 }
 
@@ -1256,54 +1278,40 @@ impl LayerRegistry {
                 shape: artifact.shape.clone(),
                 access: artifact.access.clone().unwrap_or_default(),
             };
+            let sets: Vec<&ShardSets> = artifact
+                .contents
+                .iter()
+                .map(|content| &content.generated_from)
+                .collect();
             let prepared = self.prepare_fills(
                 layer_name,
                 level,
                 ordinal,
                 *view,
                 key,
-                &parts,
+                (&parts, &sets),
                 store,
                 &pending,
                 &mut batch_edges,
             )?;
             // A generating set is compared by equality, never joined: a set changes by a page at
-            // its rank (`ingest.md` §1.1), so a re-`PUT` says the set it said before or refuses. A
-            // set beside a content the artifact does not hold is refused for the same reason: a
-            // content fill carries no set, and dropping one the caller supplied would serve the
-            // content against a set they did not declare.
+            // its rank (`ingest.md` §1.1), so a re-`PUT` says the set it said before or refuses.
             for (rank, content) in artifact.contents.iter().enumerate() {
-                match record.contents.get(rank) {
-                    Some(_)
-                        if !store.set_is(
-                            layer_name,
-                            level,
-                            ordinal,
-                            rank as u16,
-                            &content.generated_from,
-                        ) =>
-                    {
-                        return Err(RegistryError::PartConflict {
-                            layer: layer_name.to_string(),
-                            level,
-                            key: key.to_string(),
-                            part: format!("content[{rank}].generated_from"),
-                        });
-                    }
-                    Some(_) => {}
-                    None if !content.generated_from.is_empty() => {
-                        return Err(RegistryError::Content {
-                            layer: layer_name.to_string(),
-                            detail: format!(
-                                "the artifact keyed {key}: content[{rank}] is a fill and carries \
-                                 a generating set, and a content fill carries none (ingest.md \
-                                 §1.5); a content and its set are supplied together on a new \
-                                 artifact's publication, and the set moves afterwards by a page \
-                                 at its rank"
-                            ),
-                        });
-                    }
-                    None => {}
+                if record.rank_at(rank).is_some()
+                    && !store.set_is(
+                        layer_name,
+                        level,
+                        ordinal,
+                        rank as u16,
+                        &content.generated_from,
+                    )
+                {
+                    return Err(RegistryError::PartConflict {
+                        layer: layer_name.to_string(),
+                        level,
+                        key: key.to_string(),
+                        part: format!("content[{rank}].generated_from"),
+                    });
                 }
             }
             fills.extend(prepared.into_iter().map(|part| WalRecord::ArtifactFill {
@@ -1382,6 +1390,13 @@ impl LayerRegistry {
     /// the part held under the fill rule (`ingest.md` §1.1): absent is filled, identical is
     /// nothing, different is [`RegistryError::PartConflict`] naming the part.
     ///
+    /// `sets` holds the generating set of each of `parts.contents`, by index, where the caller
+    /// supplied one: a publication's, and none for a `PATCH`. **A content at a position holding
+    /// none is a new content**, with its values and its set as supplied, whatever the artifact
+    /// has published: it takes the artifact's next free position, and several take consecutive
+    /// positions, the ranks past the last first in order and the withdrawn ones after them. The
+    /// fill names the position taken, so a replay lands it there.
+    ///
     /// `pending` answers a parent key the batch is about to create; `batch_edges` holds every edge
     /// the batch creates, by child, and gains this artifact's parent list so a later fill in the
     /// same batch walks it. The cycle walk runs over the layer's held edges and the batch's as one
@@ -1399,7 +1414,7 @@ impl LayerRegistry {
         // than a publication's edge may.
         view: Option<&str>,
         key: &str,
-        parts: &crate::membership::FixedParts,
+        (parts, sets): (&crate::membership::FixedParts, &[&ShardSets]),
         store: &ArtifactStore,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
         batch_edges: &mut BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
@@ -1512,12 +1527,22 @@ impl LayerRegistry {
             layer: layer_name.to_string(),
             detail: format!("the artifact keyed {key}: {detail}"),
         };
-        // Ranks fill in order within one record, so a record carrying two new ranks sees the
-        // first before it checks the second.
-        let mut next_rank = record.contents.len();
-        let mut supplied: Vec<&(u16, Vec<String>)> = parts.contents.iter().collect();
-        supplied.sort_by_key(|(rank, _)| *rank);
-        for (rank, values) in supplied {
+        let requires_all_members = declared
+            .iter()
+            .any(|s| s.require_member_visibility.requires_all_members());
+        // A rank is a position in the artifact's content row. A content at a position holding one
+        // is compared with it; any other is a new content at the next free position, the ranks
+        // that are free taken first in order so that each keeps its number where it can, and the
+        // withdrawn ones after them. A rank named twice in the record names one content.
+        let mut next_position = record.next_position();
+        let mut supplied: Vec<(usize, &(u16, Vec<String>))> =
+            parts.contents.iter().enumerate().collect();
+        supplied.sort_by_key(|(_, (rank, _))| {
+            let withdrawn = record.withdraws(usize::from(*rank));
+            (withdrawn, if withdrawn { 0 } else { *rank })
+        });
+        let mut taken: Vec<(usize, [u8; 32])> = Vec::new();
+        for (index, (rank, values)) in supplied {
             let rank = *rank as usize;
             if declared.is_empty() {
                 return Err(refuse_content(
@@ -1537,45 +1562,29 @@ impl LayerRegistry {
                 )));
             }
             let digest = crate::membership::content_digest(values);
-            if let Some(held) = record.contents.get(rank) {
-                if held.digest != digest {
+            let held = record
+                .rank_at(rank)
+                .map(|held| record.contents[held].digest)
+                .or_else(|| taken.iter().find(|(at, _)| *at == rank).map(|(_, d)| *d));
+            if let Some(held) = held {
+                if held != digest {
                     return Err(conflict(format!("content[{rank}]")));
                 }
                 continue;
             }
-            if rank != next_rank {
-                return Err(refuse_content(format!(
-                    "content[{rank}] names a rank past the next one, {next_rank}; ranks are \
-                     positions in the artifact's list of contents and fill in order"
-                )));
-            }
-            // A fill carries values and no generating set (T2b's page brings the set), so on a
-            // layer that tests one it would be content served to everyone: the refusal a
-            // publication with an empty set draws, at the same door.
-            if declared
-                .iter()
-                .any(|s| s.require_member_visibility.requires_all_members())
+            let set = sets.get(index).filter(|set| !set.is_empty());
+            if let Some(refusal) = generating_set_refusal(requires_all_members, rank, set.is_none())
             {
-                return Err(refuse_content(format!(
-                    "content[{rank}] is a fill, and a content fill carries no generating set \
-                     (ingest.md §1.5); this layer's content requires every member visible, so a \
-                     content and its set are supplied together on a new artifact's publication, \
-                     and the set moves afterwards by a page at its rank"
-                )));
+                return Err(refuse_content(refusal));
             }
-            if store.content_row_is_packed(layer_name, level, ordinal) {
-                return Err(refuse_content(format!(
-                    "content[{rank}] would be a further content on an artifact whose content row \
-                     is in a durable extent; the record blob holds one row per artifact until it \
-                     reads per column (ingest.md §1.4, T3), so the rank cannot be written"
-                )));
-            }
+            taken.push((rank, digest));
             fills.push(ArtifactPart::Content {
-                rank: rank as u16,
+                rank: next_position as u16,
                 values: values.clone(),
                 digest,
+                generated_from: set.map(|set| set.to_wal()).unwrap_or_default(),
             });
-            next_rank += 1;
+            next_position += 1;
         }
 
         Ok(fills)
@@ -1707,11 +1716,11 @@ impl LayerRegistry {
     ///
     /// **Suppression-blindness carries over unchanged**, because the duplicate-key check
     /// [`prepare_artifacts`] makes reads [`ArtifactStore::ordinal_of_key`] — the store's key index,
-    /// which loses a key at exactly one event, the fold retiring the artifact's own entity. A
-    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints a
-    /// second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]). A
-    /// *deleted* value's key does mint again, and the new artifact is a new object with a new
-    /// entity — which is what a deletion means.
+    /// which loses a key only when the artifact is deleted, or its layer or view dropped. A
+    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints
+    /// a second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]).
+    /// A *deleted* value's key mints again from the deletion's acknowledgement, and the new
+    /// artifact is a new object with a new entity — which is what a deletion means.
     ///
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
     /// [`prepare_artifacts`]: LayerRegistry::prepare_artifacts
@@ -1905,20 +1914,12 @@ impl LayerRegistry {
                         declared.len()
                     ));
                 }
-                if !requires_all_members && !content.generated_from.is_empty() {
-                    return refuse(format!(
-                        "contents[{rank}] declares a generating set, and none of this layer's \
-                         content requires its members visible; a set that is never tested is a \
-                         claim the service would carry without meaning"
-                    ));
-                }
-                if requires_all_members && content.generated_from.is_empty() {
-                    return refuse(format!(
-                        "contents[{rank}] declares no generating set, and this layer's content \
-                         requires every member visible; such content is served only to a viewer \
-                         who can see everything it was generated from, and an empty set is \
-                         satisfied by everyone"
-                    ));
+                if let Some(refusal) = generating_set_refusal(
+                    requires_all_members,
+                    rank,
+                    content.generated_from.is_empty(),
+                ) {
+                    return refuse(refusal);
                 }
             }
         }
@@ -2220,7 +2221,8 @@ impl LayerRegistry {
     /// [`crate::IncomingGrowth`], and [`LayerRegistry::resolve_or_mint`] for the route that does
     /// create one. The resolution is [`ArtifactStore::ordinal_of_key`] — the *store's* index, never
     /// the served view — which is what keeps a suppressed artifact from reading as absent and
-    /// having a second, unsuppressed artifact minted under its key (§5).
+    /// having a second, unsuppressed artifact minted under its key (§5). A deleted artifact's key
+    /// is held by nothing, so a growth by it is refused.
     ///
     /// **Nothing joining is not an error.** A caller may honestly name an artifact and add nothing
     /// to it; `Ok(None)` says the record would be empty and no append is owed. Refusing would block
@@ -2266,15 +2268,9 @@ impl LayerRegistry {
         //
         // A page is checked against the set the store holds and the store applies the pages of one
         // record in order, so two rows against one artifact would each be prepared against the
-        // state before the batch. That is not merely a stale count: a page that empties a set
-        // withdraws its content and moves every rank above it down, so a second row's rank then
-        // names a different content than the caller wrote — and where the two sets happen to be
-        // the same size, the cardinality check that would otherwise catch it agrees by
-        // coincidence, leaving one content serving against its old set and another holding a
-        // member nobody declared for it. Modelling the shift instead would have to decide what
-        // the caller's second rank meant after the first row moved it, which is a question the
-        // design does not answer; a caller who wants two pages sends two requests, and each one's
-        // ranks are read against the state the previous acknowledgement reported.
+        // state before the batch: two pages of one set would each derive a cardinality from the
+        // set the other moves. A caller who wants two pages sends two requests, and each is read
+        // against the state the previous acknowledgement reported.
         //
         // Per `(view, key)`: on a group-scoped layer one key in two views is two artifacts.
         if let Some(key) = repeated_key_with_parts(incoming.iter().map(|join| {
@@ -2331,7 +2327,7 @@ impl LayerRegistry {
                 ordinal,
                 join.view.as_deref(),
                 &join.key,
-                &join.parts,
+                (&join.parts, &[]),
                 store,
                 &no_pending,
                 &mut batch_edges,
@@ -2388,13 +2384,13 @@ impl LayerRegistry {
     /// caller's key refuses one batch instead of the window it would have joined.
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
-    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key at
-    /// exactly one event, the fold retiring the artifact's own entity, which is a *deletion*. A
-    /// suppression touches no stored structure at all (write-path §5.4, Rule S), so there is
-    /// nothing here that could see one. Written against the *served* view instead, a suppressed
-    /// artifact would read as absent, its key would mint a second artifact, and the new one would
-    /// not be suppressed — a suppression defeated by ingesting a point. That is why this reads the
-    /// store, and why it must never be replaced by a `verdict` call.
+    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key
+    /// only where the artifact goes: at the acknowledgement of its *deletion*, of its layer's drop
+    /// or of its view's drop. A suppression touches no stored structure at all (write-path §5.4,
+    /// Rule S), so there is nothing here that could see one. Written against the *served* view
+    /// instead, a suppressed artifact would read as absent, its key would mint a second artifact,
+    /// and the new one would not be suppressed — a suppression defeated by ingesting a point. That
+    /// is why this reads the store, and why it must never be replaced by a `verdict` call.
     pub fn resolve_or_mint(
         &self,
         layer_name: &str,
@@ -2623,7 +2619,7 @@ impl LayerRegistry {
                 ordinal,
                 view,
                 &edge.child,
-                &parts,
+                (&parts, &[]),
                 store,
                 pending,
                 window_edges,
@@ -4376,37 +4372,36 @@ mod tests {
         assert!(again.fills.is_empty() && again.growth.is_none());
         assert_eq!(again.filled, vec![0]);
 
-        // A second rank on the same, unpacked artifact fills; a rank past the next is refused.
+        // A rank past the next is a new content at the next position, and one named again
+        // there is held identically.
         let mut next = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
-        next.parts.contents = vec![(2, vec!["far".into()])];
-        let refused = reg
-            .prepare_grow("topics/x", 0, &[next], &store)
-            .unwrap_err();
-        assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("past the next one, 1")),
-            "{refused}"
-        );
-        let mut next = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
-        next.parts.contents = vec![(1, vec!["near".into()])];
+        next.parts.contents = vec![(2, vec!["near".into()])];
         let prepared = reg.prepare_grow("topics/x", 0, &[next], &store).unwrap();
         assert_eq!(prepared.filled, vec![1]);
+        assert!(matches!(
+            part_of(&prepared.fills[0]),
+            crate::wal::ArtifactPart::Content { rank: 1, .. }
+        ));
         for record in &prepared.fills {
             assert_eq!(store.apply(record, 0), 0);
         }
+        let mut again = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        again.parts.contents = vec![(1, vec!["near".into()])];
+        let prepared = reg.prepare_grow("topics/x", 0, &[again], &store).unwrap();
+        assert_eq!(prepared.filled, vec![0]);
         assert_eq!(store.get("topics/x", 0, 0).unwrap().contents.len(), 2);
 
-        // Once the artifact's content row is packed, a further rank cannot be written (T3).
+        // A content after the artifact's content is durable fills the same way.
         store.mark_published("topics/x", 0, 1);
         store.mark_content_published();
         let mut third = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
         third.parts.contents = vec![(2, vec!["third".into()])];
-        let refused = reg
-            .prepare_grow("topics/x", 0, &[third], &store)
-            .unwrap_err();
-        assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("durable extent")),
-            "{refused}"
-        );
+        let prepared = reg.prepare_grow("topics/x", 0, &[third], &store).unwrap();
+        assert_eq!(prepared.filled, vec![1]);
+        for record in &prepared.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        assert_eq!(store.get("topics/x", 0, 0).unwrap().contents.len(), 3);
 
         // An attachment the artifact holds differently is the conflict, by name.
         publish(
@@ -4432,36 +4427,203 @@ mod tests {
         assert!(!refused.to_string().contains("c0"), "{refused}");
     }
 
-    /// **A content fill on a layer whose content requires every member visible is refused**: a
-    /// fill carries no generating set, a set moving only by a page at its rank, and a content
-    /// served on an empty set is served to everyone. The refusal is the one a publication with an
-    /// empty set draws.
+    /// **A content past an artifact's last on a layer whose content requires every member visible
+    /// is taken with the set it is sent with, and refused without one**, whatever the artifact
+    /// has published: a content served on an empty set is served to everyone, the refusal a
+    /// publication with an empty set draws.
     #[test]
-    fn a_content_fill_needing_a_generating_set_is_refused() {
+    fn a_further_content_is_taken_with_its_generating_set_and_refused_without_one() {
+        use crate::membership::IncomingContent;
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut layer = described("topics/all");
         layer.content.supplied[0].require_member_visibility =
             mosaica_types::layer::SuppliedRequirement::All;
         register(&mut reg, layer).unwrap();
+        let mut t0 = incoming("t0", &[1, 2]);
+        t0.contents = vec![IncomingContent::new(
+            vec!["x".into()],
+            vec![EntityId::new(1)],
+        )];
         let put = reg
-            .prepare_put(
-                "topics/all",
-                0,
-                &[incoming("t0", &[1])],
-                &store,
-                &AnyView,
-            )
+            .prepare_put("topics/all", 0, &[t0.clone()], &store, &AnyView)
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
+        store.mark_published("topics/all", 0, 1);
+        store.mark_content_published();
+
         let mut join = crate::membership::IncomingGrowth::from_entities("t0".into(), []);
-        join.parts.contents = vec![(0, vec!["x".into()])];
+        join.parts.contents = vec![(1, vec!["y".into()])];
         let refused = reg
             .prepare_grow("topics/all", 0, &[join], &store)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("carries no generating set")),
+            matches!(&refused, RegistryError::Content { .. }),
             "{refused}"
+        );
+
+        t0.contents.push(IncomingContent::new(
+            vec!["y".into()],
+            vec![EntityId::new(2)],
+        ));
+        let put = reg
+            .prepare_put("topics/all", 0, &[t0], &store, &AnyView)
+            .unwrap();
+        assert_eq!(put.fills.len(), 1);
+        let crate::wal::ArtifactPart::Content {
+            rank,
+            generated_from,
+            ..
+        } = part_of(&put.fills[0])
+        else {
+            panic!("a content fill");
+        };
+        assert_eq!(*rank, 1);
+        let set = ShardSets::from_wal(generated_from).unwrap();
+        assert_eq!(
+            set.get(ShardId::ZERO).map(|set| set.to_vec()),
+            Some(vec![2])
+        );
+        apply_put(&mut reg, &mut store, &put);
+        let record = store.get("topics/all", 0, 0).unwrap();
+        assert_eq!(record.contents.len(), 2);
+        assert_eq!(record.contents[1].generated_from.to_vec(), vec![2]);
+    }
+
+    /// **A content supplied at a withdrawn position is a new content at the next free one**: by a
+    /// `PUT` with the set it was sent with, and by a `PATCH` after the contents the row supplies
+    /// past the last, several in the order supplied. The withdrawn positions stay withdrawn, and
+    /// the fills applied again, as a replay applies them, land where they did.
+    #[test]
+    fn a_content_at_a_withdrawn_position_takes_the_next_free_one() {
+        use crate::membership::{IncomingContent, IncomingGrowth};
+        let entities = |set: &[u64]| set.iter().map(|e| EntityId::new(*e)).collect::<Vec<_>>();
+        // A page joining `set` and one taking it out again, which empties the set and withdraws
+        // the content at `rank`.
+        let withdraw = |reg: &mut LayerRegistry, store: &mut ArtifactStore, layer, rank, set| {
+            for (joining, leaving) in [(entities(set), Vec::new()), (Vec::new(), entities(set))] {
+                let page =
+                    IncomingGrowth::page_of_entities("t0".into(), Some(rank), joining, leaving);
+                let prepared = reg.prepare_grow(layer, 0, &[page], store).unwrap();
+                if let Some(record) = &prepared.growth {
+                    reg.apply(record);
+                    assert_eq!(store.apply(record, 0), 0);
+                }
+            }
+        };
+        let filled = |records: &[WalRecord]| -> Vec<(u16, String, Vec<u32>)> {
+            records
+                .iter()
+                .map(|record| match part_of(record) {
+                    crate::wal::ArtifactPart::Content {
+                        rank,
+                        values,
+                        generated_from,
+                        ..
+                    } => {
+                        let set = ShardSets::from_wal(generated_from).unwrap();
+                        let set = set.get(ShardId::ZERO).map(|set| set.to_vec());
+                        (*rank, values[0].clone(), set.unwrap_or_default())
+                    }
+                    other => panic!("a content fill, not {other:?}"),
+                })
+                .collect()
+        };
+        let held = |store: &ArtifactStore, layer, position| {
+            let record = store.get(layer, 0, 0).unwrap();
+            record.rank_at(position).map(|rank| {
+                let content = &record.contents[rank];
+                let value = content.values.clone().unwrap().remove(0);
+                (value, content.generated_from.to_vec(), content.cardinality)
+            })
+        };
+
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut layer = described("topics/all");
+        layer.content.supplied[0].require_member_visibility =
+            mosaica_types::layer::SuppliedRequirement::All;
+        register(&mut reg, layer).unwrap();
+        let mut t0 = incoming("t0", &[1, 2, 3]);
+        t0.contents = [("a", 1), ("b", 2), ("c", 3)]
+            .map(|(value, member)| IncomingContent::new(vec![value.into()], entities(&[member])))
+            .into();
+        let put = reg
+            .prepare_put("topics/all", 0, &[t0.clone()], &store, &AnyView)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        withdraw(&mut reg, &mut store, "topics/all", 0, &[1]);
+        withdraw(&mut reg, &mut store, "topics/all", 1, &[2]);
+        let put = reg
+            .prepare_put("topics/all", 0, &[t0.clone()], &store, &AnyView)
+            .unwrap();
+        assert_eq!(
+            filled(&put.fills),
+            vec![(3, "a".to_string(), vec![1]), (4, "b".to_string(), vec![2])]
+        );
+        apply_put(&mut reg, &mut store, &put);
+        for record in &put.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        assert_eq!(held(&store, "topics/all", 0), None);
+        assert_eq!(held(&store, "topics/all", 1), None);
+        assert_eq!(
+            held(&store, "topics/all", 2),
+            Some(("c".into(), vec![3], 1))
+        );
+        assert_eq!(
+            held(&store, "topics/all", 3),
+            Some(("a".into(), vec![1], 1))
+        );
+        assert_eq!(
+            held(&store, "topics/all", 4),
+            Some(("b".into(), vec![2], 1))
+        );
+        // A content at a withdrawn position on this layer still needs its set.
+        let mut bare = incoming("t0", &[]);
+        bare.contents = vec![IncomingContent::new(vec!["a".into()], Vec::new())];
+        let refused = reg
+            .prepare_put("topics/all", 0, &[bare], &store, &AnyView)
+            .unwrap_err();
+        assert!(
+            matches!(refused, RegistryError::Content { .. }),
+            "{refused:?}"
+        );
+
+        register(&mut reg, described("topics/x")).unwrap();
+        let mut t0 = incoming("t0", &[1]);
+        t0.contents = ["x", "y"]
+            .map(|value| IncomingContent::new(vec![value.into()], Vec::new()))
+            .into();
+        let put = reg
+            .prepare_put("topics/x", 0, &[t0], &store, &AnyView)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        withdraw(&mut reg, &mut store, "topics/x", 0, &[1]);
+        withdraw(&mut reg, &mut store, "topics/x", 1, &[1]);
+        let mut fill = IncomingGrowth::from_entities("t0".into(), []);
+        fill.parts.contents = vec![
+            (1, vec!["p".into()]),
+            (2, vec!["q".into()]),
+            (0, vec!["r".into()]),
+        ];
+        let prepared = reg.prepare_grow("topics/x", 0, &[fill], &store).unwrap();
+        assert_eq!(prepared.filled, vec![3]);
+        assert_eq!(
+            filled(&prepared.fills),
+            vec![
+                (2, "q".to_string(), Vec::new()),
+                (3, "p".to_string(), Vec::new()),
+                (4, "r".to_string(), Vec::new())
+            ]
+        );
+        for record in &prepared.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        assert_eq!(held(&store, "topics/x", 0), None);
+        assert_eq!(
+            held(&store, "topics/x", 3),
+            Some(("p".into(), Vec::new(), 0))
         );
     }
 
@@ -4567,12 +4729,11 @@ mod tests {
         assert!(prepared.growth.is_some());
     }
 
-    /// **A generating set beside a content fill is refused**, whatever the layer's requirement:
-    /// a fill carries no set, a set moving by a page at its rank, and dropping one the caller supplied
-    /// would serve the content against a set they did not declare. The same set on a new key is
-    /// the publication's own `422`, so the two doors agree.
+    /// **A generating set on a layer whose content tests none is refused at a fill as at a
+    /// publication**: one rule at both doors, so a set the caller supplied is never dropped and
+    /// never carried without meaning.
     #[test]
-    fn a_generating_set_beside_a_content_fill_is_refused_rather_than_dropped() {
+    fn a_generating_set_on_a_layer_testing_none_is_refused_at_a_fill_as_at_a_publication() {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         register(&mut reg, described("topics/t")).unwrap();
@@ -4596,7 +4757,7 @@ mod tests {
             .prepare_put("topics/t", 0, &[with_set], &store, &AnyView)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("a content fill carries none")),
+            matches!(&refused, RegistryError::Content { .. }),
             "{refused:?}"
         );
         assert!(store.get("topics/t", 0, 0).unwrap().contents.is_empty());
@@ -4610,9 +4771,10 @@ mod tests {
             .prepare_put("topics/t", 0, &[new_with_set], &store, &AnyView)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares a generating set, and none of this layer's content requires")),
+            matches!(&refused, RegistryError::Content { .. }),
             "{refused:?}"
         );
+        assert!(store.get("topics/t", 0, 1).is_none());
     }
 
     /// A group-scoped layer, whose artifacts are a set per view of the group.
@@ -4792,7 +4954,18 @@ mod tests {
             Some("q1")
         );
         // Each is served only in its own view: the level projected for q2 holds one artifact.
-        assert_eq!(store.level_in_view("clusters/q", 0, "q2").count(), 1);
+        let declared = mosaica_types::view::DECLARED_INCARNATION;
+        assert_eq!(
+            store.level_in_view("clusters/q", 0, "q2", declared).count(),
+            1
+        );
+        assert_eq!(
+            store
+                .level_in_view("clusters/q", 0, "q2", declared + 1)
+                .count(),
+            0,
+            "another incarnation of the key draws none of this one's"
+        );
 
         // A re-`PUT` of the same key in the same view is the held artifact, not a third.
         let prepared = reg

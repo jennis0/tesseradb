@@ -311,9 +311,17 @@ impl Engine {
             return Ok(None);
         }
         // Another view's artifact is refused here, indistinguishable from one naming nothing.
-        if !self.write.live().with_artifacts(|store| {
-            store.drawn_in_view(&name, level, ordinal, crate::artifacts::view_key(view))
-        }) {
+        let drawn = generation
+            .bundle
+            .manifest
+            .incarnation_of(view)
+            .is_some_and(|incarnation| {
+                self.write.live().with_artifacts(|store| {
+                    let key = crate::artifacts::view_key(view);
+                    store.drawn_in_view(&name, level, ordinal, key, incarnation)
+                })
+            });
+        if !drawn {
             return Ok(None);
         }
         // Reachability, then live suppression — same order as `serve_artifacts`.
@@ -344,6 +352,19 @@ impl Engine {
         else {
             return Ok(None);
         };
+        // A content withdrawn since the verdict's version of the record is not served, so the
+        // artifact it would be served with is not reached either: the test `supplied_values`
+        // makes before it reads a value.
+        if let Some(position) = position {
+            let held = self.write.live().with_artifacts(|store| {
+                store
+                    .get(&name, level, ordinal)
+                    .is_some_and(|record| record.rank_at(position as usize).is_some())
+            });
+            if !held {
+                return Ok(None);
+            }
+        }
         Ok(Some(GatedArtifact {
             name,
             level,
@@ -502,12 +523,21 @@ impl Engine {
         match declaration.drawn_shape() {
             None | Some(crate::shapes::DrawnShape::Derived) => {}
             Some(crate::shapes::DrawnShape::Predicate) => {
-                let held = match self.shapes.get(view, layer, level) {
+                let Some(incarnation) = self.generation().bundle.manifest.incarnation_of(view)
+                else {
+                    return;
+                };
+                let held = match self
+                    .shapes
+                    .get(view, layer, level)
+                    .filter(|held| held.incarnation == incarnation)
+                {
                     Some(held) => held,
                     // Not yet held for this view: nothing warmed the level, so it is built here.
                     None => self.write.live().with_artifacts(|store| {
                         self.shapes.level(
                             view,
+                            incarnation,
                             layer,
                             level,
                             store,

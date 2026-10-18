@@ -17,9 +17,6 @@ use crate::ShardLayout;
 pub struct EmptyShard<'a> {
     pub prefix_dir: &'a Path,
     pub layout: ShardLayout<'a>,
-    /// The dictionary's length: the postings hold one empty record for each term.
-    pub terms: u64,
-    pub small_term_threshold: u32,
     /// Whether `terms/pairs.parquet` is written beside the postings.
     pub pairs: bool,
     pub declared: &'a [DeclaredScalar],
@@ -106,7 +103,8 @@ fn write_empty_dictionary(path: &Path) -> Result<()> {
 /// Write an empty base of every structure `shard` declares under its layout: the postings, the
 /// entity-to-term transpose, each value column with its dictionary and postings, each indexed
 /// text column's index, the record blob, each view's columns of every scoped family, and each
-/// view's segment, permutation, row-to-entity table and field tallies. The unique, edited-items
+/// view's segment, permutation, row-to-entity table and field tallies. The postings hold no
+/// record, since a term past a postings file's last record reads empty. The unique, edited-items
 /// and tenancy indexes of an empty shard hold no run. Every file is fsynced.
 pub fn write_empty_shard(shard: &EmptyShard<'_>) -> Result<EmptyShardWritten> {
     let mut out = Written {
@@ -120,14 +118,10 @@ pub fn write_empty_shard(shard: &EmptyShard<'_>) -> Result<EmptyShardWritten> {
     let postings_rel = layout.postings_rel();
     let postings_path = out.path(&postings_rel);
     let spool_path = terms_dir.join("postings.spool");
-    let mut spool =
-        mosaica_authz::postings::PostingsSpool::create(&spool_path).map_err(io(&spool_path))?;
-    let empty = mosaica_authz::postings::encode_posting(0, &[], shard.small_term_threshold)
+    mosaica_authz::postings::PostingsSpool::create(&spool_path)
+        .map_err(io(&spool_path))?
+        .finish(&postings_path)
         .map_err(io(&postings_path))?;
-    for _ in 0..shard.terms {
-        spool.append(&empty).map_err(io(&spool_path))?;
-    }
-    spool.finish(&postings_path).map_err(io(&postings_path))?;
     out.push(postings_rel);
     if shard.pairs {
         let pairs_rel = layout.pairs_rel();

@@ -324,16 +324,14 @@ def test_a_first_commit_creating_more_items_than_the_size_builds_several_shards(
         db.close()
 
 
-def test_a_size_declared_at_the_first_commit_refuses_a_later_page_past_it(tmp_path):
+def test_a_size_declared_at_the_first_commit_takes_a_later_page_past_it(tmp_path):
     db, rows = small(tmp_path / "db", size=2)
     try:
         assert db.commit().ok
         assert db.status()["shards"] == {"size": 2}
         db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
-        with pytest.raises(Refusal) as raised:
-            db.commit()
-        assert [one["status"] for one in raised.value.report.refusals] == [409]
-        assert db.status()["entity_id_high_water"] == 2
+        assert db.commit().ok
+        assert db.status()["entity_id_high_water"] == 4
     finally:
         db.close()
 

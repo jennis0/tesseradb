@@ -1979,8 +1979,6 @@ fn build_bundle(
                 &mosaica_store::empty_shard::EmptyShard {
                     prefix_dir: &prefix_dir,
                     layout: span.layout(),
-                    terms: term_count,
-                    small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
                     pairs: args.emit_oracle_pairs,
                     declared: &declared,
                     vocabularies: &vocabularies,

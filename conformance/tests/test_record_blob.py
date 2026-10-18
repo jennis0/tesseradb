@@ -26,12 +26,9 @@ the addressing that will serve them is self-consistent.
 
 from __future__ import annotations
 
-import pytest
 from oracle import catalogue as cat
 from oracle import record_blob as rb
 from oracle.identity import by_shard, item_key
-
-pytestmark = pytest.mark.writes_nothing
 
 
 def _blob_tags(manifest: dict) -> set[int]:

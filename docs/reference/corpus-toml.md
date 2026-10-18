@@ -32,7 +32,7 @@ The size of the shards the items are stored in. Without this table the size is 4
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `size` | integer | required | The high water a shard may not pass. A positive integer. A build whose files create more items writes several shards, which a running service serves for reads only. An insert that would take a shard's high water past it is refused. |
+| `size` | integer | required | The high water at which the shard taking new items seals and the next one opens. A positive integer; a size past 4,294,967,295, where the ids end, seals there. A build whose files create more items writes several shards. An edit of a sealed shard's item takes an id the shard has freed or one past its high water, so at a size at or past the end of the ids, the edits of a full shard are refused until a compaction frees ids. |
 
 ## `[[view]]`
 

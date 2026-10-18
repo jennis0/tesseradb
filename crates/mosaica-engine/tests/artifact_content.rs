@@ -926,3 +926,78 @@ fn a_fold_removes_a_deleted_artifacts_content_from_the_disc() {
     assert_eq!(labels_served(&engine), kept.to_vec());
     assert!(!holds_text(&fx.root.join(&engine.generation().prefix), gone));
 }
+
+/// **A dropped view's artifacts leave the disc at the compaction that removes them.** The supplied
+/// content of an artifact in the dropped view is in no file of the prefix that compaction
+/// publishes, before a restart and after one, and a content of the group's other view stays.
+#[test]
+fn a_compaction_removes_a_dropped_views_artifact_content_from_the_disc() {
+    let fx = fixture();
+    let gone = "label-of-the-dropped-view-5e21";
+    let kept = "label-of-the-view-kept-d08a";
+    {
+        let engine = fx.open();
+        engine
+            .create_view_group(mosaica_lifecycle::wal::ViewGroupDeclaration {
+                name: "g".into(),
+                title: None,
+                projection: "none".into(),
+                frame: mosaica_engine::DeclaredFrame {
+                    x_min: 0.0,
+                    x_max: 1000.0,
+                    y_min: 0.0,
+                    y_max: 1000.0,
+                },
+                visibility: None,
+                point_default: None,
+                members: None,
+                metadata: Vec::new(),
+            })
+            .unwrap();
+        for key in ["k", "j"] {
+            engine
+                .create_view("g".into(), key.into(), None, Default::default())
+                .unwrap();
+        }
+        let mut layer = label_layer("topics/g", true);
+        layer.scope = mosaica_types::layer::LayerScope::Group("g".into());
+        layer.views = vec!["g:k".into(), "g:j".into()];
+        engine.register_layer(layer).unwrap();
+        let in_view = |key: &str, view: &str, text: &str| IncomingArtifact {
+            view: Some(view.into()),
+            ..IncomingArtifact::with_content(
+                Some(key.into()),
+                fx.members(0..10),
+                vec![content(text, &fx, 0..10)],
+            )
+        };
+        engine
+            .publish_artifacts(
+                "topics/g".into(),
+                0,
+                vec![in_view("t0", "k", gone), in_view("t1", "j", kept)],
+            )
+            .unwrap();
+        wait_for_content_extents(&fx.root, 1);
+        let before = fx.root.join(&engine.generation().prefix);
+        assert!(
+            holds_text(&before, gone),
+            "the scan finds the content while it is stored"
+        );
+
+        engine.drop_view("g".into(), "k".into()).unwrap();
+        fold(&engine);
+        let after = fx.root.join(&engine.generation().prefix);
+        assert_ne!(after, before);
+        assert!(
+            !holds_text(&after, gone),
+            "no byte of the dropped view's content is in the new prefix"
+        );
+        assert!(holds_text(&after, kept));
+    }
+
+    let engine = fx.open();
+    let prefix = fx.root.join(&engine.generation().prefix);
+    assert!(!holds_text(&prefix, gone));
+    assert!(holds_text(&prefix, kept));
+}

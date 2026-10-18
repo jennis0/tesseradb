@@ -1,15 +1,13 @@
 //! Edits of a shard's items: each takes its new entity in the item's own shard, an id freed
 //! there at tenancy 0 first and then the shard's high water, which runs past the size; a shard
 //! whose ids are spent refuses the edit and changes nothing.
-//!
-//! Written through the engine's several-shard feature.
 
 mod common;
 
 use common::*;
 use mosaica_engine::AcceptError;
 use mosaica_lifecycle::ExecError;
-use mosaica_types::{ShardFull, ShardId, ShardLimit, ShardState, ENTITY_END};
+use mosaica_types::{EntityId, ItemAt, ShardFull, ShardId, ShardState, ENTITY_END};
 
 /// An edit of a sealed shard-0 item takes the ids shard 0 freed at tenancy 0, lowest first, then
 /// shard 0's high water past the size, never an id of the open shard 1; the item keeps its
@@ -82,7 +80,6 @@ fn a_sealed_shard_at_the_end_of_its_ids_refuses_an_edit_and_changes_nothing() {
         matches!(
             refused,
             Err(AcceptError::Exec(ExecError::ShardFull(ShardFull {
-                limit: ShardLimit::End(ENTITY_END),
                 high_water: ENTITY_END,
                 needed: 1,
             })))
@@ -100,7 +97,7 @@ fn a_sealed_shard_at_the_end_of_its_ids_refuses_an_edit_and_changes_nothing() {
 
 /// An edit of an item of the open shard, whose high water is at the size and which holds no id
 /// freed at tenancy 0, is accepted and takes the first id past the size. The size bounds new items
-/// and not edits.
+/// and not edits. The edit's window seals the shard, and the next insert opens shard 2.
 #[test]
 fn an_edit_of_an_open_shard_at_its_size_runs_past_the_size() {
     let built = two_shards();
@@ -113,5 +110,15 @@ fn an_edit_of_an_open_shard_at_its_size_runs_past_the_size() {
     assert_eq!(
         (after.shard, after.entity.raw()),
         (shard(1), TWO_SHARD_SIZE)
+    );
+    publish_buffered(&engine);
+    assert_eq!(
+        side_manifest(&built.root).shards.records[1].state,
+        ShardState::Sealed
+    );
+    let inserted = insert_keyed(&engine, "next", &[true])[0];
+    assert_eq!(
+        items_at(&engine, &[inserted]),
+        vec![Some(ItemAt::new(shard(2), EntityId::new(0)))]
     );
 }

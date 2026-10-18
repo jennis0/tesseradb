@@ -200,8 +200,15 @@ jobs:
       - run: npm --prefix clients/ts ci
       - run: bash scripts/check-docs.sh
 
+  # The suite in each mode on its own runner: `one` builds every corpus as one shard, `many` over
+  # several and leaves out the tests that set their own shard sizes (conformance/README.md).
   conformance:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [one, many]
+    name: conformance (${{ matrix.mode }})
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -241,18 +248,16 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -yq gdb
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
-      - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
-      # The same suite with every corpus over several shards: only the tests marked
-      # `writes_nothing` run (conformance/README.md).
-      - name: the conformance tests that write nothing, every corpus over several shards
+      - name: the conformance suite, ${{ matrix.mode }} shard mode
         env:
-          MOSAICA_CONFORMANCE_SHARDS: many
+          MOSAICA_CONFORMANCE_SHARDS: ${{ matrix.mode }}
         run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
       # The oracle's own tests — everything in `reference/tests` that does not build from the Phase
       # 0 corpus. Run from `reference/` because that is where `pyproject.toml`'s `testpaths` and the
       # node ids below are rooted; a `--deselect` given a repo-relative path matches nothing and is
       # not an error, which is precisely the silent exclusion this step exists to stop being.
       - name: the oracle's own tests, minus what needs the Phase 0 corpus
+        if: matrix.mode == 'one'
         working-directory: reference
         run: |
           .venv/bin/pytest -v tests \

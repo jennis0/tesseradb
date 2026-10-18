@@ -16,6 +16,7 @@ mod common;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
@@ -27,9 +28,9 @@ use mosaica_build::config::{Config, Schema};
 use mosaica_build::{build, BuildArgs};
 use mosaica_engine::{AcceptError, Engine, EngineConfig};
 use mosaica_lifecycle::command::UnallocatedRow;
-use mosaica_lifecycle::{Wal, WalRecord, WalScalar};
+use mosaica_lifecycle::{ChangeOp, Wal, WalRecord, WalScalar};
 use mosaica_store::read::{open_bundle, ColumnsRef, ScalarSlice};
-use mosaica_types::EntityId;
+use mosaica_types::{EntityId, ShardId};
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
@@ -617,6 +618,72 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     let engine = engine_over(tmp.path(), &root, config());
     assert_eq!(bound(&engine), None, "nor does a restart bind it");
     drop(engine);
+}
+
+/// **A window refused after its ids were assigned gives them back.** The next window takes the
+/// freed ids the refused one took, lowest tenancy first, and then the high water it started from,
+/// in this process and after a restart that follows a publication.
+#[test]
+fn a_refused_window_gives_back_the_ids_it_took() {
+    for restart in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("bundle");
+        build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
+        seed_freed(&root, ShardId::ZERO, 10, &[(1, &[8]), (2, &[6])]);
+        let mut engine = engine_over(tmp.path(), &root, config());
+        let rows = |engine: &Engine, keys: [&str; 3]| -> Vec<UnallocatedRow> {
+            keys.iter()
+                .map(|key| UnallocatedRow {
+                    view: "s0".to_string(),
+                    join: None,
+                    descriptors: vec![b"0".to_vec()],
+                    x: 1.0,
+                    y: 1.0,
+                    scalars: vec![WalScalar::Utf8(key.to_string())],
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    scoped: Vec::new(),
+                })
+                .collect()
+        };
+
+        engine
+            .ingest_rows(
+                rows(&engine, ["sales", "", "sales"]),
+                "batch-refused".to_string(),
+                [1u8; 32],
+            )
+            .expect_err("the empty key refuses the window");
+        if restart {
+            let served = served_n(&root);
+            engine
+                .accept_changes(vec![(item(EntityId::new(0)), ChangeOp::Suppress)])
+                .unwrap();
+            tick_until(&engine, "a publication", Duration::from_secs(30), || {
+                served_n(&root) > served
+            });
+            drop(engine);
+            engine = engine_over(tmp.path(), &root, config());
+        }
+        let given = engine
+            .ingest_rows(
+                rows(&engine, ["sales", "sales", "sales"]),
+                "batch-accepted".to_string(),
+                [2u8; 32],
+            )
+            .expect("the ingest is accepted");
+        let issued: Vec<(u64, u16)> = given
+            .iter()
+            .map(|entity| {
+                let id = engine.mosaica_id_of(*entity).unwrap();
+                (entity.raw(), tenancy_of(id))
+            })
+            .collect();
+        assert_eq!(
+            issued,
+            vec![(8, 1), (6, 2), (10, 0)],
+            "the refused window's ids are issued again (restart: {restart})"
+        );
+    }
 }
 
 /// **Case 5**: a declared vocabulary is unaffected. Its column never carries `WalScalar::Utf8` at

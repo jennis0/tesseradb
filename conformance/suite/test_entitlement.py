@@ -39,8 +39,6 @@ from .canonical import Streamed
 from .driver import StageInvarianceViolation, StageResult, check
 from .entitlement import CappedDelta, Delta, Nothing, Rows, Uncheckable, diff
 
-pytestmark = pytest.mark.writes_nothing
-
 ZOOM = 3
 OFFSET = 2
 VIEWPORT = Viewport("s0", ZOOM, bbox=(0.0, 0.0, 65536.0, 65536.0), underlay_offset=OFFSET)

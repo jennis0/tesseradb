@@ -372,12 +372,7 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(e @ ExecError::ShardsExhausted(_)) => ApiError::Conflict(e.to_string()),
         // The detail names the layer spaces given, or the level's need and its space's room.
         AcceptError::Exec(ExecError::LayerSpaceFull { detail }) => ApiError::Conflict(detail),
-        AcceptError::Exec(ExecError::ShardSize(e @ mosaica_types::ShardSizeError::Zero)) => {
-            ApiError::Contract(e.to_string())
-        }
-        AcceptError::Exec(ExecError::ShardSize(
-            e @ mosaica_types::ShardSizeError::BelowHighWater { .. },
-        )) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(ExecError::ShardSize(e)) => ApiError::Contract(e.to_string()),
         // Forwarded: the detail names a vocabulary and its declared width. Widening the code space
         // instead would recolour every coded row.
         AcceptError::Exec(ExecError::VocabularyRefused { detail }) => ApiError::Contract(detail),
@@ -418,8 +413,6 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),
-        // The detail names the shard count and what to serve to write.
-        e @ AcceptError::SeveralShards { .. } => ApiError::Conflict(e.to_string()),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))

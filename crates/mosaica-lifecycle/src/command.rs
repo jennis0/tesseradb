@@ -436,8 +436,8 @@ pub enum ExecError {
     /// So the 500 means "at least one item is in force but not durable, and every deny in the
     /// request was attempted", never "the batch was refused".
     Wal(WalError),
-    /// A batch needs more ids than the shard's size or the end of its ids leaves → HTTP **409**,
-    /// no effect.
+    /// A batch's edits need more ids than the end of their shard's ids leaves → HTTP **409**, no
+    /// effect.
     ShardFull(ShardFull),
     /// A batch's new items need a point shard past the last a bundle holds → HTTP **409**, no
     /// effect.
@@ -445,8 +445,8 @@ pub enum ExecError {
     /// Every layer space has been given, or a level needs more blocks than its layer space has
     /// left → HTTP **409**, no effect. The detail gives the figures.
     LayerSpaceFull { detail: String },
-    /// A shard size `mosaica_types::check_shard_size` refuses → HTTP **422** for a size of zero,
-    /// **409** for one below the high water. No effect.
+    /// A shard size `mosaica_types::check_shard_size` refuses, a size of zero → HTTP **422**. No
+    /// effect.
     ShardSize(ShardSizeError),
     /// This `batch_id` was already accepted, or is held in an open window, with **different**
     /// body bytes → HTTP 409 (contracts §3.4). The retry has no effect, and **a held original is
