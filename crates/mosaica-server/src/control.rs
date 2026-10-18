@@ -19,11 +19,11 @@ use axum::{Json, Router};
 
 use sha2::{Digest, Sha256};
 
-use mosaica_engine::{MetaView, ScopedScalar};
+use mosaica_engine::{MetaView, NamedTarget, ScopedScalar};
 use mosaica_lifecycle::ChangeOp;
 
 use mosaica_types::view::ViewMetadataValue;
-use mosaica_types::{ItemAt, Target};
+use mosaica_types::ItemAt;
 
 use crate::address::Table;
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
@@ -721,36 +721,36 @@ fn run_changes(
     }
     let merged = crate::address::Merged::of(tables)?;
 
-    let mut applied: Vec<ChangeOp> = Vec::new();
-    let answered = with_fresh_names(|| {
-        let crate::address::Names {
-            tables: named,
-            ignored,
-            at,
-        } = merged.name_targets(state)?;
-        let mut changes: Vec<(Target, ChangeOp)> = Vec::with_capacity(ops.len());
-        let mut refused = Vec::new();
-        for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
-            match named[0] {
-                Ok(target) => changes.push((target, *op)),
-                Err(reason) if strict => {
-                    return Err(crate::address::strict_refusal("the request", index, reason))
-                }
-                Err(reason) => refused.push(crate::address::refused_json(index, reason)),
+    let crate::address::Names {
+        tables: named,
+        ignored,
+        at,
+    } = merged.name_targets(state)?;
+    let mut changes: Vec<(NamedTarget, ChangeOp)> = Vec::with_capacity(ops.len());
+    let mut refused = Vec::new();
+    for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
+        match named[0] {
+            Ok(target) => changes.push((target, *op)),
+            Err(reason) if strict => {
+                return Err(crate::address::strict_refusal("the request", index, reason))
             }
+            Err(reason) => refused.push(crate::address::refused_json(index, reason)),
         }
-        let done = ChangesDone {
-            accepted: changes.len(),
-            refused,
-            ignored,
-        };
-        if changes.is_empty() {
-            return Ok(Ok(done));
-        }
-        applied = changes.iter().map(|(_, op)| *op).collect();
-        Ok(state.engine.accept_changes_at(changes, at).map(|()| done))
-    })?;
-    answered.map_err(|e| map_change_batch_error(&applied, e))
+    }
+    let done = ChangesDone {
+        accepted: changes.len(),
+        refused,
+        ignored,
+    };
+    if changes.is_empty() {
+        return Ok(done);
+    }
+    let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
+    state
+        .engine
+        .accept_changes_at(changes, at)
+        .map(|()| done)
+        .map_err(|e| map_change_batch_error(&applied, e))
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has

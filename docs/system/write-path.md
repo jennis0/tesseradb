@@ -255,11 +255,14 @@ item where it is now. The generation counts the windows that committed an edit, 
 retired entities and the folds that freed ids. A command's names are resolved against one
 generation, and the command carries that generation's counts to the executor. One that finds an
 edit committed since looks up in the edited-items map where each entity it names that the overlay
-deletes has moved. It is refused as stale, and its names are resolved again, where a fold has since
-freed ids, one of which may now name another item, or has retired entities after an edit, which can
-drop the entry saying where an item went. `/control/changes`, a publication and a growth each
-resolve their names again up to three times. A deny that reaches the old entity before the edit
-commits is carried by the check above: the edit is decided again.
+deletes has moved. Its names are stale where a fold has since freed ids, one of which may now name
+another item, or has retired entities after an edit, which can drop the entry saying where an item
+went. A publication and a growth with stale names are refused, and resolve their names again up to
+three times. A change is never refused for stale names: it carries the `mosaica_id` of each item it
+names, and the write executor, which is the only thread that moves an item, finds each item again
+by it, so the change reaches the entity the item holds when the change applies, or nothing where the
+item is gone. A deny that reaches the old entity before the edit commits is carried by the check
+above: the edit is decided again.
 
 The edited-items map says which entity holds each edited item. It has two directions, number to
 entity and entity to number, each a set of run files like a unique field's: a flush writes one run
@@ -294,9 +297,12 @@ At close, the whole window is sorted and allocated from the id allocator in one 
 record per submission is appended, carrying its rows and what every row of the request became, and
 one fsync covers the entire window. Only then is the window applied to build a new generation, the
 pointer is swapped, and every waiting request is acknowledged with every row's `mosaica_id`. If
-the append or the fsync fails, or the window is refused after its ids are taken, the window applies
-nothing: every id it took goes back to its shard to be issued again, every waiter is refused, and a
-caller retries under the same batch id. A retry of an accepted batch answers the `mosaica_id`s its
+the append or the fsync fails, the window applies nothing: every id it took goes back to its shard
+to be issued again, every waiter is refused, and a caller retries under the same batch id. A window
+refused at its close for what its batches carry, such as a vocabulary with no codes left for their
+keys or a layer refusing what they name, gives back its ids and its codes, and each of its batches
+closes again in a window of its own, in the order they were admitted. Only a batch that cannot
+close alone is refused, with its own reason, and the others commit as if it had not been sent. A retry of an accepted batch answers the `mosaica_id`s its
 first acceptance did, and the rows it refused, after a restart too, since the record carries them.
 The index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
 until the flush whose WAL rotation removes the member holding its record, and a retry sent after

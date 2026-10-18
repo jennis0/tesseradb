@@ -19,7 +19,6 @@ use mosaica_lifecycle::command::{
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use mosaica_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
-use mosaica_types::Target;
 
 use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
@@ -207,7 +206,7 @@ pub(crate) enum Command {
     /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
     /// ([`Command::is_never_shed`]).
     Changes {
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
         stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
@@ -327,7 +326,13 @@ mod tests {
             );
             let cmd = Command::Changes {
                 changes: vec![(
-                    Target::Item(mosaica_types::ShardId::ZERO, mosaica_types::EntityId::new(1)),
+                    crate::edited::NamedTarget {
+                        target: mosaica_types::Target::Item(
+                            mosaica_types::ShardId::ZERO,
+                            mosaica_types::EntityId::new(1),
+                        ),
+                        item: None,
+                    },
                     op,
                 )],
                 stamp: Default::default(),

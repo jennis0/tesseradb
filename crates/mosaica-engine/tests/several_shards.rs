@@ -797,9 +797,9 @@ fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
     let engine = several.open_writing();
     let moved = insert_keyed(&engine, "moved", &[true])[0];
     let table = by_identifier_and_id(&[(moved.raw(), key_id("moved-0"))]);
-    let named = engine.name_items(&table).unwrap();
+    let named = engine.name_targets(&table).unwrap();
     let resolved = named.verdicts[0].clone().expect("the row names the item");
-    assert_eq!(resolved.shard, shard(1));
+    assert!(matches!(resolved.target(), Target::Item(at, _) if at == shard(1)));
 
     let receipt = engine
         .ingest(mosaica_engine::IngestRequest {
@@ -831,7 +831,7 @@ fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
     );
 
     engine
-        .accept_changes_at(vec![(resolved.target(), ChangeOp::Delete)], named.at)
+        .accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at)
         .unwrap();
     let gone = |engine: &Engine| {
         assert_eq!(engine.resolve_targets(&[moved]).unwrap(), vec![None]);

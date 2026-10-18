@@ -227,6 +227,111 @@ pub(crate) fn follow_changes(
     Ok(())
 }
 
+/// What one change names, as the request naming it was resolved: its target, and for an item, the
+/// item's `mosaica_id`, which names it wherever an edit or a fold has put it since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedTarget {
+    pub(crate) target: Target,
+    pub(crate) item: Option<MosaicaId>,
+}
+
+impl NamedTarget {
+    /// The target as resolved.
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// `targets` as `generation` holds them: each item's `mosaica_id` is taken there, and an item
+    /// of a shard `generation` does not hold has none.
+    pub(crate) fn all(
+        key: &IdentityKey,
+        generation: &Generation,
+        targets: &[Target],
+    ) -> Result<Vec<NamedTarget>, StoreError> {
+        let mut named: Vec<NamedTarget> = targets
+            .iter()
+            .map(|target| NamedTarget {
+                target: *target,
+                item: None,
+            })
+            .collect();
+        let items =
+            mosaica_types::by_shard(targets.iter().enumerate().filter_map(|(at, target)| {
+                match target {
+                    Target::Item(shard, entity) => Some((*shard, (at, *entity))),
+                    Target::Artifact(..) => None,
+                }
+            }));
+        for (id, items) in items {
+            let Some(shard) = generation.shard(id) else {
+                continue;
+            };
+            let entities: Vec<EntityId> = items.iter().map(|(_, entity)| *entity).collect();
+            let ids = ids_of_numbers(key, shard, &numbers_of(shard, &entities)?)?;
+            for ((at, _), id) in items.iter().zip(ids) {
+                named[*at].item = Some(id);
+            }
+        }
+        Ok(named)
+    }
+}
+
+/// `changes`, resolved at `stamp`, as they apply in `generation`. A change naming an entity an edit
+/// has moved an item away from also reaches the item where it is now ([`follow_changes`]). Where
+/// the names are stale by [`Since`]'s rule, each item is found again by its `mosaica_id`, and the
+/// change reaches the entity the item holds now, or none where the item's number has been issued
+/// again, since the item is gone.
+pub(crate) fn changes_in(
+    stamp: Stamp,
+    generation: &Generation,
+    key: &IdentityKey,
+    changes: Vec<(NamedTarget, mosaica_lifecycle::ChangeOp)>,
+) -> Result<Vec<(Target, mosaica_lifecycle::ChangeOp)>, StoreError> {
+    let mut targets: Vec<(Target, mosaica_lifecycle::ChangeOp)> = changes
+        .iter()
+        .map(|(named, op)| (named.target, *op))
+        .collect();
+    if stamp.follow_since(generation, |generation| {
+        follow_changes(generation, &mut targets)
+    }) {
+        return Ok(targets);
+    }
+    let mut now = Vec::with_capacity(changes.len());
+    for (named, op) in changes {
+        let target = match named.item {
+            Some(id) => match item_now(key, generation, id)? {
+                Some(target) => target,
+                None => continue,
+            },
+            None => named.target,
+        };
+        now.push((target, op));
+    }
+    Ok(now)
+}
+
+/// The entity the item `id` names holds in `generation`: of its number's entries the newest it has
+/// not deleted, or the newest where it has deleted them all, or the number itself where it has
+/// none. `None` where `id` names no number at its tenancy.
+fn item_now(
+    key: &IdentityKey,
+    generation: &Generation,
+    id: MosaicaId,
+) -> Result<Option<Target>, StoreError> {
+    let Some((shard, number)) = number_named(key, generation, id) else {
+        return Ok(None);
+    };
+    let entries = entries_of(shard, &[narrow(number)])?.remove(0);
+    let entity = entries
+        .iter()
+        .rev()
+        .find(|entity| !shard.overlay.is_deleted(**entity) && holds(shard, **entity))
+        .or(entries.last())
+        .copied()
+        .unwrap_or(number);
+    Ok(Some(Target::Item(shard.id(), entity)))
+}
+
 /// Every set of `sets` following moves, each in its own shard of `generation`.
 fn follow_sets(
     generation: &Generation,

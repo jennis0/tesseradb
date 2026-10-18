@@ -308,16 +308,15 @@ impl Executor {
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
             Command::Changes {
-                mut changes,
+                changes,
                 stamp,
                 reply,
             } => {
-                if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                    crate::edited::follow_changes(generation, &mut changes)
-                }) {
-                    reply.fail(ExecError::Stale);
-                    return;
-                }
+                let changes = match self.changes_now(changes, stamp) {
+                    Ok(changes) if changes.is_empty() => return reply.ack(()),
+                    Ok(changes) => changes,
+                    Err(e) => return reply.fail(e),
+                };
                 let mut entries = vec![DenyEntry {
                     changes,
                     reply: Some(reply),

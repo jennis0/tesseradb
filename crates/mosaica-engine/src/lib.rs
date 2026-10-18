@@ -99,7 +99,7 @@ pub use config::{
 pub use control::{
     AddressTable, AddressValue, GrownMembership, NamedItems, NamedTargets, PublishedArtifacts,
 };
-pub use edited::Stamp;
+pub use edited::{NamedTarget, Stamp};
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;

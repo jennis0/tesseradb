@@ -50,7 +50,7 @@ impl Executor {
                 break;
             };
             let Command::Changes {
-                mut changes,
+                changes,
                 stamp,
                 reply,
             } = command
@@ -63,12 +63,17 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
-            if !stamp.follow_since(&self.generation.load_full(), |generation| {
-                crate::edited::follow_changes(generation, &mut changes)
-            }) {
-                reply.fail(ExecError::Stale);
-                continue;
-            }
+            let changes = match self.changes_now(changes, stamp) {
+                Ok(changes) if changes.is_empty() => {
+                    reply.ack(());
+                    continue;
+                }
+                Ok(changes) => changes,
+                Err(e) => {
+                    reply.fail(e);
+                    continue;
+                }
+            };
             held += changes.len();
             entries.push(DenyEntry {
                 changes,
@@ -82,6 +87,25 @@ impl Executor {
         self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
+    }
+
+    /// A request's changes, resolved at `stamp`, as they apply now: on this thread, which is the
+    /// only one that moves an item, so nothing moves one between this and the apply. `Err` where
+    /// the edited items cannot be read.
+    pub(super) fn changes_now(
+        &self,
+        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
+        stamp: crate::edited::Stamp,
+    ) -> std::result::Result<Vec<(Target, ChangeOp)>, ExecError> {
+        crate::edited::changes_in(
+            stamp,
+            &self.generation.load_full(),
+            &self.deps.identity_key,
+            changes,
+        )
+        .map_err(|e| ExecError::Store {
+            detail: e.to_string(),
+        })
     }
 
     /// Add one entry deleting every artifact that depends on one this window deletes. Only

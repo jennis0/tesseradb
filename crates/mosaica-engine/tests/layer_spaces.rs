@@ -114,12 +114,13 @@ fn an_identifier_routes_by_its_kind() {
         columns: Vec::new(),
     };
     let named = engine.name_targets(&table).unwrap();
-    assert_eq!(named.verdicts[0], Ok(Target::Artifact(space, entity)));
+    let target = |row: usize| named.verdicts[row].clone().map(|named| named.target());
+    assert_eq!(target(0), Ok(Target::Artifact(space, entity)));
     assert_eq!(
         named.verdicts[1],
         Err(Refusal::UnknownMosaicaId { row: 1 })
     );
-    assert_eq!(named.verdicts[2], Ok(Target::Item(ShardId::ZERO, point)));
+    assert_eq!(target(2), Ok(Target::Item(ShardId::ZERO, point)));
     assert_eq!(
         named.verdicts[3],
         Err(Refusal::UnknownMosaicaId { row: 3 })

@@ -899,7 +899,7 @@ impl WritePath {
     /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
     pub(crate) fn submit_changes(
         &self,
-        changes: Vec<(Target, ChangeOp)>,
+        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
         stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
