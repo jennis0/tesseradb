@@ -1996,57 +1996,81 @@ fn routes(engine: &Engine, ids: &[mosaica_types::MosaicaId]) -> Routes {
 /// What the live prefix holds of the artifact at `entity` of `space`: whether any file holds its
 /// key, whether a content extent of its space holds its row, and the ordinals of `space` each
 /// shard's member packs list.
+///
+/// The engine writes and reclaims files in the prefix while this reads it, so a reading during
+/// which a file it listed went, or `CURRENT` moved, is begun again: the answer is one listing's.
 fn held_on_disc(
     root: &std::path::Path,
     space: mosaica_types::LayerSpace,
     entity: EntityId,
 ) -> (bool, bool, Vec<Vec<u32>>) {
-    let prefix = root.join(current_prefix(root));
-    let all = files_under(&prefix);
+    const READINGS: usize = 100;
+    (0..READINGS)
+        .find_map(|_| held_in_one_listing(root, space, entity))
+        .unwrap_or_else(|| panic!("the prefix changed during each of {READINGS} readings"))
+}
+
+/// [`held_on_disc`] over one listing of the prefix, or `None` where a file it listed or the
+/// prefix itself went while it read.
+fn held_in_one_listing(
+    root: &std::path::Path,
+    space: mosaica_types::LayerSpace,
+    entity: EntityId,
+) -> Option<(bool, bool, Vec<Vec<u32>>)> {
+    let named = current_prefix(root);
+    let prefix = root.join(&named);
+    let read = |path: &std::path::Path| match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!("{}: {e}", path.display()),
+    };
     let key = ERASED.as_bytes();
-    let holds_key = all.iter().any(|path| {
-        std::fs::read(path)
-            .unwrap()
-            .windows(key.len())
-            .any(|window| window == key)
-    });
-    let manifest = side_manifest(root);
-    let holds_content = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space)
-        .into_iter()
-        .flat_map(|record| &record.content_extents)
-        .any(|extent| {
-            let bytes = std::fs::read(prefix.join(&extent.hasrow)).unwrap();
-            croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
-                .expect("a has-row bitmap")
-                .contains(entity.raw() as u32)
-        });
-    let listed = manifest
-        .shards
-        .records
-        .iter()
-        .map(|record| {
-            let mut ordinals: Vec<u32> = record
-                .membership_extents
-                .iter()
-                .filter(|extent| extent.space == space)
-                .flat_map(|extent| {
-                    let pack = mosaica_store::membership::LevelPack::open(
-                        &prefix.join(&extent.path),
-                        mosaica_store::membership::PackKind::Members,
-                    )
-                    .unwrap();
-                    pack.iter()
-                        .filter(|(_, blob)| !blob.is_empty())
-                        .map(|(ordinal, _)| ordinal)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            ordinals.sort_unstable();
-            ordinals.dedup();
-            ordinals
-        })
-        .collect();
-    (holds_key, holds_content, listed)
+    let mut holds_key = false;
+    for path in files_under(&prefix) {
+        holds_key |= read(&path)?.windows(key.len()).any(|window| window == key);
+    }
+    let manifest = match mosaica_store::read::open_bundle(root) {
+        Ok(bundle) => bundle.partitions[PARTITION].side_manifest(),
+        Err(_) if current_prefix(root) != named => return None,
+        Err(e) => panic!("the bundle opens: {e}"),
+    };
+    let mut holds_content = false;
+    let extents = mosaica_store::manifest::layer_space(&manifest.layer_spaces, space)
+        .map_or(&[][..], |record| record.content_extents.as_slice());
+    for extent in extents {
+        let bytes = read(&prefix.join(&extent.hasrow))?;
+        holds_content |= croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+            .expect("a has-row bitmap")
+            .contains(entity.raw() as u32);
+    }
+    let mut listed = Vec::new();
+    for record in &manifest.shards.records {
+        let mut ordinals = Vec::new();
+        for extent in record
+            .membership_extents
+            .iter()
+            .filter(|e| e.space == space)
+        {
+            let path = prefix.join(&extent.path);
+            let pack = match mosaica_store::membership::LevelPack::open(
+                &path,
+                mosaica_store::membership::PackKind::Members,
+            ) {
+                Ok(pack) => pack,
+                Err(_) if !path.exists() => return None,
+                Err(e) => panic!("{}: {e}", path.display()),
+            };
+            ordinals.extend(
+                pack.iter()
+                    .filter(|(_, blob)| !blob.is_empty())
+                    .map(|(ordinal, _)| ordinal),
+            );
+        }
+        ordinals.sort_unstable();
+        ordinals.dedup();
+        listed.push(ordinals);
+    }
+    (current_prefix(root) == named).then_some((holds_key, holds_content, listed))
 }
 
 /// The shards the served side-manifest lists as yet to compact `entity`'s deletion in `space`,
