@@ -235,7 +235,7 @@ export type GrowingArtifact = {
   key: string;
   /** The key of the view the artifact belongs to, as on a publication. */
   view?: string | null;
-  /** Absent, `members` join the membership. Present, `members` and `leaving` move the generating set of the content at this rank. */
+  /** Absent, `members` join the membership. Present, `members` and `leaving` move the generating set of the content at this rank, its position among the artifact's contents, which keeps its number when a content before it is withdrawn. */
   rank?: number | null;
   /** Members joining. */
   members?: MemberTable | null;
@@ -245,7 +245,7 @@ export type GrowingArtifact = {
   parent?: string[];
   /** The artifact this one is attached to. */
   attached_to?: Attachment | null;
-  /** Contents by rank. */
+  /** Contents by rank, each a position among the artifact's contents. A content at a withdrawn rank is `409`, naming the next free rank. */
   content?: {rank: number; values: string[]}[];
   /** As on a publication. */
   bbox?: number[] | null;
@@ -393,7 +393,7 @@ export type ArtifactsPublished = PublicationAck & {
  * @category Control plane
  */
 export type MembershipsGrown = PublicationAck & {
-  /** One per artifact in the order sent. */
+  /** One per artifact in the order sent. `withdrawn` is the rank of the content the row withdrew by emptying its generating set. */
   artifacts: {key: string; mosaica_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
   /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
   refused: RefusedMember[];
@@ -891,10 +891,10 @@ export class Control {
   }
 
   /**
-   * `PUT /control/shards`: declares the shard's size, `{size}`, the high water an ingest may not
-   * take it past. `201` when the size changed, `200` when the shard already had it, `409` for a
-   * size below the shard's high water or a bundle of several shards, which takes no write, `422`
-   * for a size of zero.
+   * `PUT /control/shards`: declares the shard size, `{size}`, the high water at which the shard
+   * taking new items seals and the next one opens. A size at or below that shard's high water
+   * seals it. `201` when the size changed, `200` when the bundle already had it, `422` for a size
+   * of zero.
    */
   declareShards(body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/shards', waiting(options)), body, options);
@@ -1003,8 +1003,9 @@ export class Control {
 
   /**
    * `POST /control/compact`: asks for a compaction, which removes deleted rows, and is answered
-   * `202` before it runs. A request made while a compaction runs is dropped; the `compaction`
-   * object of `status()` shows what happened.
+   * `202` before it runs. The server compacts every shard with something to reclaim, one after
+   * another. A request made while a compaction runs is held until that compaction lands. The
+   * `compaction` object of `status()` shows what happened.
    */
   compact(options: CallOptions = {}): Promise<Answer> {
     return this.send('POST', '/control/compact', options, '');

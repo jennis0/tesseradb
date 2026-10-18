@@ -355,17 +355,15 @@ class Database:
     def declare_shards(self, size: int) -> dict:
         """Declare the size of the shards the items are stored in, and return the `[shards]` table.
 
-        The size is the high water a shard may not pass. Without this declaration it is
-        4,026,531,840.
+        The size is the high water at which the shard taking new items seals and the next one
+        opens. Without this declaration it is 4,026,531,840.
 
         - `size`: a positive integer.
 
         Before the first commit the size is written into `schema.toml`, and a first commit whose
-        tables create more items than that is built in several shards. A database of several
-        shards is served for reads only: every write a later commit sends is refused with `409`.
-        After a first commit of one shard, the next `commit()` sends the size where the server
-        holds another; a page of rows that would take the shard past it is refused with `409`
-        while the other pages are sent, and a size below the database's high water is refused.
+        tables create more items than that is built in several shards. After the first commit, the
+        next `commit()` sends the size where the server holds another. A size at or below the
+        open shard's high water seals it, and new items go to the next shard.
 
             db.declare_shards(50_000_000)
         """
@@ -1794,15 +1792,17 @@ class Database:
         - `key`: the label's key.
         - `items`: the items to take out, as for `remove`: a list of `mosaica_id`s, or a table
           whose columns are `mosaica_id` and unique attributes.
-        - `rank`: which of the label's texts, where it has several. The default is 0, the first.
+        - `rank`: which of the label's texts, where it has several, by its position among them.
+          A rank keeps its number when a text before it is withdrawn. The default is 0.
         - `level`: the level the label is at. The default is 0.
         - `view`: the view the label belongs to, on a layer scoped to a group.
         - `strict`: `True` refuses the whole request at a row that names no item, or names two.
 
         A row naming no item, or two, is refused and the report lists it; the other rows leave.
-        Columns are read and ignored as for `remove`. Taking out every item withdraws the text;
-        insert it again to replace it. A call the server refuses raises `Refusal`, with the report
-        as its `report`.
+        Columns are read and ignored as for `remove`. Taking out every item withdraws the text,
+        and its rank is never taken again: inserting the label with the same texts is refused,
+        naming the next free rank. A call the server refuses raises `Refusal`, with the report as
+        its `report`.
         """
         self._refuse_before_the_first_commit("leave")
         table, ignored = self._addressed(items, "leave")
@@ -1837,9 +1837,10 @@ class Database:
     def compact(self) -> dict:
         """Ask the server to remove the rows of deleted items from disk now.
 
-        It returns `{}` once the server has accepted the request, before the work is done. A
-        request made while a compaction runs is dropped; the `compaction` block of `status()`
-        shows what happened.
+        It returns `{}` once the server has accepted the request, before the work is done. The
+        server compacts every shard with something to reclaim, one after another. A request made
+        while a compaction runs is held until that compaction lands. The `compaction` block of
+        `status()` shows what happened.
         """
         self._refuse_before_the_first_commit("compact")
         return _accepted(self.control.compact(), "compact")

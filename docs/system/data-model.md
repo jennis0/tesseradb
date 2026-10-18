@@ -122,18 +122,22 @@ next has a different `mosaica_id` ([freed entity ids](write-path.md#freed-entity
 rules).
 
 The entity ids come from a point shard, a space the items are numbered in, and an entity id names
-an item only together with its shard. A shard's size bounds its high water, the id past the highest
-it has issued. The size is `[shards] size` in the declaration a build reads, or what
-`PUT /control/shards` declares at a running service, and 4,026,531,840 where neither declares one.
-A build numbers its items in one sequence and cuts it into shards at the size: shard k holds the
-items numbered from k × size, each at its number less k × size, so every shard but the last holds
-`size` items, and a corpus no larger than the size is one shard. Each shard has an identity,
-SHA-256 over the bundle's `MANIFEST.json` digest and the shard's number, under which caches key
-what they hold of that shard. A size below the high water is refused.
-[Admission](write-path.md#admission) says how an ingest batch is counted against it.
+an item only together with its shard. One shard at a time is open to new items. The shard size is
+the high water, the id past the highest a shard has issued, at which the open shard seals. The size
+is `[shards] size` in the declaration a build reads, or what `PUT /control/shards` declares at a
+running service, and 4,026,531,840 where neither declares one. A build numbers its items in one
+sequence and cuts it into shards at the size: shard k holds the items numbered from k × size, each
+at its number less k × size, so every shard but the last holds `size` items, and a corpus no larger
+than the size is one shard. Each shard has an identity, SHA-256 over the bundle's `MANIFEST.json`
+digest and the shard's number, under which caches key what they hold of that shard.
 
-**Not built yet:** writes to a bundle of several shards, which a running service serves for reads
-only ([write path](write-path.md#what-is-not-built)).
+At a running service, new items take the ids a compaction freed in the shard holding the most of
+them, where that is at least one in 1,024 of the size, and otherwise the open shard's freed ids and
+then ids past its high water. A window that takes the open shard to the size seals it and opens the
+next shard for the items left. Lowering the size to the open shard's high water or below seals it,
+and the next shard opens when a new item needs it. A sealed shard stays sealed. An edit takes its
+new entity in its item's shard, and may carry a sealed shard's high water past the size.
+[Admission](write-path.md#admission) gives the rule.
 
 The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in

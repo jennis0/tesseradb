@@ -1,13 +1,15 @@
 # Sharding: several entity spaces in one process
 
-**Status:** design, 2026-10-09. Stages 0 to 4 are built: `count_ranges`; reuse of a deleted item's
+**Status:** design, 2026-10-09. Stages 0 to 5 are built: `count_ranges`; reuse of a deleted item's
 number at the next tenancy; the shard as a parameter, under `shards/<k>/`, and its declared size;
 layer spaces, with every artifact and layer identified in its layer's own space and its records
-stored there; and reading several shards. A build writes several shards past the declared size, a
-running service opens such a bundle for reads only, and every read route combines over the shards
-as §3 says. Stage 1's churn on Tree of Life (§8.4) and stage 4's measurements (§8.1, §8.2) are
-still to run. Nothing else in this document is built. Each section says what the code does today
-and what changes.
+stored there; reading several shards; and writing them. A build writes several shards past the
+declared size, and every read route combines over the shards as §3 says. A running service places
+new items, seals a shard at the size and opens the next, and flushes, merges and compacts each
+shard on its own (§4). Stage 6, which lets an operator seal, drop, list and compact a named shard,
+is not built. Stage 1's churn on Tree of Life (§8.4) and the measurements of stages 4 and 5 (§8.1
+to §8.3) are still to run. Nothing else in this document is built. Each section says what the code
+does today and what changes.
 
 ## The limit
 
@@ -329,15 +331,11 @@ declaration, and the CLI through the build's declaration file.
 Any positive integer is accepted. A test sets a size small enough that its corpus spans several
 shards, down to a few dozen items, so every behaviour in this document runs on the conformance
 corpora. No write is refused because of the size. An insert that takes the open shard's high water
-to the size seals the shard, and its remaining rows open the next one (§4.1). Lowering the size
-seals the open shard if its high water is past the new size, and `PUT /control/shards` answers as it
-does for any other size; the seal shows in the shard list (§4.9). Raising the size lets the open
-shard go on issuing ids. A sealed shard stays sealed. Not enabled yet: the engine seals the open
-shard and opens the next at a running service, but a release binary does not. It refuses a batch
-that would take the open shard's high water past the size, and every write to a bundle of several
-shards (§10). Not built yet: the seal at a lowered size. A size below the open shard's high water
-is refused. A build whose files hold more items than the size writes several shards (§5), which a
-running service opens for reads only (§10).
+to the size seals the shard, and its remaining rows open the next one (§4.1). Lowering the size to
+the open shard's high water or below seals the open shard, and `PUT /control/shards` answers as it
+does for any other size. Raising the size lets the open shard go on issuing ids. A sealed shard
+stays sealed. Not built yet: the shard list (§4.9). No response shows which shards are sealed. A
+build whose files hold more items than the size writes several shards (§5).
 
 The default is 2³² − 2²⁸, 4,026,531,840. A sealed shard keeps the 2²⁸ ids above it for edits of its
 own items (§4.3). The default is chosen again from measurement (§8.5).
@@ -348,9 +346,8 @@ tenancy 4,095.
 ### 2.6 Bundle layout
 
 A build writes the tree below with a directory under `shards/` for each point shard. The partition's
-`SEGMENTS-<n>.json` holds each shard's record and, in `layer_spaces`, each layer space's; stage 5
-gives each shard and each space its own (§4.10). Nothing global is under `shards/`, so a shard's
-directory can be removed whole.
+`SEGMENTS-<n>.json` names each shard's and each layer space's own `SEGMENTS-<m>.json` by number and
+digest (§4.10). Nothing global is under `shards/`, so a shard's directory can be removed whole.
 
 ```text
 bundle/
@@ -360,9 +357,9 @@ bundle/
     dictionary/terms-0.dict                # global
     dictionary/<flush or coalesce>/terms-0.dict  # each flush's extent and their coalesced files
     partitions/default/
-      SEGMENTS-<n>.json                    # registries; from stage 5, each shard's and space's file by number and digest
+      SEGMENTS-<n>.json                    # registries; each shard's and space's file by number and digest
       shards/<shard>/
-        SEGMENTS-<n>.json                  # from stage 5: segments, extents, overlay, pool, watermark, levels, runtime-column bases
+        SEGMENTS-<n>.json                  # segments, extents, overlay, pool, watermark, levels, runtime-column bases
         terms/postings.arrow, pairs.parquet  # term ids global
         entities/terms/                    # entity-to-term transpose
         entities/edited/{by_number,by_entity}/
@@ -377,7 +374,7 @@ bundle/
         row-column/  row-members/  labels/  band-labels/  shape-rows/
         containment/  tile-index/
       layers/<layer space>/
-        SEGMENTS-<n>.json                  # from stage 5: overlay and the shards each deletion awaits, extents, records versions
+        SEGMENTS-<n>.json                  # overlay and the shards each deletion awaits, extents, records versions
         records/…  content/…  shape-held/  # records, edges among them; supplied content
 ```
 
@@ -519,7 +516,7 @@ response sends.
 | bulk items in map order | rows in (cell, `mosaica_id`) order | merge in that order; the cursor is unchanged |
 | bulk items in stored order | rows in entity order | shard by shard; the cursor gains the shard |
 | bulk artifacts, browse | per artifact: filtered counts, and positions where the figures carry no geometry | counts summed before ordering, keeping and the cursor; geometry as the figures and hull rows |
-| filters | every leaf, inside that shard's mask; `eq` and `in` on a unique field read each shard's index, and from stage 5 its key filter first (§4.2); `member_of` and a published region read that shard's slice | per shard: a filter only narrows that shard's visible rows. A `member_of` or published-region leaf takes the artifact's combined verdict, count and containment, before any shard evaluates it |
+| filters | every leaf, inside that shard's mask; `eq` and `in` on a unique field read each shard's index, its key filter first (§4.2); `member_of` and a published region read that shard's slice | per shard: a filter only narrows that shard's visible rows. A `member_of` or published-region leaf takes the artifact's combined verdict, count and containment, before any shard evaluates it |
 
 Each row gives the same answer as one shard holding the same items, but θ's occupied tiles: they
 are counted exactly where the view has one segment across every shard, and by the sketch above
@@ -591,7 +588,9 @@ The allocation target for new items is chosen at each commit window.
    one.
 2. Otherwise the open shard: its pool, then its high water.
 3. When the open shard's high water reaches `shards.size`, it seals. When a window still has rows
-   to place and no pool meets the threshold, the next shard opens.
+   to place and no pool meets the threshold, the next shard opens. A batch whose new items would
+   need a shard past the last an identifier can name, 524,287, is refused with `409`, and the
+   other batches of its window go in.
 
 Within a target the window's rows are sorted by signature, as today, and take ids lowest tenancy
 first, lowest id first, as §1.4 says. A window can straddle a change of target, and each row records the shard it
@@ -723,17 +722,21 @@ moves only those shards' slice versions. A shard's derived files and figures for
 stamped with both, so a write to one shard's slice leaves every other shard's files and figures
 standing.
 
-When a generating set loses a member in one shard, its rank is withdrawn in the record: the rank's
-values go and it is never served, and its position stays and is never reused. Each shard drops its
-slice of the rank at its own compaction.
+When a content is dropped, at the compaction of the shard holding a member its generating set
+lost or at a page that empties the set, its rank is withdrawn in the record: the rank's values go
+and it is never served. A rank is the content's position, so the position stays, is never taken
+again, and the contents after it keep their ranks. A publication or fill naming a withdrawn rank is
+refused with `409`, naming the next free rank. The rank is withdrawn in every shard at that one
+compaction, which writes every shard's member packs.
 
 ### 4.8 Views
 
 Creating a view of a group creates it in every shard. An item added to a view in place gets its row
 in its own shard. Dropping a view deletes, in each shard, the items it leaves in no view, and
-retires the artifacts scoped to it. A shard's compaction chooses each level's layout again from the
-level's shape summed over every shard. Where the layout moves, the compaction writes every shard's
-column for the level in the same publication. Two shards are never served in two layouts.
+deletes the artifacts scoped to it in their layer spaces' overlays (§2.2). A shard's compaction
+chooses each level's layout again from the level's shape summed over every shard. Where the layout
+moves, the compaction writes every shard's column for the level in the same publication. Two shards
+are never served in two layouts.
 
 ### 4.9 Seal, drop and status
 
@@ -741,7 +744,8 @@ column for the level in the same publication. Two shards are never served in two
 is used without an operator's action, and there is no verb to reopen one. `DELETE
 /control/shards/{id}` is refused for the open shard. Seal and drop are WAL records, durable before
 they are acknowledged, as a deny is. The system's own open and seal are WAL records too, and an
-operator's seal is the same record as the seal at `shards.size`.
+operator's seal is the same record as the seal at `shards.size`. Not built yet: `PUT` and `DELETE
+/control/shards/{id}`. A shard seals only at the size, and no shard is dropped.
 
 `POST /control/compact` takes an optional shard and compacts that shard alone. Without one it
 compacts as §4.6 says. `/control/status`'s `compaction` block and the compaction's log line name the
@@ -752,14 +756,16 @@ A drop applies to every request that starts after it is acknowledged: the shard 
 every request, and every identifier it issued answers as one naming nothing. Its items leave every
 generating set that names them under the layer's strict or permissive rule, as a deletion's do at a
 compaction. The next publication removes the shard's directory and retires its number. Replay skips
-every record that names a dropped shard.
+every record that names a dropped shard. Not built yet: the drop.
 
 `/control/status` gains one record per shard: number, state, whether it is the allocation target,
 live rows, high water, ids left, pool size by tenancy, retired count, overlay sizes, segments,
 and its last compaction's duration and peak memory. Its totals become sums: `entity_id_high_water`
 is the sum of the shards' high waters and a partition's watermark covers every shard, defined at
 stage 4 so the suite reads them in both modes. Each of the four surfaces reaches seal, drop and the
-shard list; for the CLI these are its first control-plane verbs beyond identity.
+shard list; for the CLI these are its first control-plane verbs beyond identity. Not built yet: the
+record per shard and those verbs on the four surfaces. `/control/status` carries the summed figures,
+`shards.size` and the shard of the last or running compaction.
 
 ### 4.10 Recovery and verification
 
@@ -783,7 +789,8 @@ parallel, and steps down whole: every shard and space moves back with it, never 
 that holds deny state is never stepped past, as today. Where nothing verifies, the bundle is
 refused, naming the file that failed and its shard or space; serving the other shards alone would
 lower every count with nothing a viewer could see. A shard's verification is recorded against its
-side-manifest's digest and not repeated while that is unchanged.
+side-manifest's digest and not repeated while that is unchanged. Not built yet: that record.
+Every open verifies every shard again.
 
 ## 5. Build
 
@@ -847,12 +854,11 @@ a shard is the one-shard build's, restricted to the shard's items and renumbered
 ## 7. Tests
 
 The conformance suite runs in two modes: with the default shard size, and with a size small enough
-that every corpus spans several shards. Every assertion it makes today holds in both. Not built yet:
-the many-shard mode's writes. Until stage 5 it runs only the tests marked `writes_nothing` and
-deselects the rest, since a bundle of several shards refuses every write. The identifiers differ
-between the modes, as they differ between two builds, and so do the samples drawn by rank. The
-oracle derives every identifier itself, as it does today. It derives each artifact's and each
-layer's from the layer's space and its levels' runs in the side-manifest, and checks every
+that every corpus spans several shards. Every assertion it makes holds in both, and every test runs
+in both but those marked `own_shards`, which set the shard sizes of their corpora themselves. The
+identifiers differ between the modes, as they differ between two builds, and so do the samples drawn
+by rank. The oracle derives every identifier itself, as it does today. It derives each artifact's
+and each layer's from the layer's space and its levels' runs in the side-manifest, and checks every
 publication's receipt against it. It reads each item's shard and number from the bundle, takes the
 tenancy from its own count of the items it has seen hold that number, never from the stored
 identifiers or the tenancy index, and checks each sample against its own selection over them. Every
@@ -935,14 +941,13 @@ ratio near 1 at every N. Where one does not, the extra work is removed before an
 
 ### 8.3 The write side
 
-At the same sizes, once several shards can be written (stage 5): build time and peak memory, ingest
-rate, flush time, the time and peak memory of one shard's compaction against the whole corpus's,
-restart replay, and `verify`. The compaction figures decide whether a compaction needs splitting
-into tiers or running several at once. Today's evidence for its cost is one MedCPT compaction of
-330 s over 36 million items, of which 48.1% was artifact structures
-(`probes/2026-09-04-epoch-shard-fold-decomposition/`), and one Tree of Life compaction of 1,313 s
-over 233 million items in two views, after its 50% ingest cell
-([ingest campaign](ingest-campaign.md)). Both predate label columns, figures and term images.
+At the same sizes, and not measured yet: build time and peak memory, ingest rate, flush time, the
+time and peak memory of one shard's compaction against the whole corpus's, restart replay, and
+`verify`. The compaction figures decide whether a compaction needs splitting into tiers or running
+several at once. Today's evidence for its cost is one MedCPT compaction of 330 s over 36 million
+items, of which 48.1% was artifact structures (`probes/2026-09-04-epoch-shard-fold-decomposition/`),
+and one Tree of Life compaction of 1,313 s over 233 million items in two views, after its 50% ingest
+cell ([ingest campaign](ingest-campaign.md)). Both predate label columns, figures and term images.
 
 ### 8.4 Churn
 
@@ -1006,10 +1011,10 @@ flowchart LR
 
 *The stages. Stage 1 is useful without the rest: it stops churn filling today's one space.*
 
-Between stages 4 and 5 a build can write several shards, and a running service opens such a bundle
-for reads only: every write to it is refused, with a message naming the stage, and the refusal is
-removed at stage 5. Stage 4's bundles of several shards are for measurement and are not released.
-On a bundle of one shard every write works at every stage.
+Between stages 4 and 5 a build could write several shards, and a running service opened such a
+bundle for reads only, refusing every write to it. Stage 5 removed the refusal. Stage 4's bundles of
+several shards were for measurement and were not released. On a bundle of one shard every write
+works at every stage.
 
 Each stage that changes what is on disc bumps `bundle_format`, and each that changes a WAL record
 bumps `WAL_VERSION`.

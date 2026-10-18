@@ -259,9 +259,8 @@ struct DefaultsBlock {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShardsBlock {
-    /// The high water a shard may not pass. A positive integer. A build whose files create more
-    /// items writes several shards, which a running service serves for reads only. An insert that
-    /// would take a shard's high water past it is refused.
+    /// The high water at which the shard taking new items seals and the next one opens. A
+    /// positive integer. A build whose files create more items writes several shards.
     size: u64,
 }
 

@@ -518,7 +518,7 @@ so it costs no more at request time than an enumerated one.
 | Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
 | An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `mosaica_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
-| Deletion of the artifact itself | The artifact stops being served immediately. The next fold removes its record, its supplied content and every edge naming it ([compaction](write-path.md#compaction)). Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
+| Deletion of the artifact itself | The artifact stops being served immediately, and its key is free at once: a publication under it creates a new artifact. Its record, its supplied content and every edge naming it leave at the compaction of the last point shard whose membership slice lists it ([compaction](write-path.md#compaction)). Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
 | Drop of a view of a group | The artifacts of every layer scoped to that group that belong to the dropped view are deleted by the drop, in the layer space's overlay, and their keys are free. The compaction that removes the deletion removes their records, supplied content and edges, as for a deletion of the artifact itself | The artifacts disappear from the drop's publication, with the view |
 
 An ingested point's membership column carries the layer's edges as well as its memberships, exactly
@@ -544,7 +544,9 @@ says. The declaration decides what happens next, at the compaction. Under **stri
 the compaction drops the content and its generating set for good. Under **permissive**, the
 compaction removes the deleted point from the generating set, and the content resumes serving to
 viewers who can see every point that remains, unless the deletion took the last of them, in which
-case it is dropped exactly as under strict.
+case it is dropped exactly as under strict. A content's rank is its position among the artifact's
+contents. A dropped content's rank is withdrawn: no later content takes it, and the contents after
+it keep their ranks.
 
 ## Dropping a layer
 

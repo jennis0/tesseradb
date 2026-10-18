@@ -122,16 +122,21 @@ neither. Beyond those, four checks apply:
    replay the recorded answer, and different bytes under the same id are refused.
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
-4. Each row that creates an item, and each edit, takes an id at the window's close: one a
-   compaction freed, or else one past the shard's high water. The ids a batch would take from the
-   high water may not carry it past the shard's size, declared by `[shards] size` at a build or by
-   `PUT /control/shards` at a running service.
-   The executor counts each batch as it joins the [commit window](#the-commit-window), against
-   what the batches already in the window leave. Freed ids the window does not take are counted
-   first, and ids still held for the log to rotate are not counted. A batch that does not fit
-   closes the window, and is counted again against the shard the close leaves. One that still does
-   not fit is refused with `409`, naming the size, the high water and the ids it needed, and takes
-   no effect, while every other batch of the window goes in.
+4. Each row that creates an item, and each edit, takes an id at the window's close. A new item
+   takes an id a compaction freed in the shard holding the most of them, where that is at least
+   one in 1,024 of the shard size, and otherwise one of the open shard's freed ids or one past its
+   high water. The shard size is declared by `[shards] size` at a build or by
+   `PUT /control/shards` at a running service. A window that takes the open shard's high water to
+   the size seals it, and the next shard opens for the items left. An edit takes its new entity in
+   its item's shard: a freed id of tenancy 0, or one past that shard's high water, which may pass
+   the size.
+   The executor places each batch as it joins the [commit window](#the-commit-window), after what
+   the batches already in the window take. Ids still held for the log to rotate are not counted.
+   A batch that does not fit closes the window, and is placed again after the close. One that
+   still does not fit is refused with `409` and takes no effect, while every other batch of the
+   window goes in. A batch does not fit when its new items would need a shard past the last an
+   identifier can name, 524,287, or its edits would carry a shard's high water past 4,294,967,295,
+   where the shard's ids end. The detail gives the figures.
 
 A row that carries access labels has each read as an access expression by the parser a build
 reads its access column with, and the item is indexed under the keys its labels give it: the
@@ -302,7 +307,7 @@ that is decided as a new batch.
 | Outcome | Meaning | Retry |
 |---|---|---|
 | 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged and refused rows wrote nothing, and `refused` lists the refused ones | Not needed; a refused row after fixing it |
-| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked, or its new and edited items would take the shard past its size. Nothing in the batch took effect | After fixing the request; the last as it was, or after declaring a larger size |
+| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked, or its new items would need a shard past the last or its edits a shard's ids past their end. Nothing in the batch took effect | After fixing the request; the third as it was; the last after deleting and compacting items, or with fewer rows |
 | 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
@@ -403,7 +408,7 @@ and they leave at compaction as any artifact deletion does.
 ### The overlay: two stores
 
 The overlay holds two separate records of what is hidden, one for deletions and one for
-suppressions, each a bitmap over entity ids. The point shard has an overlay over its items'
+suppressions, each a bitmap over entity ids. Each point shard has an overlay over its items'
 entities, and each layer space one over its artifacts' and its layer's. The two records are not one
 map with a status field. A single map would let the most recent write decide an item's status. The
 sequence delete, suppress, unsuppress would then leave the unsuppress as the last word and bring a
@@ -496,11 +501,13 @@ Flush runs on a fixed cadence, checked at the start of the executor's loop befor
 so a request that arrived after the cadence came due cannot delay it. An operator can pull the
 next flush forward, and only one flush runs at a time.
 
-Planning reads the current generation: the rows buffered for one view, in ascending order of
-entity id. A row whose entity has since been deleted is never written. The entity id stays
-allocated, and the deletion alone hides the item until a compaction removes it. A row whose
-entity has since been suppressed is flushed as normal, because a flush that skipped it would leave
-a later unsuppress with nothing to reveal.
+Planning reads the current generation: the rows buffered for one view in one shard, in ascending
+order of entity id. Where several (view, shard) pairs hold buffered rows, the pair whose oldest row
+has the oldest WAL position is flushed first, so a batch whose rows land in two shards can show in
+one a tick before the other. A row whose entity has since been deleted is never written. The entity
+id stays allocated, and the deletion alone hides the item until a compaction removes it. A row whose
+entity has since been suppressed is flushed as normal, because a flush that skipped it would leave a
+later unsuppress with nothing to reveal.
 
 Writing the segment files runs in the background, over inputs already captured on the executor, so
 it never blocks ingest or a deny. When that work finishes, the executor publishes it against
@@ -541,14 +548,14 @@ may now name a different entity.
 ## Compaction
 
 Compaction is the one operation that may drop a row and its term-index entries. It runs as a
-single pass called a compaction, and it does three things nothing else in the write path can
-do:
+single pass over one point shard, called a compaction (the code calls it a fold), and it does three
+things nothing else in the write path can do:
 
 - it is the only way a deletion's overlay record is removed (Rule F), for an item or an
   artifact;
 - it is the only way disc space a merge has orphaned is reclaimed;
-- it is the only way a partition returns to one segment and one term index. Flush and merge only
-  ever add to those counts.
+- it is the only way a shard returns to one segment per view and one term index. Flush and merge
+  only ever add to those counts.
 
 A fold takes a snapshot at the start of its run, naming which rows and term-index entries to
 remove and which deletions to retire once they are gone. A deletion's overlay record is removed
@@ -558,11 +565,15 @@ can still land: an entity a flush gave a fresh row to while the compaction was r
 this round, and the next fold takes it instead. If retirement followed the plan rather than what
 was actually removed, an entity whose row survived the compaction would lose the record hiding it.
 
-The same fold writes again every layer space that holds a deleted artifact, and publishes it with
-the point shard's new files. The space's records and supplied content are written without the
-deleted artifacts, the point shard's membership slices and row forms leave them out, and their
-deletions leave the space's overlay. No byte of a deleted artifact's content is in the prefix the
-fold publishes. A suppressed artifact or layer keeps its record and its suppression.
+An artifact deletion lists the point shards whose membership slice holds the artifact. Each listed
+shard's compaction drops the artifact from that shard's slice and row forms. The compaction that
+clears the last listed shard writes the layer space again without the artifact, and publishes it
+with that shard's new files: the space's records and supplied content leave it out, and its
+deletion leaves the space's overlay. No byte of its content is in the prefix that compaction
+publishes. A deletion that lists no shard leaves at the next compaction of any shard. The
+artifact's key is free from the deletion's acknowledgement, so a publication under it creates a
+new artifact while the old record is still held, denied. A suppressed artifact or layer keeps its
+record and its suppression.
 
 The WAL is rotated from time to time, its oldest records dropped once every row they describe is
 safely on disc. Retiring an overlay entry does not remove every record of it at once: the WAL
@@ -608,9 +619,12 @@ never freed.
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
 memberships, onto whatever took the id. Once the log keeps no such record, the id is free. The
-allocator issues free ids before any id from its high water. A commit window's edits draw first,
-each from tenancy 0, lowest id first, since an edit's new entity carries its item's `mosaica_id` and
-never becomes a number. Its new items then take the lowest tenancy, lowest id first. A restart
+allocator issues free ids before any id from its high water. Each shard has its own allocator and
+its own free ids. A commit window's edits draw first, each from tenancy 0 of its item's shard,
+lowest id first, since an edit's new entity carries its item's `mosaica_id` and never becomes a
+number. Its new items then take the lowest tenancy, lowest id first, in the shard
+[admission](#admission) places them in. A sealed shard keeps its ids of tenancy 0 for its own
+items' edits, and gives new items only the numbers its deletions freed. A restart
 between a compaction and the rotation after it replays the deletions the compaction executed, so
 the next compaction frees those numbers again, one tenancy higher. The tenancy skipped was never
 issued.
@@ -656,9 +670,19 @@ it names the generation a response was answered from and carries no authorisatio
 client that re-issues a request always gets a correct answer, only a more or less current one. How
 a client uses the comparison is covered in serving.
 
-A fold is dispatched when un-retired deletions of items and artifacts together, segment count,
-orphaned disc space or tombstoned rows cross a threshold, or on request. Only one fold runs at a
-time, and a request arriving while one is running is refused rather than queued.
+The schedule decides for each shard, on that shard's own gauges, whether a compaction is due:
+un-retired deletions of its items and of the artifacts it is listed by together, its segment count,
+its orphaned disc space or its tombstoned rows crossing a threshold. An artifact deletion that lists
+no shard counts in the open shard's gauge. `compaction_min_interval_secs` applies to each shard on
+its own. Among the shards that are due, the one with the highest deleted fraction is compacted
+first, then the one with more segments, then the lowest number. Only one compaction runs at a time.
+`POST /control/compact` asks for a compaction of every shard with something to reclaim, one after
+another, and of the shard the schedule ranks first where none has. A shard has something to reclaim
+when its overlay holds a deletion, an artifact deletion lists it, it has a segment written since its
+last compaction, it lacks the base of a column declared at a running service, or it holds dead
+bytes. A request arriving while a compaction runs is held until that compaction lands. A shard
+that seals has one closing compaction queued if any of its gauges is above zero, run once the rows
+written before the seal have flushed.
 
 ## Cached state and artifacts
 
@@ -693,10 +717,11 @@ records each shard allocator's own high water, not only the highest entity a seg
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
 manifest is what keeps its entity id, and so its `mosaica_id`, from being issued to a new item.
 Freed ids are restored from the newest manifest less every id the replay names
-([freed entity ids](#freed-entity-ids)). The shard's size is the newest manifest's, replaced by
+([freed entity ids](#freed-entity-ids)). The shard size is the newest manifest's, replaced by
 each size declaration the replayed log carries, so the last declaration made is the one in force.
-Every publication restates it, so it survives the log's rotation and a compaction. A size below
-the high water the replay reaches refuses the open, since no declaration could have left one. The
+Every publication restates it, so it survives the log's rotation and a compaction. A shard's seal
+and a shard's opening are log records of their own, so a replay seals and opens the shards the
+service did, in the same order. The
 buffer of rows awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in
 any segment, rather than compared against a watermark. This predicate stays correct regardless of
 how flush and allocation order have diverged from each other.
@@ -710,14 +735,6 @@ how flush and allocation order have diverged from each other.
 
 ## What is not built
 
-- **Writes to a bundle of several point shards.** A build writes several shards, each its own
-  entity space, when its files hold more items than `[shards] size`
-  ([data model](data-model.md#identifiers)). A running service opens such a bundle for reads only.
-  Every write, a deletion and a suppression included, is answered `409` before its body is read,
-  and the detail says to serve a bundle of one shard to write. The write executor runs no thread,
-  so nothing is logged, flushed, merged or compacted. Such a bundle is refused at open beside a
-  write-ahead log that holds records, since no write to it can have left one. A bundle of one shard
-  takes every write. `docs/sharding.md` designs the write path over several shards.
 - **The label invalidation feed.** A deletion invalidates every label whose generating set held
   the deleted item, for every viewer who could see it. The deny queue is the event that should
   trigger a notification, but neither the notification mechanism nor a consumer for it exists.
