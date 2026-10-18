@@ -803,6 +803,7 @@ fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
 
     let receipt = engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: "edit".to_string(),
             body_hash: [8; 32],
             view: Some("s0".to_string()),
@@ -1009,6 +1010,7 @@ fn a_dropped_views_artifact_is_held_until_every_shard_listing_it_compacts() {
     let keys = ["new-0", "new-1"];
     engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: "recreated".to_string(),
             body_hash: [7; 32],
             view: Some("g:k".to_string()),
@@ -1139,6 +1141,7 @@ fn scoped_value_in_shard_one(engine: &Engine) {
         .unwrap();
     engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: "hot".to_string(),
             body_hash: [9; 32],
             view: Some("g:k".to_string()),
@@ -1862,6 +1865,7 @@ fn name_item(
         .collect();
     engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: [3; 32],
             view: Some("s0".to_string()),
@@ -2233,6 +2237,7 @@ fn a_join_a_membership_row_and_an_edit_in_the_sealed_shard_serve_as_one_shard_do
             .unwrap();
         engine
             .ingest(mosaica_engine::IngestRequest {
+                principal: String::new(),
                 batch_id: "view".to_string(),
                 body_hash: [5; 32],
                 view: Some("p".to_string()),

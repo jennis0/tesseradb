@@ -1632,6 +1632,7 @@ fn an_item_joining_another_view_is_sampled_with_its_indexed_values() {
         let receipt = fx
             .engine
             .ingest(IngestRequest {
+                principal: String::new(),
                 batch_id: batch.to_string(),
                 body_hash: {
                     let mut hash = [0u8; 32];
@@ -2372,6 +2373,7 @@ fn the_figures_are_the_oracles_through_every_change() {
         let rank = 4_000_000;
         engine
             .ingest(IngestRequest {
+                principal: String::new(),
                 batch_id: "edit".to_string(),
                 body_hash: [3u8; 32],
                 view: None,

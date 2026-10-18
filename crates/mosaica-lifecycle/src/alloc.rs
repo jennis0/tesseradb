@@ -1465,6 +1465,7 @@ mod tests {
         WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
+            principal: String::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![crate::wal::WalRow {

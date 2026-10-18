@@ -42,6 +42,23 @@ pub enum Principal {
     },
 }
 
+impl Principal {
+    /// The principal as an ingest batch records it: a retry is matched by this and its batch id,
+    /// and no two principals share one.
+    pub fn write_key(&self) -> String {
+        let parts: Vec<&str> = match self {
+            Principal::Superuser => vec!["superuser"],
+            Principal::Local(name) => vec!["local", name],
+            Principal::Oidc {
+                provider,
+                issuer,
+                subject,
+            } => vec!["oidc", provider, issuer, subject],
+        };
+        serde_json::to_string(&parts).expect("a list of strings encodes")
+    }
+}
+
 /// One live session: the engine's session and what authorised it.
 pub struct SessionEntry {
     pub session: Arc<Session>,

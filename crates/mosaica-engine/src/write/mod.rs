@@ -718,6 +718,7 @@ impl WritePath {
     pub(crate) fn accept_ingest(
         &self,
         planned: crate::ingest::Planned,
+        principal: String,
         batch_id: String,
         body_hash: [u8; 32],
         unique_seq: u64,
@@ -736,6 +737,7 @@ impl WritePath {
             edits,
             slots,
             keys,
+            principal,
             batch_id,
             body_hash,
             artifacts,

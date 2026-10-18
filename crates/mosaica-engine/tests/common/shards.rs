@@ -126,6 +126,7 @@ pub fn insert_keyed_joining(
         .collect();
     let receipt = engine
         .ingest(mosaica_engine::IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: [9; 32],
             view: Some("s0".to_string()),
@@ -150,6 +151,7 @@ pub fn edit_by_id(
     id: u64,
 ) -> Result<MosaicaId, mosaica_engine::AcceptError> {
     let receipt = engine.ingest(mosaica_engine::IngestRequest {
+        principal: String::new(),
         batch_id: batch.to_string(),
         body_hash: [4; 32],
         view: Some("s0".to_string()),

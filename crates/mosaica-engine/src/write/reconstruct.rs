@@ -425,7 +425,10 @@ impl WritePath {
             }
             if let Some(identity) = mosaica_lifecycle::batch_identity(&record) {
                 accepted_batches.insert(
-                    identity.batch_id.to_string(),
+                    (
+                        identity.principal.to_string(),
+                        identity.batch_id.to_string(),
+                    ),
                     AcceptedBatch {
                         body_hash: identity.body_hash,
                         receipt: identity.receipt.to_vec(),
@@ -1137,6 +1140,7 @@ mod tests {
             WalRecord::ShardSeal { shard: one },
             WalRecord::ShardOpen { shard: two },
             WalRecord::IngestBatch {
+                principal: String::new(),
                 batch_id: "b".into(),
                 body_hash: [0; 32],
                 rows: vec![row(2, 0), row(2, 1), row(0, 7)],
@@ -1168,6 +1172,7 @@ mod tests {
         use mosaica_types::ShardState::{Open, Sealed};
         let seeds = || vec![held(0, Sealed, 25), held(1, Open, 15)];
         let batch = WalRecord::IngestBatch {
+            principal: String::new(),
             batch_id: "b".into(),
             body_hash: [0; 32],
             rows: vec![row(3, 0)],

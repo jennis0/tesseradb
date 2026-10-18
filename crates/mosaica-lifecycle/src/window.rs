@@ -131,6 +131,8 @@ pub struct WindowEntry<W> {
     /// The request rows creating an item indexed under more than
     /// [`mosaica_authz::MAX_KEYS_PER_ITEM`] keys.
     pub over_bound: Vec<u32>,
+    /// The caller that sent the batch, which a retry is matched by beside `batch_id`.
+    pub principal: String,
     pub batch_id: String,
     pub body_hash: [u8; 32],
     /// The artifacts this batch's rows join, each with the **ordinal its key resolved to at
@@ -262,6 +264,7 @@ impl<W> ClosedEntry<W> {
     /// of its entries. Each row keeps every value written into it since.
     pub fn reopen(self) -> WindowEntry<W> {
         let WalRecord::IngestBatch {
+            principal,
             batch_id,
             body_hash,
             rows,
@@ -301,6 +304,7 @@ impl<W> ClosedEntry<W> {
             edits,
             slots: self.slots,
             over_bound: self.over_bound,
+            principal,
             batch_id,
             body_hash,
             memberships: self.memberships,
@@ -348,14 +352,16 @@ impl<W> ClosedEntry<W> {
         }
     }
 
-    /// `(batch_id, body_hash)` — the idempotency key the executor records after the swap.
-    pub fn batch_key(&self) -> (&str, [u8; 32]) {
+    /// `(principal, batch_id, body_hash)` — the idempotency key the executor records after the
+    /// swap.
+    pub fn batch_key(&self) -> (&str, &str, [u8; 32]) {
         match &self.record {
             WalRecord::IngestBatch {
+                principal,
                 batch_id,
                 body_hash,
                 ..
-            } => (batch_id.as_str(), *body_hash),
+            } => (principal.as_str(), batch_id.as_str(), *body_hash),
             _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
         }
     }
@@ -660,11 +666,12 @@ pub type Closed<W> =
 /// The open commit window.
 pub struct CommitWindow<W> {
     entries: Vec<WindowEntry<W>>,
-    /// **The join index.** A `batch_id` held here cannot be evaluated against the idempotency map,
-    /// because that map is written at *apply*; [`CommitWindow::held`] is what answers for it, and
-    /// [`CommitWindow::join`] is what a byte-identical retry does with the answer. Answering from
-    /// inside the window is what makes a held batch id cost no window close at all.
-    by_batch: FxHashMap<String, usize>,
+    /// **The join index**, by principal and batch id. A batch held here cannot be evaluated
+    /// against the idempotency map, because that map is written at *apply*;
+    /// [`CommitWindow::held`] is what answers for it, and [`CommitWindow::join`] is what a
+    /// byte-identical retry does with the answer. Answering from inside the window is what makes a
+    /// held batch id cost no window close at all.
+    by_batch: FxHashMap<(String, String), usize>,
     /// Everything this window's entries claim: see [`WindowClaims`].
     items: FxHashSet<ItemAt>,
     keys: FxHashSet<(u16, u128)>,
@@ -735,8 +742,8 @@ impl<W> CommitWindow<W> {
         self.opened_at
     }
 
-    /// **The `Held` half of the batch-id state machine**: is `batch_id` already an entry of
-    /// this open window, and if so, what body hash was it admitted under?
+    /// **The `Held` half of the batch-id state machine**: is `principal`'s `batch_id` already an
+    /// entry of this open window, and if so, what body hash was it admitted under?
     ///
     /// Returns `(window_seq, body_hash)`. The caller compares the hash: equal means a byte-identical
     /// retry, which [`CommitWindow::join`] adds to the held entry's waiters; unequal is a `409` for
@@ -753,21 +760,24 @@ impl<W> CommitWindow<W> {
     /// the field is read only by a `debug_assert!` at the join site. It is not decoration and it is
     /// not a live guard either; it is the discriminator an executor holding more than one window
     /// would need, written down while the invariant it encodes is still obvious.
-    pub fn held(&self, batch_id: &str) -> Option<(u64, [u8; 32])> {
-        let index = *self.by_batch.get(batch_id)?;
+    pub fn held(&self, principal: &str, batch_id: &str) -> Option<(u64, [u8; 32])> {
+        let index = *self
+            .by_batch
+            .get(&(principal.to_owned(), batch_id.to_owned()))?;
         Some((self.seq, self.entries[index].body_hash))
     }
 
-    /// **The join**: add `waiter` to the entry `batch_id` names, so a byte-identical retry is
-    /// answered off the original's single allocation rather than allocating again.
+    /// **The join**: add `waiter` to the entry `principal`'s `batch_id` names, so a byte-identical
+    /// retry is answered off the original's single allocation rather than allocating again.
     ///
     /// Nothing else about the entry changes: no rows are added, nothing is claimed, the row count
     /// does not move. A retry joined this way is answered off the original's one allocation.
     ///
     /// Returns `false` if `batch_id` is not held, which the executor treats as a programming error:
     /// it calls this only having just seen [`CommitWindow::held`] answer.
-    pub fn join(&mut self, batch_id: &str, waiter: W) -> bool {
-        let Some(&index) = self.by_batch.get(batch_id) else {
+    pub fn join(&mut self, principal: &str, batch_id: &str, waiter: W) -> bool {
+        let key = (principal.to_owned(), batch_id.to_owned());
+        let Some(&index) = self.by_batch.get(&key) else {
             return false;
         };
         self.entries[index].waiters.push(waiter);
@@ -778,7 +788,8 @@ impl<W> CommitWindow<W> {
     /// conflict.
     pub fn push(&mut self, entry: WindowEntry<W>, claims: WindowClaims) {
         let index = self.entries.len();
-        self.by_batch.insert(entry.batch_id.clone(), index);
+        self.by_batch
+            .insert((entry.principal.clone(), entry.batch_id.clone()), index);
         self.items.extend(claims.items);
         self.keys.extend(claims.keys);
         self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
@@ -943,6 +954,7 @@ impl<W> CommitWindow<W> {
                 .collect();
             closed.push(ClosedEntry {
                 record: WalRecord::IngestBatch {
+                    principal: entry.principal,
                     batch_id: entry.batch_id,
                     body_hash: entry.body_hash,
                     rows: wal_rows,
@@ -1016,6 +1028,7 @@ mod tests {
             over_bound: Vec::new(),
             rows,
             edits: Vec::new(),
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
             memberships: Vec::new(),
@@ -1231,6 +1244,7 @@ mod tests {
                 over_bound: Vec::new(),
                 rows: vec![row(&[1])],
                 edits: Vec::new(),
+                principal: "ann".to_string(),
                 batch_id: "b1".to_string(),
                 body_hash: [3u8; 32],
                 memberships: Vec::new(),
@@ -1239,10 +1253,15 @@ mod tests {
             },
         );
 
-        assert_eq!(w.held("b1"), Some((7, [3u8; 32])));
-        assert_eq!(w.held("b2"), None, "an unheld batch id is not held");
+        assert_eq!(w.held("ann", "b1"), Some((7, [3u8; 32])));
+        assert_eq!(w.held("ann", "b2"), None, "an unheld batch id is not held");
+        assert_eq!(
+            w.held("bob", "b1"),
+            None,
+            "another principal's batch under the same id is not held"
+        );
         // And it is found however the retry's rows differ: the hash decides, not the rows.
-        assert_eq!(w.held("b1").map(|(_, h)| h), Some([3u8; 32]));
+        assert_eq!(w.held("ann", "b1").map(|(_, h)| h), Some([3u8; 32]));
     }
 
     /// The join adds a waiter and **nothing else**: no rows, no claim, no row count. That is
@@ -1255,8 +1274,8 @@ mod tests {
         let rows_before = w.rows();
         let entries_before = w.len();
 
-        assert!(w.join("b1", "retry"), "a held batch id joins");
-        assert!(!w.join("nope", "retry"), "an unheld one does not");
+        assert!(w.join("", "b1", "retry"), "a held batch id joins");
+        assert!(!w.join("", "nope", "retry"), "an unheld one does not");
 
         assert_eq!(w.rows(), rows_before, "a join adds no rows");
         assert_eq!(w.len(), entries_before, "a join adds no entry");

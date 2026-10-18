@@ -48,6 +48,7 @@ fn ingest(
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
     engine.ingest(IngestRequest {
+        principal: String::new(),
         batch_id: batch.to_string(),
         body_hash,
         view: Some(view.to_string()),

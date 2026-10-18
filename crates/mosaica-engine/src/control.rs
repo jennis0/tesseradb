@@ -412,12 +412,13 @@ impl Engine {
         flushed_terms_of(self.generation().only_shard(), entity)
     }
 
-    /// The body hash a batch id was accepted with, if it was: a batch replayed with the same
-    /// bytes is reported as a replay. The executor decides the same question again, race-free.
-    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
+    /// The body hash `principal`'s batch id was accepted with, if it was: a batch replayed with
+    /// the same bytes is reported as a replay. The executor decides the same question again,
+    /// race-free.
+    pub fn accepted_batch(&self, principal: &str, batch_id: &str) -> Option<[u8; 32]> {
         self.write
             .live()
-            .accepted_batch(batch_id)
+            .accepted_batch(principal, batch_id)
             .map(|(hash, _)| hash)
     }
 

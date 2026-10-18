@@ -118,8 +118,9 @@ neither. Beyond those, four checks apply:
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
    rather than queued.
-2. A batch id, required on every request, makes a retry safe: identical bytes under the same id
-   replay the recorded answer, and different bytes under the same id are refused.
+2. A batch id, required on every request, makes a retry safe: identical bytes from the same
+   principal under the same id replay the recorded answer, and different bytes are refused. A
+   batch id is its principal's, so another principal's batch under the same id is another batch.
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
 4. Each row that creates an item, and each edit, takes an id at the window's close. A new item
@@ -304,9 +305,9 @@ keys or a layer refusing what they name, gives back its ids and its codes, and e
 closes again in a window of its own, in the order they were admitted. Only a batch that cannot
 close alone is refused, with its own reason, and the others commit as if it had not been sent. A retry of an accepted batch answers the `mosaica_id`s its
 first acceptance did, and the rows it refused, after a restart too, since the record carries them.
-The index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
-until the flush whose WAL rotation removes the member holding its record, and a retry sent after
-that is decided as a new batch.
+The index of accepted batches, by principal and batch id, is built from the WAL members retained, so
+a batch id is remembered until the flush whose WAL rotation removes the member holding its record,
+and a retry sent after that is decided as a new batch.
 
 ### What the writer observes
 

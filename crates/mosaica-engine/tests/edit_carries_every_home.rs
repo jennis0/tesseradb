@@ -436,6 +436,7 @@ fn a_scoped_value_needs_a_row_under_its_key() {
         let mut body_hash = [0u8; 32];
         body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
         engine.ingest(IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash,
             view: Some("quarter:q1".to_string()),

@@ -91,7 +91,7 @@ fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() 
 
     let reopened = engine_at(tmp.path(), &root, 3600);
     assert!(
-        reopened.accepted_batch("ext-1").is_none(),
+        reopened.accepted_batch("", "ext-1").is_none(),
         "the batch's record was reclaimed, so the horizon has passed it — asserted so the \
          weakening is an observable rather than something a client discovers"
     );
@@ -111,7 +111,7 @@ fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away()
     let engine = engine_at(tmp.path(), &root, 1);
     ingest(&engine, "ext-1");
     assert!(
-        engine.accepted_batch("ext-1").is_some(),
+        engine.accepted_batch("", "ext-1").is_some(),
         "the batch was just accepted, so its id is held"
     );
     wait_until("the flush", WAIT, || {
@@ -121,6 +121,6 @@ fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away()
         !wal_members(&tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string())
     });
     wait_until("the index to follow the log", WAIT, || {
-        engine.accepted_batch("ext-1").is_none()
+        engine.accepted_batch("", "ext-1").is_none()
     });
 }

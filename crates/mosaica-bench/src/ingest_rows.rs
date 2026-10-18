@@ -35,6 +35,7 @@ impl IngestRows for Engine {
             })
             .collect();
         let receipt = self.ingest(IngestRequest {
+            principal: String::new(),
             batch_id,
             body_hash,
             view,

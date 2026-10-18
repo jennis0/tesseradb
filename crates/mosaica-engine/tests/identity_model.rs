@@ -1108,6 +1108,7 @@ impl Run {
     ) -> Result<IngestReceipt, AcceptError> {
         self.engine()
             .ingest(IngestRequest {
+                principal: String::new(),
                 batch_id: batch_id.to_string(),
                 body_hash: hash_of(batch_id),
                 view: view.map(str::to_string),
@@ -2178,6 +2179,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let send = |engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>| {
         engine
             .ingest(IngestRequest {
+                principal: String::new(),
                 batch_id: batch.to_string(),
                 body_hash: hash_of(batch),
                 view: Some(view.to_string()),

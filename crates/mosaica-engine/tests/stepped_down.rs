@@ -59,6 +59,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
+            principal: String::new(),
             batch_id: "pre-existing".to_string(),
             body_hash: [1u8; 32],
             rows: vec![WalRow {

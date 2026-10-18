@@ -424,9 +424,9 @@ struct IngestResp {
     /// Memberships this batch's membership columns added, to artifacts it created and to held
     /// ones alike.
     joined: u64,
-    /// This body was already accepted under this batch id. Every count is then 0, so a client
-    /// summing them over retried pages does not double-count; `mosaica_ids` is the first
-    /// acceptance's.
+    /// This body was already accepted from this caller under this batch id. Every count is then
+    /// 0, so a client summing them over retried pages does not double-count; `mosaica_ids` is the
+    /// first acceptance's.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replayed: bool,
     /// The cycle this batch's rows become visible in. A replay names the next cycle to open,
@@ -444,6 +444,7 @@ fn run_ingest(
     state: &AppState,
     encoding: BodyEncoding,
     body: &[u8],
+    principal: String,
     batch_id: String,
     view: Option<&str>,
     strict: bool,
@@ -569,6 +570,7 @@ fn run_ingest(
     let receipt = state
         .engine
         .ingest(mosaica_engine::IngestRequest {
+            principal,
             batch_id,
             body_hash,
             view: view_id,
@@ -624,6 +626,7 @@ fn run_ingest(
 async fn ingest(
     State(state): State<Arc<AppState>>,
     ApiQuery(query): ApiQuery<RowsQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -655,10 +658,19 @@ async fn ingest(
     // The permit moves into the closure: if the client disconnects, the closure still holds its
     // thread, and the permit must be held as long.
     let strict = query.strict;
+    let principal = caller.principal.write_key();
     let mut resp = state
         .blocking(move |state| {
             let _permit = permit;
-            run_ingest(state, encoding, &body, batch_id, view.as_deref(), strict)
+            run_ingest(
+                state,
+                encoding,
+                &body,
+                principal,
+                batch_id,
+                view.as_deref(),
+                strict,
+            )
         })
         .await?;
 

@@ -23,13 +23,18 @@ pub(super) enum BatchState {
 }
 
 impl BatchState {
-    /// Look `batch_id` up: the durable index, then the open window, then unknown. The two sets are
-    /// disjoint: a batch id enters `accepted_batches` only at `close_window`.
-    pub(super) fn of<W>(live: &LiveState, window: &CommitWindow<W>, batch_id: &str) -> BatchState {
-        if let Some((body_hash, receipt)) = live.accepted_batch(batch_id) {
+    /// Look `principal`'s `batch_id` up: the durable index, then the open window, then unknown. The
+    /// two sets are disjoint: a batch enters `accepted_batches` only at `close_window`.
+    pub(super) fn of<W>(
+        live: &LiveState,
+        window: &CommitWindow<W>,
+        principal: &str,
+        batch_id: &str,
+    ) -> BatchState {
+        if let Some((body_hash, receipt)) = live.accepted_batch(principal, batch_id) {
             return BatchState::Accepted { body_hash, receipt };
         }
-        match window.held(batch_id) {
+        match window.held(principal, batch_id) {
             Some((window_seq, body_hash)) => BatchState::Held {
                 window_seq,
                 body_hash,
@@ -473,7 +478,12 @@ impl Executor {
         submission: IngestSubmission,
         reply: Reply<Ingested>,
     ) -> (CommitWindow<Reply<Ingested>>, Admission) {
-        match BatchState::of(&self.live, &window, &submission.batch_id) {
+        match BatchState::of(
+            &self.live,
+            &window,
+            &submission.principal,
+            &submission.batch_id,
+        ) {
             BatchState::Accepted {
                 body_hash: prev_hash,
                 receipt,
@@ -503,7 +513,7 @@ impl Executor {
                     "the entry must be joined to the window it was found in"
                 );
                 if prev_hash == submission.body_hash {
-                    let joined = window.join(&submission.batch_id, reply);
+                    let joined = window.join(&submission.principal, &submission.batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
                     // The 409 reaches the retry, not the held original, which is still owed its ack.
@@ -575,6 +585,7 @@ impl Executor {
             edits,
             slots,
             keys,
+            principal,
             batch_id,
             body_hash,
             artifacts,
@@ -684,6 +695,7 @@ impl Executor {
             edits: edits.into_iter().map(|e| e.edit).collect(),
             slots,
             over_bound,
+            principal,
             batch_id,
             body_hash,
             memberships,
@@ -1057,7 +1069,7 @@ impl Executor {
         closing.ack(&self.health, minted_per_entry, joined_per_entry);
     }
 
-    /// Index every entry of a committed window by its batch id, after the swap.
+    /// Index every entry of a committed window by its principal and batch id, after the swap.
     pub(super) fn record_accepted_batches(
         &mut self,
         closed: &[ClosedEntry<Reply<Ingested>>],
@@ -1065,8 +1077,9 @@ impl Executor {
     ) {
         let m = StageMark::now();
         for (entry, wal_pos) in closed.iter().zip(positions) {
-            let (batch_id, body_hash) = entry.batch_key();
+            let (principal, batch_id, body_hash) = entry.batch_key();
             self.live.record_accepted_batch(
+                principal.to_string(),
                 batch_id.to_string(),
                 body_hash,
                 entry.receipt().to_vec(),

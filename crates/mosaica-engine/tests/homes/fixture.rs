@@ -354,6 +354,7 @@ pub fn send(engine: &Engine, batch: &str, view: &str, row: IngestRow) -> IngestR
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
     engine
         .ingest(IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash,
             view: Some(view.to_string()),

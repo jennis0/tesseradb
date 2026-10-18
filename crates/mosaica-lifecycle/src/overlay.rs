@@ -693,6 +693,7 @@ mod tests {
             scoped: Vec::new(),
         };
         let batch = WalRecord::IngestBatch {
+            principal: String::new(),
             batch_id: "b".into(),
             body_hash: [0; 32],
             rows: vec![row(zero, 3), row(one, 3), row(one, 4)],

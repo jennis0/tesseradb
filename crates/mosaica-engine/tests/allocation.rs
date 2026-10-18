@@ -198,6 +198,7 @@ fn a_window_that_is_not_made_durable_opens_and_seals_nothing() {
 
     faults.fail_next_fsyncs(1);
     let refused = engine.ingest(mosaica_engine::IngestRequest {
+        principal: String::new(),
         batch_id: "failed".to_string(),
         body_hash: [9; 32],
         view: Some("s0".to_string()),

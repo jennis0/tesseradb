@@ -61,6 +61,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
+            principal: String::new(),
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![mosaica_lifecycle::WalRow {
@@ -210,6 +211,7 @@ fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<MosaicaId> {
         .collect();
     engine
         .ingest(IngestRequest {
+            principal: String::new(),
             batch_id: batch.to_string(),
             body_hash: [7u8; 32],
             view: Some("s0".to_string()),
