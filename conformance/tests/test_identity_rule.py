@@ -221,6 +221,7 @@ class Deployment:
                 json=body,
                 timeout=60,
             )
+            resp.raise_for_status()
             assert resp.status_code == 200, resp.text
             return resp.json()
 
