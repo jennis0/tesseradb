@@ -82,8 +82,7 @@ export type RowAnswer = Answer<IngestResponse> & {
  * value. `value_held`: the row would create an item, or set a value on the item it names, with a
  * unique value an item outside the writer's terms holds. `label_not_held`: the row, or an artifact
  * of `publish` or `grow`, sets an access label the writer's terms do not satisfy. `one_item_twice`,
- * `one_value_twice` and `value_held` are given by `ingest` only. A writer without `write-all` names
- * only the items, layers, views and artifacts its terms reach: one outside them is absent to it.
+ * `one_value_twice` and `value_held` are given by `ingest` only.
  *
  * @category Control plane
  */
@@ -616,7 +615,8 @@ export type ControlOptions = {
   /**
    * The credential sent as the bearer token on every request: the operator credential, an API key
    * or an OIDC access token. Writes, flush and compaction need `write`; declarations and drops need
-   * `write-all` beside it; status and the catalogue's verbs need `admin`.
+   * `write-all` beside it; status and the catalogue's verbs need `admin`. A writer without
+   * `write-all` writes only within its terms.
    */
   credential: string;
   /** Used for every request in place of the global `fetch`. */
@@ -924,9 +924,8 @@ export class Control {
   /**
    * `PATCH /control/vocabularies/{name}/values`: adds one page of `{key, title?}` values to a
    * vocabulary. No value is removed, and a title given for a held key replaces its title. An
-   * unknown vocabulary is refused with `404`. The answer's `bound` counts the page's keys the
-   * vocabulary holds; a writer without `write-all` is told of a `derived` vocabulary that count
-   * alone, without `added`, `existing` and `titles`.
+   * unknown vocabulary is refused with `404`. A writer without `write-all` is not told, of a
+   * `derived` vocabulary, `added`, `existing` and `titles`.
    */
   vocabularyValues(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PATCH', withQuery(`/control/vocabularies/${segment(name)}/values`, waiting(options)), body, options);
@@ -958,9 +957,7 @@ export class Control {
    * names two. An artifact's or a layer's `mosaica_id` names no item. A `generated_from` member
    * naming no item, or two, refuses the request, strict or not. A batch creating more artifacts
    * than the level's layer space has ids left for is refused with `409`. Every other refusal
-   * applies nothing. To a writer without `write-all`, a layer, parent or attachment target outside
-   * its terms is one not declared, a key an artifact outside holds is `409`, and an artifact
-   * setting a label its terms do not satisfy is refused alone as `label_not_held`.
+   * applies nothing.
    */
   publish(layer: string, body: PublishRequest, options: StrictOptions = {}): Promise<Answer<ArtifactsPublished>> {
     const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, naming(options));

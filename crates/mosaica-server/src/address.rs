@@ -7,13 +7,13 @@
 //! nothing and is ignored, as a build ignores it, and the answer names it.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use mosaica_engine::{AddressTable, AddressValue};
 use mosaica_lifecycle::resolve::Reason;
 use mosaica_types::MosaicaId;
 
-use crate::error::{map_engine_error, ApiError};
-use crate::state::AppState;
+use crate::error::ApiError;
 
 /// One table of addresses as a request wrote it: columns of equal length, `None` where a cell is
 /// null.
@@ -131,83 +131,50 @@ impl<'de> serde::Deserialize<'de> for Cell {
     }
 }
 
-/// Every table of one request as the one table the engine resolves, and each table's rows.
-pub(crate) struct Merged {
-    table: AddressTable,
-    widths: Vec<usize>,
-}
-
-impl Merged {
-    /// The tables' columns, moved into one table: a column a table lacks is null in its rows.
-    pub(crate) fn of(tables: Vec<Table>) -> Result<Merged, ApiError> {
-        let widths: Vec<usize> = tables.iter().map(|t| t.rows).collect();
-        let rows: usize = widths.iter().sum();
-        let mut tables = tables;
-        let mut names: Vec<String> = Vec::new();
-        for table in &tables {
-            for (name, _) in &table.columns {
-                if !names.contains(name) {
-                    names.push(name.clone());
-                }
+/// Every table of one request as the one table the engine resolves, and each table's rows in it. A
+/// column a table lacks is null in its rows.
+pub(crate) fn merge(tables: Vec<Table>) -> Result<(AddressTable, Vec<Range<usize>>), ApiError> {
+    let mut at = 0;
+    let ranges: Vec<Range<usize>> = tables
+        .iter()
+        .map(|t| {
+            at += t.rows;
+            at - t.rows..at
+        })
+        .collect();
+    let rows = at;
+    let mut tables = tables;
+    let mut names: Vec<String> = Vec::new();
+    for table in &tables {
+        for (name, _) in &table.columns {
+            if !names.contains(name) {
+                names.push(name.clone());
             }
         }
-        let mut table = AddressTable {
-            rows,
-            ..AddressTable::default()
-        };
-        for name in names {
-            let mut cells: Vec<Option<AddressValue>> = Vec::with_capacity(rows);
-            for one in &mut tables {
-                match one.columns.iter_mut().find(|(n, _)| *n == name) {
-                    Some((_, column)) => cells.append(column),
-                    None => cells.resize(cells.len() + one.rows, None),
-                }
-            }
-            if name == "mosaica_id" {
-                let ids = cells
-                    .into_iter()
-                    .map(|cell| cell.map(mosaica_id_of).transpose())
-                    .collect::<Result<_, _>>()?;
-                table.mosaica_id = Some(ids);
-            } else {
-                table.columns.push((name, cells));
+    }
+    let mut table = AddressTable {
+        rows,
+        ..AddressTable::default()
+    };
+    for name in names {
+        let mut cells: Vec<Option<AddressValue>> = Vec::with_capacity(rows);
+        for one in &mut tables {
+            match one.columns.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, column)) => cells.append(column),
+                None => cells.resize(cells.len() + one.rows, None),
             }
         }
-        Ok(Merged { table, widths })
-    }
-
-    /// Every row resolved for a write by a writer of `scope` against the generation served now; a
-    /// row may name an artifact or a layer where `targets`. The engine brings the names to the
-    /// generation the write applies in. The table moves into the answer; each table's rows stay
-    /// here.
-    pub(crate) fn names(
-        &mut self,
-        state: &AppState,
-        scope: &mosaica_engine::WriteScope,
-        targets: bool,
-    ) -> Result<mosaica_engine::Names, ApiError> {
-        state
-            .engine
-            .names(std::mem::take(&mut self.table), scope, targets)
-            .map_err(map_engine_error)
-    }
-
-    /// How many rows each of the request's tables holds, in order.
-    pub(crate) fn widths(&self) -> &[usize] {
-        &self.widths
-    }
-
-    /// Row `row` of the merged table as the request wrote it: its table, and its row there.
-    pub(crate) fn locate(&self, row: usize) -> (usize, usize) {
-        let mut start = 0;
-        for (table, width) in self.widths.iter().enumerate() {
-            if row < start + width {
-                return (table, row - start);
-            }
-            start += width;
+        if name == "mosaica_id" {
+            let ids = cells
+                .into_iter()
+                .map(|cell| cell.map(mosaica_id_of).transpose())
+                .collect::<Result<_, _>>()?;
+            table.mosaica_id = Some(ids);
+        } else {
+            table.columns.push((name, cells));
         }
-        (self.widths.len(), row - start)
     }
+    Ok((table, ranges))
 }
 
 /// A `mosaica_id` cell, which is a base-10 string.
@@ -229,7 +196,7 @@ fn mosaica_id_of(value: AddressValue) -> Result<MosaicaId, ApiError> {
 }
 
 /// The answer to a strict request whose row `row` of `what` was refused for `reason`: 404 where
-/// the row names no item, 409 where it names two. The row is named by position, never by a value.
+/// the row names nothing, 409 otherwise. The row is named by position, never by a value.
 pub(crate) fn strict_refusal(what: &str, row: usize, reason: Reason) -> ApiError {
     match reason {
         Reason::NamesNoItem | Reason::UnknownMosaicaId => ApiError::Unknown(format!(
@@ -245,8 +212,8 @@ pub(crate) fn strict_refusal(what: &str, row: usize, reason: Reason) -> ApiError
             "row {row} of {what} carries a unique value an item holds; send another value"
         )),
         Reason::LabelNotHeld => ApiError::Conflict(format!(
-            "row {row} of {what} sets an access label this credential's terms do not satisfy; \
-             send a label they satisfy"
+            "row {row} of {what} {}",
+            mosaica_lifecycle::command::LABEL_NOT_HELD
         )),
     }
 }

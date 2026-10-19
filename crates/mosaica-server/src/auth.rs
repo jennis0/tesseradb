@@ -53,13 +53,13 @@ impl Caller {
         }
     }
 
-    /// What a write by this caller names items within: every item where it holds `write-all`, as
-    /// the operator does, and otherwise the items its terms reach, whether or not it holds `read`.
-    /// Built once per set of terms and kept by the engine, so call it off the executor.
+    /// The scope this caller's writes name within: everything with `write-all`, otherwise its
+    /// terms' reach. Cached by the engine per set of terms; call it off the executor.
     pub fn write_scope(&self, engine: &mosaica_engine::Engine) -> mosaica_engine::WriteScope {
-        match self.holds(Permission::WriteAll) {
-            true => mosaica_engine::WriteScope::All,
-            false => engine.write_scope(self.resolution.terms.iter().map(String::as_str)),
+        if self.holds(Permission::WriteAll) {
+            mosaica_engine::WriteScope::All
+        } else {
+            engine.write_scope(self.resolution.terms.iter().map(String::as_str))
         }
     }
 
@@ -184,13 +184,7 @@ pub fn api_key(catalogue: &Catalogue, key: &str) -> Result<Caller, ApiError> {
         .into_iter()
         .find(|k| k.prefix == prefix)
         .and_then(|k| k.expires_at);
-    local(
-        catalogue,
-        auth.principal_id,
-        auth.principal,
-        Some(prefix),
-        expires_at,
-    )
+    local(catalogue, auth.principal, Some(prefix), expires_at)
 }
 
 /// A local principal by name and password. The check is argon2id, so it runs off the async
@@ -208,24 +202,20 @@ pub async fn password(
                 .catalogue
                 .verify_password(&principal, &password)
                 .map_err(|_| ApiError::BadCredential)?;
-            local(
-                &state.catalogue,
-                auth.principal_id,
-                auth.principal,
-                None,
-                None,
-            )
+            local(&state.catalogue, auth.principal, None, None)
         })
         .await
 }
 
 fn local(
     catalogue: &Catalogue,
-    id: i64,
     name: String,
     api_key: Option<String>,
     expires_at: Option<u64>,
 ) -> Result<Caller, ApiError> {
+    let id = catalogue
+        .principal_id(&name)
+        .ok_or(ApiError::BadCredential)?;
     let source = Source::Local {
         principal: name.clone(),
         api_key: api_key.clone(),
@@ -301,14 +291,12 @@ pub fn every_item(catalogue: &Catalogue) -> Caller {
 /// not learn by acting.
 pub fn named(catalogue: &Catalogue, principal: &str) -> Result<Caller, ApiError> {
     let principal = principal.trim().to_owned();
-    let unknown = || {
+    local(catalogue, principal.clone(), None, None).map_err(|_| {
         ApiError::Unknown(format!(
             "there is no enabled principal named `{principal}`; list the principals to find the \
              name"
         ))
-    };
-    let id = catalogue.principal_id(&principal).ok_or_else(unknown)?;
-    local(catalogue, id, principal.clone(), None, None).map_err(|_| unknown())
+    })
 }
 
 /// A minted session, as the session plane and the login route answer it.

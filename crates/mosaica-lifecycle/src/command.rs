@@ -521,9 +521,8 @@ pub enum ExecError {
     /// The detail names the values and, for an ingest, the holders' `mosaica_id`s; never an entity
     /// id.
     UniqueTaken { detail: String },
-    /// Row `row` of a write's names, in a table a refused row refuses whole, names nothing or two
-    /// items where the write applies → HTTP **404** or **409**, no effect. The row is named by its
-    /// position, never by a value.
+    /// Row `row` of a write's names, in a table a refused row refuses whole, was refused for
+    /// `reason` → HTTP **404** or **409**, no effect.
     NamesRefused {
         row: usize,
         reason: crate::resolve::Reason,
@@ -535,6 +534,10 @@ pub enum ExecError {
     /// detail names the files, so it is logged and not sent.
     Store { detail: String },
 }
+
+/// What a write refused as `label_not_held` did, as its refusal says it.
+pub const LABEL_NOT_HELD: &str =
+    "sets an access label this credential's terms do not satisfy; send a label they satisfy";
 
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -564,11 +567,9 @@ impl std::fmt::Display for ExecError {
                 "row {row} of this request is refused where it applies: {}",
                 reason.as_str()
             ),
-            ExecError::LabelNotHeld { artifact } => write!(
-                f,
-                "artifact {artifact} of this request sets an access label this credential's \
-                 terms do not satisfy; send a label they satisfy"
-            ),
+            ExecError::LabelNotHeld { artifact } => {
+                write!(f, "artifact {artifact} of this request {LABEL_NOT_HELD}")
+            }
             ExecError::Store { detail } => write!(f, "store failure: {detail}"),
         }
     }

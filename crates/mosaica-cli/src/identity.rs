@@ -657,9 +657,8 @@ pub(crate) struct Granted {
     #[arg(long = "term", value_name = "TERM")]
     terms: Vec<String>,
     /// A permission, which says what the grantee may do: `read`, `write`, `authorise-as`,
-    /// `admin`, `read-all` or `write-all`. A write with `write` names only the items, layers,
-    /// views and artifacts the grantee's terms reach; one with `write-all` names every one, and
-    /// declaring and dropping need it.
+    /// `admin`, `read-all` or `write-all`. With `write`, the grantee writes only within its terms;
+    /// `write-all` writes everywhere and is needed to declare and drop.
     #[arg(long, value_name = "NAME")]
     permission: Option<String>,
 }

@@ -53,7 +53,7 @@ pub use registry::{
 };
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{
-    batch_identities, BatchIdentity, CarriedBatch, ChangeOp, ExecutorWal, MembershipGrowth,
+    accepted_batches, AcceptedBatch, CarriedBatch, ChangeOp, ExecutorWal, MembershipGrowth,
     OverlaySnapshotEntry, PublishedArtifact, RowOutcome, RowReceipt, Wal, WalEdit, WalError,
     WalRecord, WalRow, WalScalar,
 };

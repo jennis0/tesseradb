@@ -412,6 +412,7 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
                     .to_string(),
             )
         }
+        AcceptError::Engine(e) => map_engine_error(e),
         // The detail names rows by position, values as sent and items by `mosaica_id`.
         AcceptError::Conflict(detail) => ApiError::Conflict(detail),
         AcceptError::Contract(detail) => ApiError::Contract(detail),
@@ -443,7 +444,7 @@ pub fn map_change_batch_error(
     failure: mosaica_engine::AcceptError,
 ) -> ApiError {
     // Refused before anything was applied: a deletion of a layer's own identifier, or a strict
-    // request's row naming nothing.
+    // request's refused row.
     if matches!(
         failure,
         mosaica_engine::AcceptError::Exec(

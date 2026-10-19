@@ -1397,10 +1397,9 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.values_bound += int(body.get("added", 0))
         report.titles_set += int(body.get("titles", 0))
     elif page.kind == "vocabulary_values":
-        # Here `existing` is a count: the keys of this page the value set already bound. A writer
-        # without `write-all` is told of a derived vocabulary only `bound`.
+        # Here `existing` is a count: the keys of this page the value set already bound.
         report.already_present += int(body.get("existing", 0))
-        report.values_bound += int(body.get("added", body.get("bound", 0)))
+        report.values_bound += int(body.get("added", 0))
         report.titles_set += int(body.get("titles", 0))
     elif page.kind == "grow":
         for one in body.get("artifacts", []):

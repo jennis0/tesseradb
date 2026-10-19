@@ -769,7 +769,7 @@ fn declare_vocabulary_column(
         engine.mint_vocabulary_values(
             name.clone(),
             (minted..end).map(value).collect(),
-            mosaica_engine::WriteScope::All,
+            &mosaica_engine::WriteScope::All,
         )?;
         minted = end;
     }

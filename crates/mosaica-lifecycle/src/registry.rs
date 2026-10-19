@@ -90,8 +90,8 @@ pub enum RegistryError {
     Shape { layer: String, detail: String },
     /// This level already holds an artifact under that key, or the batch repeats it.
     DuplicateKey { layer: String, key: String },
-    /// A publication names a key this level holds for an artifact the writer may not name. A key
-    /// names one artifact, so it is not given to a second; nothing else of the holder is said.
+    /// A key this level holds for an artifact the writer may not name; nothing else of the holder
+    /// is said.
     KeyHeld {
         layer: String,
         level: u32,
@@ -329,6 +329,26 @@ fn ordinal_within(
         .filter(|ordinal| reach.artifact(layer, level, *ordinal))
 }
 
+/// The ordinal `key` names in `level` of `layer`, in `view`, where `reach` may name it, `None`
+/// where no artifact holds it, and [`RegistryError::KeyHeld`] where one `reach` may not name does.
+fn held_key(
+    store: &ArtifactStore,
+    reach: &dyn Reach,
+    layer: &str,
+    level: u32,
+    view: Option<&str>,
+    key: &str,
+) -> Result<Option<u32>, RegistryError> {
+    match store.ordinal_of_key(layer, level, view, key) {
+        Some(ordinal) if !reach.artifact(layer, level, ordinal) => Err(RegistryError::KeyHeld {
+            layer: layer.to_string(),
+            level,
+            key: key.to_string(),
+        }),
+        held => Ok(held),
+    }
+}
+
 /// The views of each group, as whoever publishes sees them: a build its declared roster, a running
 /// service its live one. A publication into a group-scoped layer stamps each artifact with its
 /// view's incarnation and refuses a view the group does not have.
@@ -550,8 +570,7 @@ impl std::fmt::Display for RegistryError {
             ),
             RegistryError::KeyHeld { layer, level, key } => write!(
                 f,
-                "level {level} of {layer} holds an artifact keyed {key}, and a key names one \
-                 artifact; publish under another key"
+                "level {level} of {layer} already holds key {key}; publish under another key"
             ),
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
@@ -1253,16 +1272,7 @@ impl LayerRegistry {
                 let Some(key) = artifact.key.as_deref() else {
                     return Ok(None);
                 };
-                match store.ordinal_of_key(layer_name, level, *view, key) {
-                    Some(ordinal) if !reach.artifact(layer_name, level, ordinal) => {
-                        Err(RegistryError::KeyHeld {
-                            layer: layer_name.to_string(),
-                            level,
-                            key: key.to_string(),
-                        })
-                    }
-                    held => Ok(held),
-                }
+                held_key(store, reach, layer_name, level, *view, key)
             })
             .collect::<Result<_, _>>()?;
         let fresh: Vec<IncomingArtifact> = incoming
@@ -2104,11 +2114,7 @@ impl LayerRegistry {
                 // A new attachment is stored only here: every artifact of a layer that declares
                 // a dependency is published with its attachment, so a later fill of one can only
                 // repeat it.
-                if let Some(target) = self
-                    .layers
-                    .get(&wanted.layer)
-                    .filter(|_| reach.layer(&wanted.layer))
-                {
+                if let Ok(target) = self.layer_within(&wanted.layer, reach) {
                     if !layer.declaration.shares_a_view_with(&target.declaration) {
                         return Err(RegistryError::NoSharedView {
                             layer: layer_name.to_string(),
@@ -2527,9 +2533,7 @@ impl LayerRegistry {
                 }
                 // A key an artifact the writer may not name holds is not minted again.
                 let in_view = declaration.scope.group().and(view);
-                if store.ordinal_of_key(&layer, level, in_view, &key).is_some() {
-                    return Err(RegistryError::KeyHeld { layer, level, key });
-                }
+                held_key(store, reach, &layer, level, in_view, &key)?;
                 let unmintable = |why: &str| {
                     Err(RegistryError::Unmintable {
                         layer: layer.clone(),
@@ -2667,7 +2671,6 @@ impl LayerRegistry {
         if child_mints {
             return Ok(EdgeCheck::Mints);
         }
-        self.layer_within(layer, reach)?;
         let ordinal = self.resolve_growth_key(layer, level, view, child, store, reach)?;
         let held: Vec<crate::wal::ParentRef> = store
             .get(layer, level, ordinal)
@@ -3117,10 +3120,7 @@ impl LayerRegistry {
         let names = self
             .layers
             .iter()
-            .filter(|(_, layer)| match &layer.declaration.visibility {
-                None => true,
-                Some(label) => admits(label),
-            })
+            .filter(|(_, layer)| layer.declaration.reached_by(&admits))
             .map(|(name, _)| name.clone())
             .collect();
         ResolvedLayers {
@@ -3629,9 +3629,6 @@ mod tests {
         }
     }
 
-    /// **An artifact out of the writer's reach is one nobody holds, and its key is not given
-    /// again**: a growth and a parent naming one are refused as for a name nothing holds, and a
-    /// publication or a mint under its key is refused as the key held.
     #[test]
     fn what_a_writer_cannot_reach_is_named_by_nothing_and_its_key_is_not_given_again() {
         let mut reg = LayerRegistry::new();
@@ -5632,7 +5629,7 @@ mod tests {
         let mut fits = incoming("c2", &[1]);
         fits.access = Some(vec![vec![b'x'; u16::MAX as usize - 1]]);
         assert!(reg
-            .prepare_put("clusters/a", 0, &[fits], &store, &AnyView, &Everything,)
+            .prepare_put("clusters/a", 0, &[fits], &store, &AnyView, &Everything)
             .is_ok());
     }
 }

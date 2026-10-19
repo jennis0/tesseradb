@@ -15,11 +15,10 @@
 //!
 //! A deleted item names nothing: its values may be given to a new item.
 //!
-//! A writer whose terms bound its writes names only the items inside them. An item outside names
-//! nothing, as an absent one does: its `mosaica_id` is unknown, and a value it holds names no item.
-//! The one exception is uniqueness: a row that would create an item, or set a value on the item it
-//! names, with a value an item outside holds is refused as `value_held`, which says that the value
-//! is held and nothing about its holder. A row only addressing items by such a value names nothing.
+//! A writer whose terms bound its writes names only the items inside them; one outside names
+//! nothing, as an absent one does. A row that would create an item, or set a value on the item it
+//! names, with a unique value an outside item holds is refused as `value_held`, which says nothing
+//! of the holder.
 //!
 //! The pieces are public so that each path applies them to the batch shape it holds.
 //! [`name_row`] decides one row from what its identifiers name, and [`require_identifier`] says
@@ -119,12 +118,12 @@ pub enum Refusal {
     /// A later row sets a unique value an earlier row sets: `rows` is the kept row and the refused
     /// one.
     OneValueTwice { rows: [usize; 2], field: Identifier },
-    /// A row would create an item, or set a value on the item `names`, with a value of `field`
-    /// that an item outside the writer's terms holds.
+    /// A row would create an item, where `creates`, or set a value on the item it names, with a
+    /// value of `field` that an item outside the writer's terms holds.
     ValueHeld {
         row: usize,
         field: Identifier,
-        names: Option<ItemAt>,
+        creates: bool,
     },
     /// A row sets an access label the writer's terms do not satisfy. Decided by the service before
     /// the rule, from the row alone.
@@ -332,16 +331,16 @@ pub fn resolve<H: Holdings>(
                 row: at,
                 named: named.to_vec(),
             }),
-            (Named::One(item), Some(field)) => Verdict::Refused(Refusal::ValueHeld {
+            (Named::One(_), Some(field)) => Verdict::Refused(Refusal::ValueHeld {
                 row: at,
                 field,
-                names: Some(item),
+                creates: false,
             }),
             (Named::Nothing, Some(field)) if batch.creates() => {
                 Verdict::Refused(Refusal::ValueHeld {
                     row: at,
                     field,
-                    names: None,
+                    creates: true,
                 })
             }
             (Named::One(item), None) => Verdict::Names(item),
@@ -759,10 +758,6 @@ mod tests {
         );
     }
 
-    /// A value held outside the writer's terms names nothing where a batch only names items. Where
-    /// a row would create an item with it, or set it on the item the row names, the row is refused
-    /// as the value held, naming no holder; where the value is a row's only name in a batch that
-    /// creates nothing, the row names no item, as for a value nobody holds.
     #[test]
     fn a_value_held_outside_the_writers_terms_names_nothing_and_is_never_given_twice() {
         let mut held = held();
@@ -782,12 +777,12 @@ mod tests {
                 refused(Refusal::ValueHeld {
                     row: 0,
                     field: Identifier::Unique(0),
-                    names: None
+                    creates: true
                 }),
                 refused(Refusal::ValueHeld {
                     row: 1,
                     field: Identifier::Unique(0),
-                    names: Some(e(2))
+                    creates: false
                 }),
                 Verdict::Creates,
             ]
@@ -799,7 +794,7 @@ mod tests {
                 refused(Refusal::ValueHeld {
                     row: 1,
                     field: Identifier::Unique(0),
-                    names: Some(e(2))
+                    creates: false
                 }),
                 refused(Refusal::NamesNoItem { row: 2 }),
             ]
@@ -814,7 +809,6 @@ mod tests {
         );
     }
 
-    /// A row refused for a value held outside claims neither its item nor its values.
     #[test]
     fn a_row_refused_for_a_value_held_outside_refuses_no_later_row() {
         let mut held = held();
@@ -832,7 +826,7 @@ mod tests {
                 refused(Refusal::ValueHeld {
                     row: 0,
                     field: Identifier::Unique(1),
-                    names: Some(e(1))
+                    creates: false
                 }),
                 Verdict::Names(e(1)),
             ]

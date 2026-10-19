@@ -212,9 +212,9 @@ class PagedReport(Summarised):
     - `items_edited`: items already held that a row changed: a value, the label or a position.
       An edited item keeps its `mosaica_id`. Placing an item in an annotation changes the
       annotation, not the item, and is counted in `memberships_joined`.
-    - `values_bound`, `titles_set`: vocabulary values added and titles replaced. Of a `derived`
-      vocabulary a writer without `write-all` is told only how many of its values are bound,
-      added or held before, and `values_bound` counts those.
+    - `values_bound`, `titles_set`: vocabulary values added and titles replaced. A writer without
+      `write-all` is not told which values of a `derived` vocabulary it added, and these count
+      none of them.
     - `already_present`: parts the database already held, which changed nothing, rows naming an
       item they matched among them.
     - `without_content`: annotations added without the content they declare.
@@ -230,8 +230,7 @@ class PagedReport(Summarised):
       `member` `None`. `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`,
       `one_value_twice`, `unknown_mosaica_id`, `value_held` (a unique value an item outside the
       writer's terms holds) and `label_not_held` (a label the writer's terms do not satisfy).
-      `refused_by_reason` counts them. A writer without `write-all` names only the items, layers,
-      views and annotations its terms reach.
+      `refused_by_reason` counts them.
     - `ignored_columns`: by layer, the fields of its member structs, and the columns of the
       memberships its declaration writes, that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those the plan did not send, and any the server says it
@@ -364,8 +363,7 @@ class ChangeReport(Summarised):
     - `accepted`: how many were applied.
     - `refused`: each row the identity rule refused, `{"row", "reason"}`, `row` being its
       position in what was given, and `reason` one of `names_no_item`, `names_two_items` and
-      `unknown_mosaica_id`; an item outside the terms of a writer without `write-all` names
-      nothing. The other rows were applied. `refused_by_reason` counts them.
+      `unknown_mosaica_id`. The other rows were applied. `refused_by_reason` counts them.
     - `ignored_columns`: the columns given that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those not sent, and any the server says it ignored.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`

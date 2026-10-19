@@ -511,9 +511,8 @@ pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
         | WalRecord::PlainViewCreate { .. }
         | WalRecord::ShardsDeclare { .. }
         | WalRecord::ShardOpen { .. }
-        | WalRecord::ShardSeal { .. } => {}
-        // A receipt names an item by `mosaica_id`, and its rows by its record, which a flush wrote.
-        WalRecord::BatchesCarried { .. } => {}
+        | WalRecord::ShardSeal { .. }
+        | WalRecord::BatchesCarried { .. } => {}
     }
 }
 

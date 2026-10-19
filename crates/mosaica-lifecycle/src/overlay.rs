@@ -479,9 +479,9 @@ impl<'a> Replay<'a> {
             | WalRecord::PlainViewCreate { .. }
             | WalRecord::ShardsDeclare { .. } => {}
             // Opening and sealing a shard buffer and deny nothing.
-            WalRecord::ShardOpen { .. } | WalRecord::ShardSeal { .. } => {}
-            // The batches a rotation carries are the accepted-batch index's.
-            WalRecord::BatchesCarried { .. } => {}
+            WalRecord::ShardOpen { .. }
+            | WalRecord::ShardSeal { .. }
+            | WalRecord::BatchesCarried { .. } => {}
         }
     }
 

@@ -19,14 +19,16 @@ use axum::{Json, Router};
 
 use sha2::{Digest, Sha256};
 
-use mosaica_engine::{MetaView, ScopedScalar};
+use mosaica_engine::{MemberSet, MetaView, ScopedScalar};
 use mosaica_lifecycle::ChangeOp;
 
 use mosaica_types::view::ViewMetadataValue;
 
 use crate::address::Table;
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
-use crate::error::{map_accept_error, map_change_batch_error, map_join_error, ApiError};
+use crate::error::{
+    map_accept_error, map_change_batch_error, map_engine_error, map_join_error, ApiError,
+};
 use crate::health::is_ready;
 use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
 
@@ -721,20 +723,17 @@ fn run_changes(
         });
         tables.push(Table::one_row(item.matching));
     }
-    let mut merged = crate::address::Merged::of(tables)?;
-    let names = merged.names(state, &caller.write_scope(&state.engine), true)?;
+    let (table, _) = crate::address::merge(tables)?;
+    let names = state
+        .engine
+        .names(table, &caller.write_scope(&state.engine), true)
+        .map_err(map_engine_error)?;
     let ignored = names.ignored().to_vec();
     let applied = ops.clone();
     let refused = state
         .engine
         .accept_changes_named(names, ops, strict)
-        .map_err(|e| match e {
-            mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::NamesRefused {
-                row,
-                reason,
-            }) => crate::address::strict_refusal("the request", row, reason),
-            e => map_change_batch_error(&applied, e),
-        })?;
+        .map_err(|e| map_change_batch_error(&applied, e))?;
     Ok(ChangesDone {
         accepted: applied.len() - refused.len(),
         refused: refused
@@ -1145,7 +1144,6 @@ async fn declare_vocabulary(
     let body = serde_json::json!({
         "name": name,
         "existing": declared_now.existing,
-        "bound": page.bound(),
         "added": page.added,
         "titles": page.titles,
     });
@@ -1177,12 +1175,11 @@ async fn mint_vocabulary_values(
             let scope = caller.write_scope(&state.engine);
             state
                 .engine
-                .mint_vocabulary_values(vocabulary, values, scope)
+                .mint_vocabulary_values(vocabulary, values, &scope)
         })
         .await?;
-    // A writer whose terms bound its writes is told of a derived vocabulary only how many of the
-    // page's keys are bound.
-    let mut body = serde_json::json!({ "name": name, "bound": page.bound() });
+    // A withheld page answers only its name.
+    let mut body = serde_json::json!({ "name": name });
     if !page.withheld {
         body["added"] = serde_json::json!(page.added);
         body["existing"] = serde_json::json!(page.existing);
@@ -1607,20 +1604,8 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
                     })
                     .collect(),
             );
-            lists.push(MemberList {
-                artifact: index,
-                list: "members".to_string(),
-                content: 0,
-                table,
-                whole: false,
-            });
-            lists.push(MemberList {
-                artifact: index,
-                list: "leaving".to_string(),
-                content: 0,
-                table: Table::default(),
-                whole: false,
-            });
+            lists.push(MemberList::new(index, MemberSet::Members, table));
+            lists.push(MemberList::new(index, MemberSet::Leaving, Table::default()));
             let labels = access
                 .as_ref()
                 .map(|access| access.labels(row).map(str::to_string).collect());
@@ -1759,118 +1744,132 @@ fn struct_elements<'a>(
         })
 }
 
-/// One member table of an artifact: which list it is, as a refusal names it, and the table.
+/// One member table of an artifact: which set it fills, the table, and its rows among the
+/// request's once [`member_names`] has resolved them.
 struct MemberList {
     artifact: usize,
-    list: String,
-    /// The content a generating set belongs to, by its position among the artifact's contents.
-    content: usize,
+    set: MemberSet,
     table: Table,
-    /// A refused row refuses the whole request, strict or not: a generating set, which a viewer
-    /// must see whole to be served the content, never loses a member.
-    whole: bool,
+    rows: std::ops::Range<usize>,
 }
 
-/// Every member table of a request, moved into the one table the engine resolves.
-fn merge_member_lists(lists: &mut [MemberList]) -> Result<crate::address::Merged, ApiError> {
-    crate::address::Merged::of(
-        lists
-            .iter_mut()
-            .map(|l| std::mem::take(&mut l.table))
-            .collect(),
-    )
+impl MemberList {
+    fn new(artifact: usize, set: MemberSet, table: Table) -> MemberList {
+        MemberList {
+            artifact,
+            set,
+            table,
+            rows: 0..0,
+        }
+    }
+
+    /// The list's name, as a request writes it and a refusal names it.
+    fn name(&self) -> String {
+        match self.set {
+            MemberSet::Members => "members".to_string(),
+            MemberSet::Excluding => "excluding".to_string(),
+            MemberSet::Leaving => "leaving".to_string(),
+            MemberSet::GeneratedFrom(rank) => format!("content.{rank}.generated_from"),
+        }
+    }
 }
 
-/// Every member table of a request, which [`merge_member_lists`] moved into `merged`, resolved
-/// in one call, each list as the rows of the names it is. A refused row refuses the request where
-/// it is `strict` or the list is whole; otherwise it is dropped and listed.
+/// Every member table of a request, moved into one table and resolved in one call, each list as
+/// the rows of the names it is.
 fn member_names(
     state: &AppState,
-    merged: &mut crate::address::Merged,
-    lists: &[MemberList],
+    lists: &mut [MemberList],
     strict: bool,
     scope: &mosaica_engine::WriteScope,
 ) -> Result<mosaica_engine::MemberNames, ApiError> {
-    let names = merged.names(state, scope, false)?;
-    let mut start = 0;
+    let tables = lists
+        .iter_mut()
+        .map(|l| std::mem::take(&mut l.table))
+        .collect();
+    let (table, rows) = crate::address::merge(tables)?;
+    let names = state
+        .engine
+        .names(table, scope, false)
+        .map_err(map_engine_error)?;
     let named = lists
-        .iter()
-        .zip(merged.widths())
-        .map(|(list, width)| {
-            let set = match list.list.as_str() {
-                "members" => mosaica_engine::MemberSet::Members,
-                "excluding" => mosaica_engine::MemberSet::Excluding,
-                "leaving" => mosaica_engine::MemberSet::Leaving,
-                _ => mosaica_engine::MemberSet::GeneratedFrom(list.content),
-            };
-            let rows = start..start + width;
-            start += width;
+        .iter_mut()
+        .zip(rows)
+        .map(|(list, rows)| {
+            list.rows = rows.clone();
             mosaica_engine::NamedList {
                 artifact: list.artifact,
-                set,
+                set: list.set,
                 rows,
-                whole: strict || list.whole,
             }
         })
         .collect();
-    Ok(mosaica_engine::MemberNames::new(names, named).strict(strict))
+    Ok(mosaica_engine::MemberNames::new(names, named, strict))
 }
 
-/// Row `row` of `merged`'s names as the request wrote it: its list and its row there.
-fn member_row<'l>(
-    merged: &crate::address::Merged,
-    lists: &'l [MemberList],
-    row: usize,
-) -> (&'l MemberList, usize) {
-    let (table, at) = merged.locate(row);
-    (&lists[table], at)
+/// Row `row` of a request's member names as the request wrote it: its list and its row there.
+fn member_row(lists: &[MemberList], row: usize) -> (&MemberList, usize) {
+    let list = lists
+        .iter()
+        .find(|list| list.rows.contains(&row))
+        .expect("every row of the names is a row of one list");
+    (list, row - list.rows.start)
 }
 
-/// The member rows a write refused where it applied, as `{artifact, list, row, reason}`.
-fn refused_members(
-    merged: &crate::address::Merged,
+/// What a member write refused where it applied: each member row as
+/// `{artifact, list, row, reason}`, and each artifact refused for an access label the writer's
+/// terms do not satisfy as `{artifact, reason}`.
+fn refusals(
     lists: &[MemberList],
     refused: &[(usize, mosaica_lifecycle::resolve::Reason)],
+    unheld: &[usize],
 ) -> Vec<serde_json::Value> {
-    refused
-        .iter()
-        .map(|(row, reason)| {
-            let (list, at) = member_row(merged, lists, *row);
-            serde_json::json!({
-                "artifact": list.artifact,
-                "list": list.list,
-                "row": at,
-                "reason": reason.as_str(),
-            })
+    let rows = refused.iter().map(|(row, reason)| {
+        let (list, at) = member_row(lists, *row);
+        serde_json::json!({
+            "artifact": list.artifact,
+            "list": list.name(),
+            "row": at,
+            "reason": reason.as_str(),
         })
-        .collect()
-}
-
-/// The artifacts a write refused for an access label the writer's terms do not satisfy, as
-/// `{artifact, reason}`.
-fn unheld_artifacts(unheld: &[usize]) -> impl Iterator<Item = serde_json::Value> + '_ {
-    unheld.iter().map(|artifact| {
+    });
+    let artifacts = unheld.iter().map(|artifact| {
         serde_json::json!({
             "artifact": artifact,
             "reason": mosaica_lifecycle::resolve::Reason::LabelNotHeld.as_str(),
         })
-    })
+    });
+    rows.chain(artifacts).collect()
 }
 
-/// A member write's failure: a refused row of a whole list as the strict refusal naming its list
-/// and its row there, and anything else as [`crate::error::map_accept_error`] answers it.
-fn member_refusal(
-    merged: &crate::address::Merged,
-    lists: &[MemberList],
-    failure: mosaica_engine::AcceptError,
-) -> ApiError {
+/// Each of `count` artifacts' answer, in the caller's order: `None` for one in `unheld`, which
+/// wrote nothing, and otherwise the next of `answers`.
+fn with_unheld<T>(
+    count: usize,
+    unheld: &[usize],
+    answers: impl IntoIterator<Item = T>,
+) -> Vec<Option<T>> {
+    let mut answers = answers.into_iter();
+    (0..count)
+        .map(|at| {
+            if unheld.contains(&at) {
+                None
+            } else {
+                answers.next()
+            }
+        })
+        .collect()
+}
+
+/// A member write's failure: a refused row as the strict refusal naming its list and its row
+/// there, and anything else as [`crate::error::map_accept_error`] answers it.
+fn member_refusal(lists: &[MemberList], failure: mosaica_engine::AcceptError) -> ApiError {
     match failure {
         mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::NamesRefused {
             row,
             reason,
         }) => {
-            let (list, at) = member_row(merged, lists, row);
-            let what = format!("artifact {}'s `{}`", list.artifact, list.list);
+            let (list, at) = member_row(lists, row);
+            let what = format!("artifact {}'s `{}`", list.artifact, list.name());
             crate::address::strict_refusal(&what, at, reason)
         }
         e => crate::error::map_accept_error(e),
@@ -2216,19 +2215,15 @@ fn canonical_batch_shapes(
     };
     let mut shapes = Vec::with_capacity(rows.len());
     let mut reports: Vec<serde_json::Value> = Vec::new();
-    let reached: Vec<String> = match scope {
-        mosaica_engine::WriteScope::All => Vec::new(),
-        _ => state
-            .engine
-            .meta_as(scope)
-            .views
-            .into_iter()
-            .map(|v| v.id)
-            .collect(),
-    };
-    let reported = |report: serde_json::Value| match scope {
-        mosaica_engine::WriteScope::All => report,
-        _ => serde_json::Value::Array(
+    let reached: Vec<String> = state
+        .engine
+        .meta_as(scope)
+        .views
+        .into_iter()
+        .map(|v| v.id)
+        .collect();
+    let reported = |report: serde_json::Value| {
+        serde_json::Value::Array(
             report
                 .as_array()
                 .into_iter()
@@ -2236,7 +2231,7 @@ fn canonical_batch_shapes(
                 .filter(|entry| reached.iter().any(|view| entry["view"] == view.as_str()))
                 .cloned()
                 .collect(),
-        ),
+        )
     };
     for (index, row) in rows.iter().enumerate() {
         let canonical = match declaration {
@@ -2384,53 +2379,38 @@ async fn publish_artifacts(
             // Each artifact's `members` and `excluding` sizes, where it carries them.
             let mut sizes: Vec<(Option<usize>, Option<usize>)> = vec![(None, None); artifacts.len()];
             for (index, artifact) in artifacts.iter_mut().enumerate() {
-                for (list, value) in [
-                    ("members", artifact.members.take()),
-                    ("excluding", artifact.excluding.take()),
+                for (set, value) in [
+                    (MemberSet::Members, artifact.members.take()),
+                    (MemberSet::Excluding, artifact.excluding.take()),
                 ] {
-                    let what = format!("artifact {index}'s `{list}`");
+                    let list = MemberList::new(index, set, Table::default());
+                    let what = format!("artifact {index}'s `{}`", list.name());
                     if let Some(table) = member_table(&what, value)? {
-                        match list {
-                            "members" => sizes[index].0 = Some(table.len()),
+                        match set {
+                            MemberSet::Members => sizes[index].0 = Some(table.len()),
                             _ => sizes[index].1 = Some(table.len()),
                         }
-                        lists.push(MemberList {
-                            artifact: index,
-                            list: list.to_string(),
-                            content: 0,
-                            table,
-                            whole: false,
-                        });
+                        lists.push(MemberList { table, ..list });
                     }
                 }
                 for (rank, content) in artifact.content.iter_mut().enumerate() {
-                    let list = format!("content.{rank}.generated_from");
-                    let what = format!("artifact {index}'s `{list}`");
+                    let list = MemberList::new(index, MemberSet::GeneratedFrom(rank), Table::default());
+                    let what = format!("artifact {index}'s `{}`", list.name());
                     let table = member_table(&what, content.generated_from.take())?;
                     lists.push(MemberList {
-                        artifact: index,
-                        list,
-                        content: rank,
                         table: table.unwrap_or_default(),
-                        whole: true,
+                        ..list
                     });
                 }
             }
-            let carries = |index: usize, list: &str| {
-                let (members, excluding) = sizes[index];
-                match list {
-                    "members" => members,
-                    _ => excluding,
-                }
-            };
 
             // `members` and `excluding` never together, and an exclusion list must fit one request, since
             // its complement cannot be taken until the whole list is in; a longer one is sent as members.
-            for index in 0..artifacts.len() {
-                let Some(excluding) = carries(index, "excluding") else {
+            for (index, (members, excluding)) in sizes.iter().enumerate() {
+                let Some(excluding) = *excluding else {
                     continue;
                 };
-                if carries(index, "members").is_some() {
+                if members.is_some() {
                     return Err(ApiError::Contract(format!(
                         "artifact {index} of this publication carries both `members` and `excluding`; \
                          give one of them"
@@ -2494,8 +2474,7 @@ async fn publish_artifacts(
             )?;
 
             let keys: Vec<Option<String>> = artifacts.iter().map(|a| a.key.clone()).collect();
-            let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict, &scope)?;
+            let names = member_names(state, &mut lists, strict, &scope)?;
             let ignored = names.names().ignored().to_vec();
             // Each artifact's sets are filled from its member tables by the engine.
             let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
@@ -2534,25 +2513,17 @@ async fn publish_artifacts(
             let batch = state
                 .engine
                 .put_artifacts_named(name.clone(), level, incoming, names)
-                .map_err(|e| member_refusal(&merged, &lists, e))?;
-            let mut refused = refused_members(&merged, &lists, &batch.refused);
-            refused.extend(unheld_artifacts(&batch.unheld));
+                .map_err(|e| member_refusal(&lists, e))?;
+            let refused = refusals(&lists, &batch.refused, &batch.unheld);
             Ok((batch, keys, shape_reports, refused, ignored))
         })
         .await?;
 
-    // An artifact refused for its label wrote nothing and has no `mosaica_id`.
-    let mut ids = batch.mosaica_ids.iter();
+    let ids = with_unheld(keys.len(), &batch.unheld, &batch.mosaica_ids);
     let published: Vec<serde_json::Value> = keys
         .into_iter()
-        .enumerate()
-        .map(|(at, key)| {
-            let id = match batch.unheld.contains(&at) {
-                true => None,
-                false => ids.next().map(|id| id.raw().to_string()),
-            };
-            serde_json::json!({ "key": key, "mosaica_id": id })
-        })
+        .zip(ids)
+        .map(|(key, id)| serde_json::json!({ "key": key, "mosaica_id": id.map(|id| id.raw().to_string()) }))
         .collect();
     // `shapes` is the build's shape report, present only when a shape was canonicalised.
     // `joined` counts memberships added to created and held artifacts alike. The status is 201
@@ -2666,7 +2637,7 @@ async fn grow_memberships(
     let encoding = body_encoding(&headers)?;
     // The body is decoded, checked and resolved on the blocking pool with the write.
     let strict = query.strict;
-    let (grown, unheld, keys, shape_reports, refused, ignored) = state
+    let (grown, keys, shape_reports, refused, ignored) = state
         .blocking(move |state| {
             let (
                 GrowBody {
@@ -2680,20 +2651,15 @@ async fn grow_memberships(
                     let mut body: GrowBody = artifact_json(&body, "growth")?;
                     let mut lists = Vec::with_capacity(body.artifacts.len() * 2);
                     for (index, artifact) in body.artifacts.iter_mut().enumerate() {
-                        // Members joining a generating set are refused whole, as a publication's
-                        // generating set is; one leaving it that names nothing leaves nothing.
-                        let generating = artifact.rank.is_some();
-                        for (list, value, whole) in [
-                            ("members", artifact.members.take(), generating),
-                            ("leaving", artifact.leaving.take(), false),
+                        for (set, value) in [
+                            (MemberSet::Members, artifact.members.take()),
+                            (MemberSet::Leaving, artifact.leaving.take()),
                         ] {
-                            let what = format!("artifact {index}'s `{list}`");
+                            let list = MemberList::new(index, set, Table::default());
+                            let what = format!("artifact {index}'s `{}`", list.name());
                             lists.push(MemberList {
-                                artifact: index,
-                                list: list.to_string(),
-                                content: 0,
                                 table: member_table(&what, value)?.unwrap_or_default(),
-                                whole,
+                                ..list
                             });
                         }
                     }
@@ -2738,8 +2704,7 @@ async fn grow_memberships(
             )?;
 
             let keys: Vec<String> = artifacts.iter().map(|a| a.key.clone()).collect();
-            let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict, &scope)?;
+            let names = member_names(state, &mut lists, strict, &scope)?;
             let ignored = names.names().ignored().to_vec();
             // Each join's sets are filled from its member tables by the engine.
             let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
@@ -2775,26 +2740,20 @@ async fn grow_memberships(
                     }
                 })
                 .collect();
-            let (grown, refused, unheld) = state
+            let grown = state
                 .engine
                 .grow_memberships_named(name.clone(), level, joins, names)
-                .map_err(|e| member_refusal(&merged, &lists, e))?;
-            let mut refused = refused_members(&merged, &lists, &refused);
-            refused.extend(unheld_artifacts(&unheld));
-            Ok((grown, unheld, keys, shape_reports, refused, ignored))
+                .map_err(|e| member_refusal(&lists, e))?;
+            let refused = refusals(&lists, &grown.refused, &grown.unheld);
+            Ok((grown, keys, shape_reports, refused, ignored))
         })
         .await?;
 
-    // A row refused for its label wrote nothing and answers no `mosaica_id`.
-    let mut receipts = grown.iter();
+    let receipts = with_unheld(keys.len(), &grown.unheld, &grown.grown);
     let artifacts: Vec<serde_json::Value> = keys
         .into_iter()
-        .enumerate()
-        .map(|(at, key)| {
-            let receipt = match unheld.contains(&at) {
-                true => None,
-                false => receipts.next(),
-            };
+        .zip(receipts)
+        .map(|(key, receipt)| {
             let Some(receipt) = receipt else {
                 return serde_json::json!({
                     "key": key, "mosaica_id": null, "joined": 0, "filled": 0, "left": 0,

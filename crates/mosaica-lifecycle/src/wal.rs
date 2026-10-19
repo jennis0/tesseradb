@@ -484,26 +484,35 @@ pub enum WalRecord {
     ShardOpen { shard: ShardId },
     /// A point shard sealed: it takes no new item at its high water again. Replay seals it.
     ShardSeal { shard: ShardId },
-    /// The accepted batches a rotation carries past the members it reclaims, whose records those
-    /// members held, so that a retry inside the replay horizon is answered as it was after a
-    /// restart too. Written beside the rotation's [`WalRecord::OverlaySnapshot`], where it has
-    /// any batch to carry.
+    /// The accepted batches inside the replay horizon whose records a rotation reclaims, so a
+    /// retry after a restart is answered as before. Written after the rotation's
+    /// [`WalRecord::OverlaySnapshot`] when non-empty.
     BatchesCarried { batches: Vec<CarriedBatch> },
 }
 
-/// One accepted batch a [`WalRecord::BatchesCarried`] carries: what its [`WalRecord::IngestBatch`]
-/// said of the request, where that record lay, and when the batch was accepted.
+/// One accepted batch, by the caller that sent it and the id it chose, as a
+/// [`WalRecord::BatchesCarried`] carries it.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarriedBatch {
     pub principal: String,
     pub batch_id: String,
+    pub batch: AcceptedBatch,
+}
+
+/// What an accepted batch's retry is answered with: the hash of the bytes sent and what each row
+/// of the request became, and where its [`WalRecord::IngestBatch`] lies and when it was accepted.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedBatch {
     pub body_hash: [u8; 32],
     pub receipt: Vec<RowReceipt>,
-    /// The position of the batch's own record, which a reclaimed member held.
+    /// The position of the batch's own record.
     pub wal_pos: u64,
-    /// When the batch was accepted, in milliseconds since the Unix epoch.
+    /// When the batch was accepted, in milliseconds since the Unix epoch; for a batch read back
+    /// from its own record at a restart, when the restart read it.
     pub accepted_ms: u64,
 }
 
@@ -584,19 +593,6 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
     }
 }
 
-/// What a record carries of the request that produced it: the caller that sent it, the id it
-/// chose, the hash of the bytes it sent, and what the request did to each of its rows.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BatchIdentity<'a> {
-    pub principal: &'a str,
-    pub batch_id: &'a str,
-    pub body_hash: [u8; 32],
-    pub receipt: &'a [RowReceipt],
-    /// Where the batch's own record lay and when the batch was accepted, for a batch a rotation
-    /// carried; `None` for the batch's own record, which lies where it is read.
-    pub carried: Option<(u64, u64)>,
-}
-
 /// What an accepted ingest batch did with one of its rows, and the `mosaica_id` of the item the
 /// row named or created: none for a refused row.
 ///
@@ -646,8 +642,9 @@ pub struct WalEdit {
     pub rows: Vec<WalRow>,
 }
 
-/// The batches a record was written for or carries — **the one rule the accepted-batch index is
-/// built by**, at restart and at every accept.
+/// The batches a record was written for or carries, an [`WalRecord::IngestBatch`]'s own as it lies
+/// at `position` and is read at `read_ms` — **the one rule the accepted-batch index is built by**,
+/// at restart and at every accept.
 ///
 /// The index that answers `x-mosaica-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
@@ -656,7 +653,7 @@ pub struct WalEdit {
 /// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
 /// decision taken here, and the compiler asks for it rather than a default answering "carries no
 /// batch" for something that does.
-pub fn batch_identities(record: &WalRecord) -> Vec<BatchIdentity<'_>> {
+pub fn accepted_batches(record: &WalRecord, position: u64, read_ms: u64) -> Vec<CarriedBatch> {
     match record {
         WalRecord::IngestBatch {
             principal,
@@ -664,23 +661,17 @@ pub fn batch_identities(record: &WalRecord) -> Vec<BatchIdentity<'_>> {
             body_hash,
             receipt,
             ..
-        } => vec![BatchIdentity {
-            principal,
-            batch_id,
-            body_hash: *body_hash,
-            receipt,
-            carried: None,
+        } => vec![CarriedBatch {
+            principal: principal.clone(),
+            batch_id: batch_id.clone(),
+            batch: AcceptedBatch {
+                body_hash: *body_hash,
+                receipt: receipt.clone(),
+                wal_pos: position,
+                accepted_ms: read_ms,
+            },
         }],
-        WalRecord::BatchesCarried { batches } => batches
-            .iter()
-            .map(|batch| BatchIdentity {
-                principal: &batch.principal,
-                batch_id: &batch.batch_id,
-                body_hash: batch.body_hash,
-                receipt: &batch.receipt,
-                carried: Some((batch.wal_pos, batch.accepted_ms)),
-            })
-            .collect(),
+        WalRecord::BatchesCarried { batches } => batches.clone(),
         // Listed rather than caught by a wildcard, for this function's whole reason.
         WalRecord::VocabularyMint { .. }
         | WalRecord::OverlaySnapshot { .. }
@@ -1155,10 +1146,8 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // starts with. A log at 38 is refused.
 // **40**: an `IngestBatch` carries the principal that sent it, which a retry is matched by beside
 // its batch id. A log at 39 is refused.
-// **41**: a receipt's refused row may give `value_held` or `label_not_held` as its reason. A log
-// at 40 is refused.
-// **42**: the variant table gained `BatchesCarried`, the accepted batches a rotation carries past
-// the members it reclaims. A log at 41 is refused.
+// **42**: a receipt's refused row may give `value_held` or `label_not_held`, and the variant table
+// gained `BatchesCarried`. A log at 41 is refused.
 const WAL_VERSION: u16 = 42;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
