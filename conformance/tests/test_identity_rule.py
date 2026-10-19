@@ -209,6 +209,7 @@ class Deployment:
                 json=body,
                 timeout=60,
             )
+            resp.raise_for_status()
             assert resp.status_code == 200, resp.text
             return resp.json()
 
@@ -1182,6 +1183,7 @@ def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_serve
         },
         timeout=60,
     )
+    resp.raise_for_status()
     assert resp.status_code == 201, resp.text
     joining = min(dep.holdings.writable())
 
