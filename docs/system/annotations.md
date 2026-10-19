@@ -298,20 +298,10 @@ next while its count is the same in both.
 
 ### What a writer may name
 
-A writer holding `write` and not `write-all` names only the layers and artifacts a viewer holding
-its terms would be served, suppression aside ([users and access](../users-and-access.md#writes)).
-A layer whose label its terms do not satisfy is one never declared to it, and so is an artifact the
-predicate above would not serve such a viewer: its own label, or the layer's default, unsatisfied,
-in no view they reach, attached to something not served to them, with fewer members inside them
-than the layer's `require_member_visibility` asks, or, where the layer supplies content, with no
-content whose generating set is wholly inside them. A growth, a parent, an attachment target, an
-ingest column's key or a change naming one is answered as naming nothing. A publication under the
-key of one out of reach is refused as the key taken, naming no artifact, and an artifact setting a
-label its terms do not satisfy is refused by its position as `label_not_held`, the batch's others
-applied. Registering and dropping a layer need `write-all`. Deleting an artifact the writer
-reaches deletes the artifacts attached to it, those outside its terms included: the declared
-consequence of the `depends_on` edge, which only `write-all` declares, and nothing any viewer is
-shown, since a dependent is withheld from everyone once what it attaches to is deleted.
+A writer holding `write` and not `write-all` names only the layers and artifacts a session holding
+its terms would be served, suppression aside. Any other answers as one that does not exist
+([users and access](../users-and-access.md#writes)). Registering and dropping a layer need
+`write-all`.
 
 ## What an artifact carries
 

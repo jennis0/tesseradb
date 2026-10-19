@@ -24,7 +24,7 @@ the audit log.
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
 | Writes to items the writer cannot see | Bounded by the writer's own terms: an item outside them is absent to the write. A principal holding `write-all` acts on the whole corpus. |
-| A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
+| An insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
 ## Principals and credentials
@@ -128,7 +128,7 @@ terms, which say what a principal may see.
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
 | `admin` | Every change to the catalogue, and the service's status. |
 | `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
-| `write-all` | With `write`, writes against the whole corpus, unmasked. Declaring and dropping layers, attributes, the shard size, vocabularies, view groups and views. |
+| `write-all` | With `write`, writes against the whole corpus, and declares and drops ([Writes](#writes)). |
 
 The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
 users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
@@ -408,27 +408,23 @@ system.
 
 A write is bounded by the writer's own terms unless the writer holds `write-all`, as the operator
 does. The items a write may name are the writer's scope: those a session holding its terms is
-authorised to be served, suppressed ones included, whether or not the writer holds `read`. An item
-is inside where one of the keys its labels are indexed under is one the terms satisfy. The scope is
-built as a session's authorised set is, once per set of terms, and kept; a key promoted since is
-judged by the label it indexes. The layers, views and artifacts a write may name are those a
-session holding the terms would be served: a layer whose `visibility` admits them, a view whose
-gate does, and an artifact the one predicate serving decides by would serve such a session, its
-suppression set aside as an item's is: its layer and a view of it reached, its own label, or the
-layer's default, admitting the terms, what it attaches to served, as many of its members inside
-the scope as the layer's `require_member_visibility` asks, and, where the layer supplies content,
-the whole generating set of one of its contents inside the scope.
+authorised to be served, suppressed ones included, whether or not the writer holds `read`. The
+layers, views and artifacts a write may name are those a session holding the terms would be
+served: a layer whose `visibility` admits them, a view whose gate does, and an artifact
+`POST /v1/artifacts` would serve such a session, suppression aside
+([annotations](system/annotations.md#visibility)). How a write is checked against them is in
+[the write path](system/write-path.md#resolving-a-batch).
 
 Declaring and dropping need `write-all` beside `write`: a layer, an attribute, the shard size, a
 vocabulary, a view group, a plain view and a view of a group. A writer holding `write` alone is
-refused each with `403`, as a caller without `write` is refused a write, and nothing changes. A
-page of a vocabulary's values is a write, and needs `write` alone.
+refused each with `403`, and nothing changes. A page of a vocabulary's values is a write, and needs
+`write` alone.
 
 - An ingest row, a change, or a member of a publication or a growth naming an item outside the
   scope, by `mosaica_id` or by a unique value, names nothing, and is answered as one naming no
   item is: `unknown_mosaica_id` or `names_no_item`, a strict request's `404`, and nothing written.
-  A suppression outside the scope is never lifted; one inside it may be, though the writer does not
-  see the item.
+  A writer cannot lift a suppression outside its scope, and can lift one inside it that it cannot
+  see.
 - A membership spelled by exclusion is complemented within the scope.
 - An ingest row whose label, or a new item's view default, the writer does not satisfy is refused
   as `label_not_held`, and the message says which label. The batch's other rows apply. An
@@ -439,25 +435,16 @@ page of a vocabulary's values is a write, and needs `write` alone.
   attachment target, in an ingest batch's `x-mosaica-view` or a column, or by its `mosaica_id` in
   a change. A refusal that lists views lists only those the writer reaches.
 - Deleting an artifact the writer reaches deletes every artifact attached to it, those outside its
-  terms included. The cascade is the declared consequence of a layer's `depends_on` edge, which
-  only a principal holding `write-all` can declare, and works as a foreign key with
-  `ON DELETE CASCADE` does under row-level security. Every viewer is denied a dependent once what
-  it attaches to is deleted, so the cascade removes nothing anyone is shown.
+  terms included.
 - A publication, or an ingest column on a layer whose value set is open, naming a key an artifact
   out of reach holds is refused as the key taken, naming no artifact: a key names one artifact.
-- A page of a `derived` vocabulary's values answers one count, of the page's keys the vocabulary
-  holds, and not which were held before: a derived key is held because some item carried it.
+- A writer sending a page of a `derived` vocabulary's values is not told which keys it added.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
   collision, `value_held`, and so is a row setting such a value on an item it names. It is never
-  treated as an update of that item, and the refusal carries no `mosaica_id`. It tells the writer that an item with that value exists, and nothing else about it.
-  Postgres's row-level security has the same property and documents it. Scoping uniqueness to what
-  each writer can see would let two items share a value that is meant to identify one.
-
-Checking a write tests each item it names against the scope: the item's index keys, from its
-buffered row or the flushed entity-to-term transpose, and an item whose keys cannot be read is
-outside. A set of items, the complement of an exclusion or an artifact's members counted against
-its layer's requirement, is masked by the fragment a session of the writer's terms would be served,
-built when the write is admitted, and the items the fragment does not cover one at a time.
+  treated as an update of that item, and the refusal carries no `mosaica_id`. It tells the writer
+  that an item with that value exists, and nothing else about it. Postgres's row-level security has
+  the same property and documents it. Scoping uniqueness to what each writer can see would let two
+  items share a value that is meant to identify one.
 
 ## Bootstrap
 

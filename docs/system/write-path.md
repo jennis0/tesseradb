@@ -168,16 +168,21 @@ member, each naming its item by a `mosaica_id` and unique values ([accepting a
 deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
 `mosaica-lifecycle` (`resolve.rs`).
 
-A writer without `write-all` names only the items in its scope: those a session holding its terms
-is authorised to be served, suppressed ones included (`resolver.rs`, `WriteScope`). The scope is
-built off the executor, once per set of terms, and each item a value or a `mosaica_id` names is
-tested against it by its index keys. An item outside the scope is answered as an absent one: its
-`mosaica_id` names nothing, and a value it holds names nothing, except where the row would create
-an item with that value or set it on the item the row names, which is refused as `value_held` and
-names no holder. Before the rule, a row setting a label the writer's terms do not satisfy, or
-creating an item with a view default they do not satisfy, is refused as `label_not_held` and names
-nothing, so it claims neither an item nor a value. The build, and a writer holding `write-all`,
-name every item.
+A writer without `write-all` names only the items in its scope
+([users and access](../users-and-access.md#writes)). The scope is built off the executor as a
+session's authorised set is, once per set of terms, and kept (`resolver.rs`, `WriteScope`); a key
+promoted since is judged by the label it indexes. Each item a value or a `mosaica_id` names is
+tested against it by its index keys, read from its buffered row or the flushed entity-to-term
+transpose, and an item whose keys cannot be read is outside. A set of items, the complement of an
+exclusion or an artifact's members counted against its layer's requirement, is masked by the
+fragment a session of the writer's terms would be served, built when the write is admitted, and
+the items the fragment does not cover are tested one at a time. An item outside the scope is
+answered as an absent one: its `mosaica_id` names nothing, and a value it holds names nothing,
+except where the row would create an item with that value or set it on the item the row names,
+which is refused as `value_held` and names no holder. A row setting a label the writer's terms do
+not satisfy, or creating an item with a view default they do not satisfy, is refused as
+`label_not_held` before it is resolved, so it claims neither an item nor a value. The build, and a
+writer holding `write-all`, name every item.
 
 The batch's view and its layer columns are bounded alike: a view or a layer the writer does not
 reach is answered as one not declared. The executor resolves a layer column's keys at admission
@@ -247,11 +252,9 @@ check them. It checks what can have moved since the handler's generation, from m
 - an item holding a value a row was refused as `value_held` for that has since been deleted.
 
 The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
-this check. Where something has moved, the executor resolves and decides the whole batch again
-itself, by the same rule, against everything the open window holds, and writes what that
-decides. The executor is the only thread that moves an item, so nothing moves between that and
-the apply, and a batch is never refused because what it named moved while it waited: it applies
-to the items where they are when it applies.
+this check. Where something has moved, the executor closes the open window, resolves and decides
+the batch again against what is stored then, and writes what that decides. The executor is the
+only thread that moves an item, so nothing moves between that decision and the apply.
 
 ### Edits
 
@@ -340,7 +343,8 @@ and from what each rotation carries past the members it removes: the batches acc
 flush tick (`flush_max_age_secs`), up to `flush_max_items` rows of batches counted newest first. A
 batch id is therefore remembered while the log holds its record, and past that for the flush tick
 after its acceptance or until `flush_max_items` rows of later batches are accepted, whichever ends
-first, however many flushes run meanwhile, `wait=visible`'s included, and across a restart. A
+first, however many flushes run meanwhile, `wait=visible`'s included. A restart keeps what the log
+holds and what it carries, and a batch it reads from its own record is timed from the restart. A
 retry sent after that is decided as a new batch.
 
 ### What the writer observes
@@ -419,16 +423,13 @@ accepted, and resolved again where the request applies wherever what it named ha
 ([edits](#edits)). A request with a malformed item, or one that names no item by any column, is
 refused with `422` and nothing is queued. A change or member naming no item, or two, where the
 request applies is refused and listed in the answer's `refused` by position and reason, and the
-others are applied; with `strict=true`
-the request is refused instead, `404` where the row names no item and `409` where it names two. A
-change is refused so only where it was refused as its request arrived: one whose item has gone
-since is listed, and the request's others apply.
-Many changes, or members, may name one item. A generating set is refused whole at any member it
-cannot resolve, strict or not, and so is a growth's page joining one, because a viewer must see
-every member of the set to be served the content, and a set missing a member would be served to viewers who cannot. A suppression of an
-item already suppressed is accepted and has no further effect. A deleted item names nothing, so a
-deletion sent again is listed as refused, and a retried request is safe to resend without
-`strict`.
+others are applied; with `strict=true` the request is refused instead, `404` where the row names no
+item and `409` where it names two. Many changes, or members, may name one item. A generating set is
+refused whole at any member it cannot resolve, strict or not, and so is a growth's page joining one,
+because a viewer must see every member of the set to be served the content, and a set missing a
+member would be served to viewers who cannot. A suppression of an item already suppressed is
+accepted and has no further effect. A deleted item names nothing, so a deletion sent again is listed
+as refused, and a retried request is safe to resend without `strict`.
 
 Only the entity id is written to the WAL, never a `mosaica_id`, beside the shard or the layer
 space that holds it. The address is resolved once, when the request is accepted, into the entity it

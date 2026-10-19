@@ -1740,20 +1740,18 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
-        **The writer's terms.** A caller holding `write` and not `write-all` names only the items
-        its terms reach, suppressed ones included: those a session holding its terms is authorised
-        to be served. An item outside them is absent to it. A `mosaica_id` naming one is
-        `unknown_mosaica_id`, and a unique value it holds names nothing, so a row addressing an item
-        by it alone is `names_no_item`. A row that would create an item, or set a value on the item
-        it names, with a unique value an item outside holds is refused as `value_held`: its
-        `mosaica_id` is `null`, nothing names the holder, and a strict batch's `409` names the row
-        and the value as sent. A row whose `access` labels, or a new item's view default, the
-        terms do not satisfy is refused as `label_not_held`, and the batch's other rows apply. The
-        view `x-mosaica-view` names and a column naming a layer are those the caller reaches: one
-        out of reach is answered as one not declared, and a refusal listing views lists only those
-        it reaches. A layer column's key naming an artifact outside the terms names nothing: on a
-        `closed` layer it is the unknown key's `422`, and on an `open` one `422` the key held,
-        naming no artifact. A caller holding `write-all`, and the operator, name every item.
+        **The writer's terms.** To a caller holding `write` and not `write-all` (`Permission`), a
+        `mosaica_id` naming an item outside its terms is `unknown_mosaica_id`, and a unique value
+        such an item holds names nothing, so a row addressing an item by it alone is
+        `names_no_item`. A row that would create an item, or set a value on the item it names, with
+        a unique value an item outside holds is refused as `value_held`: its `mosaica_id` is
+        `null`, nothing names the holder, and a strict batch's `409` names the row and the value as
+        sent. A row whose `access` labels, or a new item's view default, the terms do not satisfy
+        is refused as `label_not_held`, and the batch's other rows apply. A view `x-mosaica-view`
+        names, or a layer a column names, out of the caller's reach is answered as one not
+        declared, and a refusal listing views lists only those it reaches. A layer column's key
+        naming an artifact outside the terms names nothing: on a `closed` layer it is the unknown
+        key's `422`, and on an `open` one `422` the key held, naming no artifact.
 
         **Shards.** The server places new items in its shards itself, and no batch is refused for
         the shard size `PUT /control/shards` declares. A batch is `409` and writes nothing only
@@ -1765,10 +1763,8 @@ paths:
         batch under the same id is another batch, written and answered on its own. The same bytes
         sent again by the same caller under the same id answer `200` with `replayed: true`, the
         first acceptance's `mosaica_ids` and `refused`, and change nothing, whatever `strict` says;
-        different bytes under an id the caller has used are `409`. A batch id is remembered for
-        `ingest.flush_max_age_secs` after its acceptance, or until `ingest.flush_max_items` rows of
-        later batches have been accepted, whichever ends first, however many flushes run meanwhile
-        and across a restart; a retry after that is a new batch.
+        different bytes under an id the caller has used are `409`. How long an id is remembered is
+        `x-mosaica-batch-id`'s.
 
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
         `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
@@ -1887,14 +1883,12 @@ paths:
         refused at its first refused change instead, `404` where it names no item and `409` where
         it names two, and nothing is applied. A change whose item is deleted, or leaves the
         caller's terms, after the request arrived and before it applies is listed in `refused`
-        and does not refuse a strict request. Many changes may name one item. A caller holding
-        `write` and not `write-all` names only the items its terms reach, suppressed ones
-        included, so it may lift a suppression it could not see: an item outside them names
-        nothing, and the change is answered as one naming no item is. Deleting an artifact deletes
-        every artifact attached to it, those outside such a caller's terms included, as the
-        dependent layer's `depends_on` declares; every viewer is already denied a dependent once
-        what it attaches to is deleted. Every item is checked
-        before any is applied, so a request with a malformed item applies nothing. The accepted
+        and does not refuse a strict request. Many changes may name one item. To a caller holding
+        `write` and not `write-all`, an item outside its terms names nothing, and the change is
+        answered as one naming no item is. Deleting an artifact deletes every artifact attached to
+        it, those outside such a caller's terms included, as the dependent layer's `depends_on`
+        declares. Every item is checked before any is applied, so a request with a malformed item
+        applies nothing. The accepted
         changes are written as one record: they are durable together or not at all. A request
         carries at most 10,000 items in at most 2 MiB; over either is `422`, and `/control/status`
         publishes both under `limits.changes`.
@@ -2284,9 +2278,8 @@ paths:
         new name while every row carrying the code keeps its meaning. A page removes nothing. A
         page that adds no key and changes no title writes nothing.
 
-        A caller holding `write` and not `write-all` is answered of a `derived` vocabulary only
-        `bound`, how many of the page's keys it holds: whether a key was held before says that
-        some item carried it, perhaps one outside the caller's terms.
+        A caller holding `write` and not `write-all` is not told, of a `derived` vocabulary, which
+        keys it added.
       security:
         - controlCredential: []
       parameters:
@@ -2765,14 +2758,10 @@ paths:
 
         **The writer's terms, for layers and artifacts.** To a caller holding `write` and not
         `write-all`, a layer whose `visibility` its terms do not satisfy is one not registered, and
-        an artifact is outside its terms unless a session holding them would be served it, its
-        suppression aside: its own label, or the layer's default, admits the terms, it is drawn in
-        a view they reach, what it attaches to is served to them, as many of its members are
-        inside them as `require_member_visibility` asks, and, where the layer supplies content, the
-        generating set of one of its contents is wholly inside them. A parent or an attachment
-        target outside is answered as one no artifact is. A key an
-        artifact outside holds is `409`, since a key names one artifact; nothing else of the holder
-        is said. An artifact whose `access` labels the terms do not satisfy is refused alone: it is
+        an artifact is outside its terms unless `POST /v1/artifacts` would serve it to a session
+        holding them, suppression aside. A parent or an attachment target outside is answered as
+        one no artifact is. A key an artifact outside holds is `409`; nothing else of the holder is
+        said. An artifact whose `access` labels the terms do not satisfy is refused alone: it is
         listed in `refused` as `{artifact, reason: label_not_held}`, its `mosaica_id` is `null`,
         and the others are published; with `strict=true` the request is `409` instead.
 
@@ -2880,12 +2869,12 @@ paths:
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
-        is `404` or `409` at the first instead. A member outside the terms of a caller without
-        `write-all` names nothing, as on a publication, and so does a key naming an artifact
-        outside them, as on a publication: such a row is the unknown key's `422`. A row filling an
-        access label the caller's terms do not satisfy is refused alone, as on a publication. On a row with a `rank`, a member joining the
-        generating set and naming no item, or two, refuses the request, strict or not, as a publication's
-        `generated_from` does.
+        is `404` or `409` at the first instead. To a caller without `write-all`, as on a
+        publication, a member outside its terms names nothing, a key naming an artifact outside
+        them is the unknown key's `422`, and a row filling an access label its terms do not satisfy
+        is refused alone. On a row with a `rank`, a member joining the generating set and naming no
+        item, or two, refuses the request, strict or not, as a publication's `generated_from`
+        does.
 
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
@@ -3811,7 +3800,7 @@ components:
     controlCredential:
       type: http
       scheme: bearer
-      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; a declaration and a drop, the operations marked `x-mosaica-permission: write-all`, need `write-all` beside it; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. A write by a principal holding `write` and not `write-all` names only the items its terms reach, suppressed ones included: an item outside them, by `mosaica_id` or by a unique value, is answered as an absent one is, except that an insert or a row setting a unique value an item outside holds is refused as `value_held`, naming no item, and a row setting a label the terms do not satisfy is refused as `label_not_held`. The layers, views and artifacts it names are bounded alike: one a session holding its terms would not be served is answered as one not declared, and a key an artifact outside holds is not given again. `write-all` lifts the bound, and the operator holds it."
+      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; a declaration and a drop, the operations marked `x-mosaica-permission: write-all`, need `write-all` beside it; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. What a `write` caller may name is bounded by its terms (`Permission`)."
     sessionToken:
       type: http
       scheme: bearer
@@ -3895,7 +3884,7 @@ components:
       name: x-mosaica-batch-id
       in: header
       required: true
-      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. The id is remembered for `ingest.flush_max_age_secs` after the batch is accepted, or until `ingest.flush_max_items` rows of later batches are, whichever ends first; a retry after that is a new batch. Missing, or not UTF-8, is `422`.
+      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. The id is remembered while the log holds the batch's record, and past that for `ingest.flush_max_age_secs` from its acceptance, or from the restart that read its record, or until `ingest.flush_max_items` rows of later batches are accepted, whichever ends first; a retry after that is a new batch. Missing, or not UTF-8, is `422`.
       schema:
         type: string
     WriteView:
@@ -4180,7 +4169,7 @@ components:
     Permission:
       type: string
       enum: [read, write, authorise-as, admin, read-all, write-all]
-      description: "`write` writes, flushes and compacts, naming only the items, layers, views and artifacts the principal's terms reach; `write-all` lifts that bound, so its writes name every one, and declares and drops."
+      description: "`write` writes, flushes and compacts, naming only the items, layers, views and artifacts a session holding the principal's terms would be served, suppressed items included; anything else answers as absent. `write-all` lifts that bound, so its writes name every one, and declares and drops."
 
     CatalogueChange:
       type: object
@@ -6264,7 +6253,7 @@ components:
     RefusalReason:
       type: string
       enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice, value_held, label_not_held]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item (an artifact's or a layer's names none), or on `/control/changes` no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. `value_held`: an ingest row would create an item, or set a value on the item it names, with a unique value an item outside the writer's terms holds; nothing more is said of the holder. `label_not_held`: an ingest row sets an access label, or a new item takes its view's default, or an artifact sets an access label, that the writer's terms do not satisfy. For a writer without `write-all` an item outside its terms is absent: its `mosaica_id` is `unknown_mosaica_id` and its values name nothing. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `label_not_held` or `unknown_mosaica_id`, `names_two_items` or `value_held`, `names_no_item`, `one_item_twice`, `one_value_twice`."
+      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item (an artifact's or a layer's names none), or on `/control/changes` no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. `value_held`: an ingest row would create an item, or set a value on the item it names, with a unique value an item outside the writer's terms holds; nothing more is said of the holder. `label_not_held`: an ingest row sets an access label, or a new item takes its view's default, or an artifact sets an access label, that the writer's terms do not satisfy. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `label_not_held` and `unknown_mosaica_id` first, then `names_two_items` and `value_held`, then `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object
@@ -6450,25 +6439,21 @@ components:
     VocabularyDeclared:
       type: object
       additionalProperties: false
-      required: [name, existing, bound, publication]
+      required: [name, existing, added, titles, publication]
       properties:
         name:
           type: string
         existing:
           type: boolean
           description: "`true` where the name already carried this identity."
-        bound:
-          type: integer
-          minimum: 0
-          description: Keys of the request the vocabulary holds after it, whether added by it or held before.
         added:
           type: integer
           minimum: 0
-          description: Keys the request added. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary, since a key held before is one some item carried.
+          description: Keys the request added.
         titles:
           type: integer
           minimum: 0
-          description: Held keys whose title the request changed. Absent where `added` is.
+          description: Held keys whose title the request changed.
         publication:
           type: integer
           minimum: 0
@@ -6480,26 +6465,22 @@ components:
     VocabularyValuesAdded:
       type: object
       additionalProperties: false
-      required: [name, bound, publication]
+      required: [name, publication]
       properties:
         name:
           type: string
-        bound:
-          type: integer
-          minimum: 0
-          description: Keys of the page the vocabulary holds after it, `added` and `existing` together.
         added:
           type: integer
           minimum: 0
-          description: Keys the page added. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary, since a key held before is one some item carried; `bound` is then the page's one count.
+          description: Keys the page added. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         existing:
           type: integer
           minimum: 0
-          description: Keys the page named that the vocabulary already held. Absent where `added` is.
+          description: Keys the page named that the vocabulary already held. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         titles:
           type: integer
           minimum: 0
-          description: Held keys whose title the page changed. Absent where `added` is.
+          description: Held keys whose title the page changed. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         publication:
           type: integer
           minimum: 0
