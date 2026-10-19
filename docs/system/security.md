@@ -45,20 +45,21 @@ full term index and the geometry. Nothing here defends against this party.
 An operator drives the control plane: ingest, deletion, suppression, compaction and the catalogue.
 Every route on the control plane, without exception, requires a credential: the operator
 credential, which authenticates a built-in superuser holding every permission, an API key, or an
-OIDC access token. Writes, flush and compaction need `write`. Status and the catalogue need
-`admin`. A write by a principal holding `write` and not `write-all` names only the items its terms
-reach, suppressed ones included ([users and access](../users-and-access.md#writes)): an item
-outside them is absent to the write, by `mosaica_id` and by unique value, and a row setting a
-label the terms do not satisfy is refused. Layers, views, groups and artifacts are bounded alike:
-one a session holding the writer's terms would not be served, suppression aside, is absent to the
-write, whether it is dropped, published into, grown, named as a parent, an attachment target, a
-layer's view or dependency, a view's group, an ingest batch's view or column, or a change's
-`mosaica_id`, and a refusal listing views lists only those the writer reaches. A declaration of a
-layer, a view or a group whose `visibility` the writer's terms do not satisfy is refused, since the
-writer could neither change nor drop it. A drop is the exception: dropping a view the writer
-reaches deletes every item it leaves in no view, those outside its terms included, and `deleted`
-counts them all; dropping a layer the writer reaches deletes every artifact of it. The operator
-holds `write-all`, which lifts the bound.
+OIDC access token. Writes, flush and compaction need `write`. Declarations and drops need
+`write-all` beside it. Status and the catalogue need `admin`. A write by a principal holding
+`write` and not `write-all` names only the items its terms reach, suppressed ones included
+([users and access](../users-and-access.md#writes)): an item outside them is absent to the write,
+by `mosaica_id` and by unique value, and a row setting a label the terms do not satisfy is
+refused. Layers, views and artifacts are bounded alike: one a session holding the writer's terms
+would not be served, suppression aside, is absent to the write, whether it is published into,
+grown, named as a parent, an attachment target, an ingest batch's view or column, or a change's
+`mosaica_id`, and a refusal listing views lists only those the writer reaches. An artifact is
+judged by the predicate serving judges it by. A deletion is the exception: deleting an artifact
+the writer reaches deletes every artifact attached to it, those outside its terms included, as the
+declared consequence of the dependent layer's `depends_on` edge, which only `write-all` can
+declare. It works as a foreign key with `ON DELETE CASCADE` does under row-level security, and
+removes nothing anyone is shown, since every viewer is denied a dependent once what it attaches to
+is deleted. The operator holds `write-all`, which lifts the bound.
 
 `admin` can grant any permission to any principal, itself included. A principal holding `admin`
 can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
@@ -308,23 +309,21 @@ that some item holds a value it tried to set, and nothing more; the lookups that
 were made, and the time a scope test takes is the one difference from an absent value. An ingest
 row whose values name two items in the scope is refused and listed by its position and reason; in a
 strict batch the batch is refused with `409`, naming the values and the holders' `mosaica_id`s so
-that the operator can find the item to change. It names the `mosaica_id`, never the entity id. A declaration of `unique` at a running service is refused where
-values are held twice, and the refusal names how many there are and up to ten of the values, and no
-item; to a writer without `write-all` it counts and names only the values every holder of which is
-inside its scope, and where none is it says only that a value is held twice. A build leaves out each later row naming an item or setting a value an earlier row of its file
-named or set. Its report counts the rows it left out and names up to ten of their values, and it
-names no item.
+that the operator can find the item to change. It names the `mosaica_id`, never the entity id. A
+declaration of `unique` at a running service, which needs `write-all`, is refused where values are
+held twice, and the refusal names how many there are and up to ten of the values, and no item. A
+build leaves out each later row naming an item or setting a value an earlier row of its file named
+or set. Its report counts the rows it left out and names up to ten of their values, and it names no
+item.
 
-Names have the same exception as values. A declaration of a view or a group under a name one out of
-the writer's reach holds is refused as the name taken, never answered as the declaration held and
-never compared with it, and a publication under a key an artifact outside the writer's terms holds
-is refused as the key taken, naming no artifact. A writer without `write-all` therefore learns, of a
-view, a group or an artifact out of its reach, that its name or key is taken, and nothing more. A
-page of a `derived` vocabulary's values answers such a writer one count, of the page's keys held,
-since whether a key was held before says that some item carried it. As for an item, the lookups
-that found what is out of reach were made, and the time its test takes, which for an artifact of a
-layer requiring visible members includes counting its members within the scope, is the one
-difference from a name nobody holds.
+Artifact keys have the same exception as values. A publication under a key an artifact outside the
+writer's terms holds is refused as the key taken, naming no artifact. A writer without `write-all`
+therefore learns, of an artifact out of its reach, that its key is taken, and nothing more. A page
+of a `derived` vocabulary's values answers such a writer one count, of the page's keys held, since
+whether a key was held before says that some item carried it. As for an item, the lookups that
+found what is out of reach were made, and the time its test takes, which for an artifact includes
+counting its members and its contents' generating sets within the scope, is the one difference
+from a key nobody holds.
 
 ## An incomplete answer is refused
 

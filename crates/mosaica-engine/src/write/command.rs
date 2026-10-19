@@ -209,6 +209,9 @@ pub(crate) struct IngestSubmission {
     /// The unique values the refused rows carry, which name an item where one has been given a
     /// holder since.
     pub(crate) refused_keys: Vec<(u16, u128)>,
+    /// The items holding a value a row refused as `value_held` carries, which names nothing where
+    /// its holder has gone since.
+    pub(crate) held_by: Vec<mosaica_types::ItemAt>,
     /// The artifacts the written rows name in a column named for a layer. Resolved and grown
     /// when the window closes, in the same commit as the rows.
     pub(crate) artifacts: BatchArtifacts,
@@ -236,6 +239,7 @@ impl IngestSubmission {
             slots,
             keys,
             refused_keys,
+            held_by,
             artifacts,
             over_bound,
         } = planned;
@@ -248,6 +252,7 @@ impl IngestSubmission {
             slots,
             keys,
             refused_keys,
+            held_by,
             artifacts,
             unique_seq,
             over_bound,
@@ -284,17 +289,10 @@ pub(crate) enum Command {
     /// turns into the `mosaica_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<mosaica_types::layer::LayerDeclaration>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<mosaica_types::LayerSpace>,
     },
     /// Drop an annotation layer. Its name may be registered again, as a new layer.
-    DropLayer {
-        name: String,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
-        reply: Reply<()>,
-    },
+    DropLayer { name: String, reply: Reply<()> },
     /// Create a view of a view group.
     CreateView {
         group: String,
@@ -302,8 +300,6 @@ pub(crate) enum Command {
         /// The gate's labels, each one term; `None` is `public`.
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<()>,
     },
     /// Drop a view of a view group, deleting the items it leaves with a row in no view. The
@@ -311,16 +307,12 @@ pub(crate) enum Command {
     DropView {
         group: String,
         key: String,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<ViewDropped>,
     },
     /// Declare an attribute column. The answer is whether an identical declaration already held the
     /// name.
     DeclareAttribute {
         request: Box<AttributeRequest>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// Declare the point shard's size. The answer is whether the shard already had this size, in
@@ -329,22 +321,16 @@ pub(crate) enum Command {
     /// Declare a vocabulary.
     DeclareVocabulary {
         request: Box<VocabularyRequest>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<VocabularyDeclared>,
     },
     /// Declare a view group. The answer is whether an identical declaration already held the name.
     CreateViewGroup {
         declaration: Box<ViewGroupDeclaration>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// Create a plain view, answered as [`Command::CreateViewGroup`] is.
     CreatePlainView {
         declaration: Box<PlainViewDeclaration>,
-        /// Whose terms bound what the command may name.
-        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// A page of values for a vocabulary that exists. The caller supplies no codes: the server
@@ -460,6 +446,7 @@ mod tests {
                 slots: Vec::new(),
                 keys: Vec::new(),
                 refused_keys: Vec::new(),
+                held_by: Vec::new(),
                 artifacts: Default::default(),
                 unique_seq: 0,
                 over_bound: Vec::new(),

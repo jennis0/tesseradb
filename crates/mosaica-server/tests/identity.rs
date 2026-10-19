@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use common::*;
+use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
 use mosaica_server::state::now_secs;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -726,48 +727,104 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     assert_eq!(meta_status(&server, &session).await, 403);
 }
 
+/// A server over the fixture `tmp` holds, writing, with its catalogue in `tmp/catalogue`, kept
+/// across a restart.
+async fn serve_keeping_the_catalogue(tmp: &TempDir) -> TestServer {
+    let mut engine = mosaica_engine::Engine::open(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        default_engine_config(),
+    )
+    .unwrap();
+    engine.start_write_executor(1024).unwrap();
+    let (catalogue, key) = test_identity_at(&tmp.path().join("catalogue"));
+    let state = mosaica_server::state::AppState {
+        engine,
+        sessions: parking_lot::Mutex::new(Default::default()),
+        heap: Default::default(),
+        limits: Default::default(),
+        suggest_admission: Default::default(),
+        compute_gate: generous_test_gate(),
+        password_gate: generous_password_gate(),
+        bulk_gate: generous_bulk_gate(),
+        artifact_gate: generous_artifact_gate(),
+        ingest_admission: mosaica_server::state::IngestAdmission::new(4),
+        catalogue,
+        oidc: Default::default(),
+        operator_credential: OPERATOR_CREDENTIAL.to_owned(),
+        request_log: None,
+        faults: Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new()),
+    };
+    serve_state(Arc::new(state), key, None).await
+}
+
 #[tokio::test]
 async fn the_catalogue_survives_a_restart() {
     let tmp = TempDir::new().unwrap();
     build_fixture(tmp.path(), N_ITEMS);
-    let catalogue_dir = tmp.path().join("catalogue");
-    let start = |dir: &std::path::Path| {
-        let engine = mosaica_engine::Engine::open(
-            &tmp.path().join("bundle"),
-            &tmp.path().join("cache"),
-            &tmp.path().join("wal.log"),
-            default_engine_config(),
-        )
-        .unwrap();
-        let (catalogue, key) = test_identity_at(dir);
-        let state = mosaica_server::state::AppState {
-            engine,
-            sessions: parking_lot::Mutex::new(Default::default()),
-            heap: Default::default(),
-            limits: Default::default(),
-            suggest_admission: Default::default(),
-            compute_gate: generous_test_gate(),
-            password_gate: generous_password_gate(),
-            bulk_gate: generous_bulk_gate(),
-            artifact_gate: generous_artifact_gate(),
-            ingest_admission: mosaica_server::state::IngestAdmission::new(4),
-            catalogue,
-            oidc: Default::default(),
-            operator_credential: OPERATOR_CREDENTIAL.to_owned(),
-            request_log: None,
-            faults: Arc::new(mosaica_lifecycle::faults::FaultSwitchboard::new()),
-        };
-        (Arc::new(state), key)
-    };
-    let (state, key) = start(&catalogue_dir);
-    let server = serve_state(state, key, None).await;
+    let server = serve_keeping_the_catalogue(&tmp).await;
     person(&server, "ann", &["0"]).await;
     server.shutdown().await;
 
-    let (state, key) = start(&catalogue_dir);
-    let server = serve_state(state, key, None).await;
+    let server = serve_keeping_the_catalogue(&tmp).await;
     let token = login_password(&server, "ann").await;
     assert_eq!(visible(&server, &token).await, N_ITEMS);
+}
+
+/// A service principal `name` holding `write` and the term `0`, and an API key for it.
+fn writer_key(server: &TestServer, name: &str) -> String {
+    let catalogue = &server.state.catalogue;
+    catalogue
+        .create_principal(name, PrincipalKind::Service)
+        .unwrap();
+    catalogue
+        .grant_permission(Grantee::Principal(name), Permission::Write)
+        .unwrap();
+    catalogue.grant_term(Grantee::Principal(name), "0").unwrap();
+    catalogue.create_api_key(name, None, None).unwrap().0.key
+}
+
+/// One ingest batch `batch_id`, a row creating one item, sent with `key`: the status and answer.
+async fn ingest_one(server: &TestServer, key: &str, batch_id: &str) -> (u16, Value) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(key)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("x-mosaica-view", "s0")
+        .json(&json!([{ "x": 1.5, "y": 1.5, "access": ["0"] }]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// **A batch id is its principal's, and a principal deleted and created again under its name is
+/// another principal**: the new one sending the old one's batch id and bytes writes a new batch,
+/// and its own retry, after a restart too, replays its own receipt.
+#[tokio::test]
+async fn a_principal_created_again_under_a_name_replays_none_of_the_old_ones_batches() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture(tmp.path(), N_ITEMS);
+    let server = serve_keeping_the_catalogue(&tmp).await;
+    let key = writer_key(&server, "ann");
+    let (status, first) = ingest_one(&server, &key, "batch").await;
+    assert_eq!((status, &first["created"]), (200, &json!(1)), "{first}");
+
+    server.state.catalogue.delete_principal("ann").unwrap();
+    let key = writer_key(&server, "ann");
+    let (status, second) = ingest_one(&server, &key, "batch").await;
+    assert_eq!((status, &second["created"]), (200, &json!(1)), "{second}");
+    assert!(second.get("replayed").is_none(), "{second}");
+    assert_ne!(second["mosaica_ids"], first["mosaica_ids"]);
+    server.shutdown().await;
+
+    let server = serve_keeping_the_catalogue(&tmp).await;
+    let (status, again) = ingest_one(&server, &key, "batch").await;
+    assert_eq!((status, &again["replayed"]), (200, &json!(true)), "{again}");
+    assert_eq!(again["mosaica_ids"], second["mosaica_ids"]);
 }
 
 /// Writes `mosaica.toml` for a deployment serving a fixture bundle on ephemeral ports, with

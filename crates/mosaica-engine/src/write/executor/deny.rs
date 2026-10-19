@@ -97,8 +97,10 @@ impl Executor {
     /// that name nothing now: on this thread, which is the only one that moves an item, so
     /// nothing moves one between this and the apply ([`crate::Names::now`]). A row whose item an
     /// edit has moved also changes the entity it named, which the log then names beside the one
-    /// the item holds. `Err` where the names cannot be read, or where `strict` and a row is
-    /// refused.
+    /// the item holds. `Err` where the names cannot be read, or where `strict` and a row was
+    /// refused as the request arrived. A row whose item has gone since names nothing, and is
+    /// answered so whatever `strict` says: a deny on an item that no longer exists has nothing to
+    /// do, and is never refused for contention.
     pub(super) fn changes_now(
         &self,
         names: &mut crate::resolver::Names,
@@ -113,11 +115,15 @@ impl Executor {
             &self.deps.identity_key,
             &self.live,
         );
+        let arrived = names.refused();
         let moved = names.now(&resolver).map_err(|e| ExecError::Store {
             detail: e.to_string(),
         })?;
         let refused = names.refused();
-        if let Some(&(row, reason)) = refused.first().filter(|_| strict) {
+        let refusing = refused
+            .iter()
+            .find(|(row, _)| arrived.binary_search_by_key(row, |(at, _)| *at).is_ok());
+        if let Some(&(row, reason)) = refusing.filter(|_| strict) {
             return Err(ExecError::NamesRefused { row, reason });
         }
         let mut changes: Vec<(Target, ChangeOp)> = ops

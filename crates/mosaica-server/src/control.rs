@@ -102,12 +102,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     ));
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
-    let writes = Router::new()
-        .route("/control/ingest", ingest_route)
-        .route("/control/changes", changes_route)
-        // Declarations are `PUT` because the name is the identity: an identical redeclaration
-        // answers what exists and a differing one is refused. They are small and keep axum's
-        // 2 MiB default body limit.
+    // Declarations are `PUT` because the name is the identity: an identical redeclaration answers
+    // what exists and a differing one is refused. They are small and keep axum's 2 MiB default
+    // body limit.
+    let declarations = Router::new()
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
         .route("/control/attributes", axum::routing::put(declare_attribute))
@@ -115,10 +113,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/control/vocabularies/{name}",
             axum::routing::put(declare_vocabulary),
-        )
-        .route(
-            "/control/vocabularies/{name}/values",
-            axum::routing::patch(mint_vocabulary_values),
         )
         .route(
             "/control/views/{group}/{key}",
@@ -134,6 +128,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/control/views/{name}",
             axum::routing::put(create_plain_view),
         )
+        .route_layer(axum::middleware::from_fn(require_write_all));
+    let writes = Router::new()
+        .route("/control/ingest", ingest_route)
+        .route("/control/changes", changes_route)
+        .route(
+            "/control/vocabularies/{name}/values",
+            axum::routing::patch(mint_vocabulary_values),
+        )
+        .merge(declarations)
         .route(
             "/control/layers/{name}/artifacts",
             // `PUT` publishes with a first page of each membership and `PATCH` sends the rest; one
@@ -223,6 +226,16 @@ async fn require_write(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     caller(&request).require(mosaica_catalogue::Permission::Write)?;
+    Ok(next.run(request).await)
+}
+
+/// Declarations and drops need `write-all` beside `write`: what they name and change is the
+/// deployment's schema, which no writer's terms bound.
+async fn require_write_all(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    caller(&request).require(mosaica_catalogue::Permission::WriteAll)?;
     Ok(next.run(request).await)
 }
 
@@ -939,17 +952,13 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn register_layer(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<mosaica_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let declaration = body.0;
     let name = declaration.name.clone();
     // The shared blocking pool, not the deny lane: a declaration is not a deny.
     let id = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.register_layer_as(declaration, scope)
-        })
+        .write(move |state| state.engine.register_layer(declaration))
         .await?;
     let body = serde_json::json!({ "name": name, "mosaica_id": id.raw().to_string() });
     acknowledge(&state, &wait, StatusCode::CREATED, body).await
@@ -961,13 +970,9 @@ async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.drop_layer_as(name, scope)
-        })
+        .write(move |state| state.engine.drop_layer(name))
         .await?;
     // 200 with a body rather than 204, so it carries the publication number like every write.
     acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
@@ -1009,7 +1014,6 @@ struct AttributeBody {
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1026,10 +1030,7 @@ async fn declare_attribute(
         unique: body.unique,
     };
     let existing = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.declare_attribute_as(request, scope)
-        })
+        .write(move |state| state.engine.declare_attribute(request))
         .await?;
     let body = serde_json::json!({ "name": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1118,7 +1119,6 @@ async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1139,21 +1139,16 @@ async fn declare_vocabulary(
         reserved: body.reserved,
     };
     let declared_now = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.declare_vocabulary(request, scope)
-        })
+        .write(move |state| state.engine.declare_vocabulary(request))
         .await?;
     let page = &declared_now.values;
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "name": name,
         "existing": declared_now.existing,
         "bound": page.bound(),
+        "added": page.added,
+        "titles": page.titles,
     });
-    if !page.withheld {
-        body["added"] = serde_json::json!(page.added);
-        body["titles"] = serde_json::json!(page.titles);
-    }
     acknowledge(&state, &wait, declared(declared_now.existing), body).await
 }
 
@@ -1286,7 +1281,6 @@ async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1311,10 +1305,7 @@ async fn create_view_group(
             .collect(),
     };
     let existing = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.create_view_group_as(declaration, scope)
-        })
+        .write(move |state| state.engine.create_view_group(declaration))
         .await?;
     let body = serde_json::json!({ "group": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1326,7 +1317,6 @@ async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1341,10 +1331,7 @@ async fn create_plain_view(
         point_default: body.point_visibility.and_then(|p| p.default),
     };
     let existing = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.create_plain_view_as(declaration, scope)
-        })
+        .write(move |state| state.engine.create_plain_view(declaration))
         .await?;
     let body = serde_json::json!({ "view": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1402,7 +1389,6 @@ async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
@@ -1416,10 +1402,9 @@ async fn create_view(
     let (group_name, view_key) = (group.clone(), key.clone());
     state
         .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
             state
                 .engine
-                .create_view_as(group_name, view_key, visibility, metadata, scope)
+                .create_view(group_name, view_key, visibility, metadata)
         })
         .await?;
     let body = serde_json::json!({
@@ -1437,13 +1422,9 @@ async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
-    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let dropped = state
-        .write(move |state| {
-            let scope = caller.write_scope(&state.engine);
-            state.engine.drop_view_as(group, key, scope)
-        })
+        .write(move |state| state.engine.drop_view(group, key))
         .await?;
     let body = serde_json::json!({
         "deleted": dropped.deleted,
@@ -2211,9 +2192,12 @@ fn canonical_for_layer(
 
 /// Canonicalises a batch's shapes before anything is resolved or allocated: each row's shape,
 /// then the authored shape slot of each ranked content, which is replaced by its canonical text.
-/// An unknown layer canonicalises nothing here; the engine refuses it.
+/// An unknown layer canonicalises nothing here; the engine refuses it. A shape is canonicalised
+/// for every view of its layer, and reported for those a session holding the terms of a writer of
+/// `scope` is served.
 fn canonical_batch_shapes(
     state: &AppState,
+    scope: &mosaica_engine::WriteScope,
     declaration: Option<&mosaica_types::layer::LayerDeclaration>,
     default_space: Option<&str>,
     rows: &mut [impl ShapedRow],
@@ -2232,6 +2216,28 @@ fn canonical_batch_shapes(
     };
     let mut shapes = Vec::with_capacity(rows.len());
     let mut reports: Vec<serde_json::Value> = Vec::new();
+    let reached: Vec<String> = match scope {
+        mosaica_engine::WriteScope::All => Vec::new(),
+        _ => state
+            .engine
+            .meta_as(scope)
+            .views
+            .into_iter()
+            .map(|v| v.id)
+            .collect(),
+    };
+    let reported = |report: serde_json::Value| match scope {
+        mosaica_engine::WriteScope::All => report,
+        _ => serde_json::Value::Array(
+            report
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|entry| reached.iter().any(|view| entry["view"] == view.as_str()))
+                .cloned()
+                .collect(),
+        ),
+    };
     for (index, row) in rows.iter().enumerate() {
         let canonical = match declaration {
             Some(declaration) if row.fills_shape() => {
@@ -2244,7 +2250,7 @@ fn canonical_batch_shapes(
                 shapes.push(Some(canonical));
                 reports.push(serde_json::json!({
                     "key": row.key(),
-                    "views": report,
+                    "views": reported(report),
                 }));
             }
             None => shapes.push(None),
@@ -2273,7 +2279,7 @@ fn canonical_batch_shapes(
             reports.push(serde_json::json!({
                 "key": key,
                 "content": rank,
-                "views": report,
+                "views": reported(report),
             }));
             *text = canonical.content_text();
         }
@@ -2481,6 +2487,7 @@ async fn publish_artifacts(
 
             let (shapes, shape_reports) = canonical_batch_shapes(
                 state,
+                &scope,
                 declaration.as_ref(),
                 default_space.as_deref(),
                 &mut artifacts,
@@ -2724,6 +2731,7 @@ async fn grow_memberships(
                 .map(|registered| registered.declaration);
             let (shapes, shape_reports) = canonical_batch_shapes(
                 state,
+                &scope,
                 declaration.as_ref(),
                 default_space.as_deref(),
                 &mut artifacts,

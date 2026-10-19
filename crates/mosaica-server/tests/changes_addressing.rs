@@ -75,6 +75,44 @@ async fn post_strict(server: &TestServer, body: &serde_json::Value) -> reqwest::
         .unwrap()
 }
 
+/// **A deny is never refused for contention**: a strict request deleting one item and suppressing
+/// another, whose first item another request deletes after it arrived and before it applies,
+/// applies the suppression and answers the deletion as naming nothing.
+#[tokio::test]
+async fn a_strict_deny_whose_item_goes_before_it_applies_applies_the_rest() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
+    let engine = &server.state.engine;
+    let (gone, kept) = (mosaica_id_of(&server, 4), mosaica_id_of(&server, 5));
+    let match_of = |id: u64| serde_json::json!({ "mosaica_id": id.to_string() });
+    let before = visible(&server, &token).await;
+
+    engine.hold_next_write_check_for_test();
+    let request = serde_json::json!([
+        { "op": "delete", "match": match_of(gone) },
+        { "op": "suppress", "match": match_of(kept) },
+    ]);
+    let held = post_strict(&server, &request);
+    let deleting = async {
+        while !engine.write_check_is_holding_for_test() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let deleted = serde_json::json!([{ "op": "delete", "match": match_of(gone) }]);
+        assert_eq!(post_changes(&server, &deleted).await.status(), 200);
+        engine.release_write_check_for_test();
+    };
+    let (resp, ()) = tokio::join!(held, deleting);
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(answer["accepted"], 1, "{answer}");
+    assert_eq!(
+        answer["refused"],
+        serde_json::json!([{ "row": 0, "reason": "unknown_mosaica_id" }])
+    );
+    assert_eq!(visible(&server, &token).await, before - 2);
+}
+
 /// An item holding no unique value is suppressed and unsuppressed by its `mosaica_id`.
 #[tokio::test]
 async fn an_item_holding_no_unique_value_is_suppressible_by_mosaica_id() {

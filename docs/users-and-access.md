@@ -124,11 +124,11 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. Flushing and compacting. What it names among items, layers, views, groups and artifacts is bounded by the principal's own terms ([Writes](#writes)). |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Adding values to a vocabulary. Flushing and compacting. What it names among items, layers, views and artifacts is bounded by the principal's own terms ([Writes](#writes)). |
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
 | `admin` | Every change to the catalogue, and the service's status. |
 | `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
-| `write-all` | With `write`, writes against the whole corpus, unmasked. |
+| `write-all` | With `write`, writes against the whole corpus, unmasked. Declaring and dropping layers, attributes, the shard size, vocabularies, view groups and views. |
 
 The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
 users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
@@ -411,11 +411,18 @@ does. The items a write may name are the writer's scope: those a session holding
 authorised to be served, suppressed ones included, whether or not the writer holds `read`. An item
 is inside where one of the keys its labels are indexed under is one the terms satisfy. The scope is
 built as a session's authorised set is, once per set of terms, and kept; a key promoted since is
-judged by the label it indexes. The layers, views, groups and artifacts a write may name are those
-a session holding the terms would be served: a layer whose `visibility` admits them, a view or a
-group whose gate does, and an artifact of such a layer whose own label, or the layer's default,
-admits them, in a view they reach, with as many of its members inside the scope as the layer's
-`require_member_visibility` asks. Its suppression is set aside, as an item's is.
+judged by the label it indexes. The layers, views and artifacts a write may name are those a
+session holding the terms would be served: a layer whose `visibility` admits them, a view whose
+gate does, and an artifact the one predicate serving decides by would serve such a session, its
+suppression set aside as an item's is: its layer and a view of it reached, its own label, or the
+layer's default, admitting the terms, what it attaches to served, as many of its members inside
+the scope as the layer's `require_member_visibility` asks, and, where the layer supplies content,
+the whole generating set of one of its contents inside the scope.
+
+Declaring and dropping need `write-all` beside `write`: a layer, an attribute, the shard size, a
+vocabulary, a view group, a plain view and a view of a group. A writer holding `write` alone is
+refused each with `403`, as a caller without `write` is refused a write, and nothing changes. A
+page of a vocabulary's values is a write, and needs `write` alone.
 
 - An ingest row, a change, or a member of a publication or a growth naming an item outside the
   scope, by `mosaica_id` or by a unique value, names nothing, and is answered as one naming no
@@ -427,25 +434,19 @@ admits them, in a view they reach, with as many of its members inside the scope 
   as `label_not_held`, and the message says which label. The batch's other rows apply. An
   artifact of a publication, or a row of a growth, setting a label the writer does not satisfy is
   refused alike, by its position, and the others apply.
-- A layer, a view, a group or an artifact out of the writer's reach is answered as one that does
-  not exist wherever a write names it: dropping it, publishing into it, growing it, naming it as a
-  parent or an attachment target, as a layer's view or dependency, as a view's group, in an
-  ingest batch's `x-mosaica-view` or a column, or by its `mosaica_id` in a change. A refusal that
-  lists views lists only those the writer reaches.
-- A declaration of a view or a group under a name one out of the writer's reach holds is refused
-  as the name taken, with nothing said of the holder: it is never answered as the declaration
-  already held, and never compared with it. A publication, or an ingest column on a layer whose
-  value set is open, naming a key an artifact out of reach holds is refused as the key taken,
-  naming no artifact: a key names one artifact.
-- A `unique` declaration over a column holding a value twice is refused with the count and up to
-  ten of the values whose holders are all inside the scope; where none is, the refusal says only
-  that a value is held twice.
+- A layer, a view or an artifact out of the writer's reach is answered as one that does not exist
+  wherever a write names it: publishing into it, growing it, naming it as a parent or an
+  attachment target, in an ingest batch's `x-mosaica-view` or a column, or by its `mosaica_id` in
+  a change. A refusal that lists views lists only those the writer reaches.
+- Deleting an artifact the writer reaches deletes every artifact attached to it, those outside its
+  terms included. The cascade is the declared consequence of a layer's `depends_on` edge, which
+  only a principal holding `write-all` can declare, and works as a foreign key with
+  `ON DELETE CASCADE` does under row-level security. Every viewer is denied a dependent once what
+  it attaches to is deleted, so the cascade removes nothing anyone is shown.
+- A publication, or an ingest column on a layer whose value set is open, naming a key an artifact
+  out of reach holds is refused as the key taken, naming no artifact: a key names one artifact.
 - A page of a `derived` vocabulary's values answers one count, of the page's keys the vocabulary
   holds, and not which were held before: a derived key is held because some item carried it.
-- Declaring a view, a group or a layer with a `visibility` the writer does not satisfy is refused
-  with `422`, whatever holds the name: the writer could neither change nor drop what it declared.
-  The message says to declare a visibility its terms satisfy, or to declare it as a principal
-  holding `write-all`.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
   collision, `value_held`, and so is a row setting such a value on an item it names. It is never
   treated as an update of that item, and the refusal carries no `mosaica_id`. It tells the writer that an item with that value exists, and nothing else about it.
@@ -457,10 +458,6 @@ buffered row or the flushed entity-to-term transpose, and an item whose keys can
 outside. A set of items, the complement of an exclusion or an artifact's members counted against
 its layer's requirement, is masked by the fragment a session of the writer's terms would be served,
 built when the write is admitted, and the items the fragment does not cover one at a time.
-
-A drop is not bounded by the scope. Dropping a view the writer reaches deletes every item the
-drop leaves in no view, those outside the scope included, and its `deleted` counts them all.
-Dropping a layer the writer reaches deletes every artifact of it, those outside the scope included.
 
 ## Bootstrap
 

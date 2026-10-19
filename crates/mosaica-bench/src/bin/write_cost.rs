@@ -754,18 +754,15 @@ fn declare_vocabulary_column(
         key: format!("key-{i:08}"),
         title: None,
     };
-    engine.declare_vocabulary(
-        mosaica_lifecycle::VocabularyRequest {
-            name: name.clone(),
-            title: None,
-            kind: mosaica_types::vocabulary::VocabularyKind::Declared,
-            visibility: mosaica_types::vocabulary::Visibility::Derived,
-            width: "u32".to_string(),
-            values: (0..size.min(PAGE)).map(value).collect(),
-            reserved: Vec::new(),
-        },
-        mosaica_engine::WriteScope::All,
-    )?;
+    engine.declare_vocabulary(mosaica_lifecycle::VocabularyRequest {
+        name: name.clone(),
+        title: None,
+        kind: mosaica_types::vocabulary::VocabularyKind::Declared,
+        visibility: mosaica_types::vocabulary::Visibility::Derived,
+        width: "u32".to_string(),
+        values: (0..size.min(PAGE)).map(value).collect(),
+        reserved: Vec::new(),
+    })?;
     let mut minted = size.min(PAGE);
     while minted < size {
         let end = (minted + PAGE).min(size);

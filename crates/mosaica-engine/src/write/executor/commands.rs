@@ -272,25 +272,16 @@ impl Executor {
             }
             Command::RegisterLayer {
                 mut declaration,
-                scope,
                 reply,
             } => {
-                let what = format!("layer '{}'", declaration.name);
-                let gate = declaration.visibility.as_ref().map(std::slice::from_ref);
-                if let Err(detail) = scope.may_declare(&what, gate) {
-                    return reply.fail(ExecError::LayerRefused { detail });
-                }
-                // Named as the generation the declaration applies in holds its views, and as the
-                // writer reaches them.
+                // Named as the generation the declaration applies in holds its views.
                 let generation = self.generation.load_full();
-                let meta = crate::viewport::meta_of(&generation)
-                    .within(scope.views(&generation.bundle.manifest).as_ref());
+                let meta = crate::viewport::meta_of(&generation);
                 if let Err(detail) = crate::control::declared_views(&meta, &mut declaration) {
                     return reply.fail(ExecError::LayerRefused { detail });
                 }
-                let reach = self.layer_reach(&scope);
                 self.commit_registry(
-                    |registry| registry.prepare_create(*declaration, &reach),
+                    |registry| registry.prepare_create(*declaration),
                     |record| match record {
                         WalRecord::LayerCreate { space, .. } => *space,
                         _ => unreachable!("prepare_create returns a LayerCreate"),
@@ -298,39 +289,24 @@ impl Executor {
                     reply,
                 )
             }
-            Command::DropLayer { name, scope, reply } => {
-                let reach = self.layer_reach(&scope);
-                self.commit_registry(
-                    |registry| registry.prepare_drop(&name, &reach),
-                    |_| (),
-                    reply,
-                )
+            Command::DropLayer { name, reply } => {
+                self.commit_registry(|registry| registry.prepare_drop(&name), |_| (), reply)
             }
             Command::CreateView {
                 group,
                 key,
                 visibility,
                 metadata,
-                scope,
                 reply,
-            } => self.commit_view_create(group, key, visibility, metadata, &scope, reply),
-            Command::DropView {
-                group,
-                key,
-                scope,
-                reply,
-            } => self.commit_view_drop(group, key, &scope, reply),
-            Command::DeclareAttribute {
-                request,
-                scope,
-                reply,
-            } => self.commit_attribute_declare(*request, scope, reply),
+            } => self.commit_view_create(group, key, visibility, metadata, reply),
+            Command::DropView { group, key, reply } => self.commit_view_drop(group, key, reply),
+            Command::DeclareAttribute { request, reply } => {
+                self.commit_attribute_declare(*request, reply)
+            }
             Command::DeclareShards { size, reply } => self.commit_shards_declare(size, reply),
-            Command::DeclareVocabulary {
-                request,
-                scope,
-                reply,
-            } => self.commit_vocabulary_declare(*request, &scope, reply),
+            Command::DeclareVocabulary { request, reply } => {
+                self.commit_vocabulary_declare(*request, reply)
+            }
             Command::MintVocabularyValues {
                 vocabulary,
                 values,
@@ -343,16 +319,12 @@ impl Executor {
                 reply,
                 std::convert::identity,
             ),
-            Command::CreateViewGroup {
-                declaration,
-                scope,
-                reply,
-            } => self.commit_view_group_create(*declaration, &scope, reply),
-            Command::CreatePlainView {
-                declaration,
-                scope,
-                reply,
-            } => self.commit_plain_view_create(*declaration, &scope, reply),
+            Command::CreateViewGroup { declaration, reply } => {
+                self.commit_view_group_create(*declaration, reply)
+            }
+            Command::CreatePlainView { declaration, reply } => {
+                self.commit_plain_view_create(*declaration, reply)
+            }
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -380,13 +352,6 @@ impl Executor {
                 Err(e) => reply.fail(e),
             },
         }
-    }
-
-    /// The layers `scope`'s writer reaches, as the registry holds them now.
-    fn layer_reach(&self, scope: &WriteScope) -> crate::resolver::LayerReach {
-        self.live.with_layers_and_artifacts(|registry, _| {
-            crate::resolver::LayerReach::new(scope, registry)
-        })
     }
 
     /// The positions of `labels`, each artifact's access labels where its record states some, that
@@ -851,27 +816,16 @@ impl Executor {
         key: String,
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
-        scope: &WriteScope,
         reply: Reply<()>,
     ) {
-        let what = format!("view '{key}' of '{group}'");
-        if let Err(detail) = scope.may_declare(&what, visibility.as_deref()) {
-            return reply.fail(ExecError::ViewRefused { detail });
-        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let reached = scope.views(&generation.bundle.manifest);
         let Some(descriptor) = generation
             .bundle
             .manifest
             .groups
             .iter()
             .find(|g| g.name == group)
-            .filter(|g| {
-                reached
-                    .as_ref()
-                    .is_none_or(|views| views.contains_group(&g.name))
-            })
         else {
             // The same 404 an unknown view id is, and for the same reason: a group nobody declared
             // and a key no view holds must be one answer, or the difference between them is an
@@ -931,18 +885,13 @@ impl Executor {
     pub(super) fn commit_attribute_declare(
         &mut self,
         request: mosaica_lifecycle::AttributeRequest,
-        scope: WriteScope,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
-        let resolved = crate::attributes::resolve(
-            &request,
-            manifest,
-            scope.views(manifest).as_ref(),
-            |name| self.live.registered_layer(name).is_some(),
-        );
+        let resolved = crate::attributes::resolve(&request, &generation.bundle.manifest, |name| {
+            self.live.registered_layer(name).is_some()
+        });
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 reply.ack(true);
@@ -950,7 +899,7 @@ impl Executor {
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
             Ok(crate::attributes::Resolution::Unique { name, unique }) => {
-                self.begin_unique_declare(name, unique, scope, reply);
+                self.begin_unique_declare(name, unique, reply);
                 return;
             }
             Err(e) => {
@@ -1098,20 +1047,13 @@ impl Executor {
     pub(super) fn commit_view_group_create(
         &mut self,
         declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
-        scope: &WriteScope,
         reply: Reply<bool>,
     ) {
-        let what = format!("view group '{}'", declaration.name);
-        if let Err(detail) = scope.may_declare(&what, declaration.visibility.as_deref()) {
-            return reply.fail(ExecError::ViewRefused { detail });
-        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
         let compiled = match crate::view_declarations::resolve_group(
             &declaration,
-            manifest,
-            scope.views(manifest).as_ref(),
+            &generation.bundle.manifest,
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 reply.ack(true);
@@ -1153,20 +1095,13 @@ impl Executor {
     pub(super) fn commit_plain_view_create(
         &mut self,
         declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
-        scope: &WriteScope,
         reply: Reply<bool>,
     ) {
-        let what = format!("view '{}'", declaration.name);
-        if let Err(detail) = scope.may_declare(&what, declaration.visibility.as_deref()) {
-            return reply.fail(ExecError::ViewRefused { detail });
-        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
         let compiled = match crate::view_declarations::resolve_plain(
             &declaration,
-            manifest,
-            scope.views(manifest).as_ref(),
+            &generation.bundle.manifest,
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 reply.ack(true);
@@ -1234,7 +1169,6 @@ impl Executor {
     pub(super) fn commit_vocabulary_declare(
         &mut self,
         request: mosaica_lifecycle::VocabularyRequest,
-        scope: &WriteScope,
         reply: Reply<VocabularyDeclared>,
     ) {
         let started = std::time::Instant::now();
@@ -1242,7 +1176,8 @@ impl Executor {
         let compiled = match crate::vocabularies::resolve(&request, &generation.bundle.manifest) {
             Ok(crate::vocabularies::Resolution::Existing) => {
                 // A redeclaration is the same vocabulary, and its values are a page against it.
-                self.commit_vocabulary_page(request.name, request.values, scope, reply, |values| {
+                let (name, values) = (request.name, request.values);
+                self.commit_vocabulary_page(name, values, &WriteScope::All, reply, |values| {
                     VocabularyDeclared {
                         existing: true,
                         values,
@@ -1470,7 +1405,6 @@ impl Executor {
         &mut self,
         group: String,
         key: String,
-        scope: &WriteScope,
         reply: Reply<ViewDropped>,
     ) {
         let started = std::time::Instant::now();
@@ -1478,16 +1412,6 @@ impl Executor {
         // The owner's key, whatever group the request named: a key belongs to the group that owns
         // the views, and dropping the key takes the view out of every group sharing them.
         let owner = generation.bundle.manifest.owner_of_group(&group);
-        // A view the writer does not reach is one nothing holds.
-        let id = format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR);
-        if let Some(views) = scope.views(&generation.bundle.manifest) {
-            if !views.contains_view(&id) {
-                return reply.fail(roster_error(mosaica_lifecycle::RosterError::Unknown {
-                    group: owner,
-                    key,
-                }));
-            }
-        }
         // Every id the key resolves to, which is what a drop takes away: the owner's view and
         // every sharing group's. Built from the owner rather than from the group the request
         // named, and used by the probe and the buffer prune alike. A prune over the requested

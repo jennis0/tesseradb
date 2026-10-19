@@ -1236,8 +1236,9 @@ async fn the_session_routes_match_the_description() {
 }
 
 /// Every control operation refuses an accepted credential without the permission it needs with
-/// `403 forbidden`, before the body is read: a write, flush and compaction need `write`, and
-/// status and the catalogue `admin`.
+/// `403 forbidden`, before the body is read: a write, flush and compaction need `write`, a
+/// declaration and a drop `write-all` beside it, as the description marks them, and status and
+/// the catalogue `admin`.
 #[tokio::test]
 async fn every_control_route_needs_its_permission() {
     use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
@@ -1256,11 +1257,12 @@ async fn every_control_route_needs_its_permission() {
     };
     let nothing = key_for("nothing", &[]);
     let writer = key_for("writer", &[Permission::Write]);
+    let writer_all = key_for("writer-all", &[Permission::Write, Permission::WriteAll]);
     let not_writer = key_for("not-writer", &everything_but(&[Permission::Write]));
     let not_admin = key_for("not-admin", &everything_but(&[Permission::Admin]));
     let admin = key_for("admin", &[Permission::Admin]);
 
-    let mut writes = 0;
+    let (mut writes, mut declarations) = (0, 0);
     for (path, item) in doc["paths"].as_object().unwrap() {
         if !path.starts_with("/control/") {
             continue;
@@ -1280,6 +1282,16 @@ async fn every_control_route_needs_its_permission() {
                     ("all but admin", &not_admin, true),
                     ("admin", &admin, false),
                 ],
+                _ if op["x-mosaica-permission"] == "write-all" => {
+                    writes += 1;
+                    declarations += 1;
+                    vec![
+                        ("all but write", &not_writer, true),
+                        ("admin", &admin, true),
+                        ("write", &writer, true),
+                        ("write and write-all", &writer_all, false),
+                    ]
+                }
                 _ => {
                     writes += 1;
                     vec![
@@ -1309,6 +1321,10 @@ async fn every_control_route_needs_its_permission() {
     assert_eq!(
         writes, 16,
         "ingest, changes, the declarations, layers, artifacts, flush and compact"
+    );
+    assert_eq!(
+        declarations, 9,
+        "layers, attributes, shards, vocabularies, view groups and views, declared and dropped"
     );
 }
 

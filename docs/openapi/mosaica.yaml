@@ -1885,10 +1885,15 @@ paths:
         a change whose `mosaica_id` names no item. A refused change is listed in `refused` by
         position with its reason, and the others are applied. With `strict=true` the request is
         refused at its first refused change instead, `404` where it names no item and `409` where
-        it names two, and nothing is applied. Many changes may name one item. A caller holding
+        it names two, and nothing is applied. A change whose item is deleted, or leaves the
+        caller's terms, after the request arrived and before it applies is listed in `refused`
+        and does not refuse a strict request. Many changes may name one item. A caller holding
         `write` and not `write-all` names only the items its terms reach, suppressed ones
         included, so it may lift a suppression it could not see: an item outside them names
-        nothing, and the change is answered as one naming no item is. Every item is checked
+        nothing, and the change is answered as one naming no item is. Deleting an artifact deletes
+        every artifact attached to it, those outside such a caller's terms included, as the
+        dependent layer's `depends_on` declares; every viewer is already denied a dependent once
+        what it attaches to is deleted. Every item is checked
         before any is applied, so a request with a malformed item applies nothing. The accepted
         changes are written as one record: they are durable together or not at all. A request
         carries at most 10,000 items in at most 2 MiB; over either is `422`, and `/control/status`
@@ -2050,6 +2055,7 @@ paths:
     put:
       tags: ["control: attributes"]
       operationId: declareAttribute
+      x-mosaica-permission: write-all
       summary: Declare an attribute column.
       description: |
         The body is a corpus declaration's `[[attribute]]` block in JSON, without the keys that
@@ -2066,9 +2072,6 @@ paths:
         column's index over every value stored, and the answer waits for the build, as every write
         on this plane answers once it is in force: `200` once it is in force, `409` naming how many
         values more than one item holds and up to ten of them, and the column is then as it was.
-        To a caller holding `write` and not `write-all` the `409` counts and names only values every
-        holder of which is inside its terms, and where there are none it says only that a value is
-        held twice.
         The build reads each stored value once, so the wait grows with the column's values.
         Ingests and denies are answered while it runs, and no fold starts until it
         ends. A caller that stops waiting does not stop the build, and the same declaration sent
@@ -2104,7 +2107,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change, or by a column of a view group the caller does not reach; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten, of those every holder of which the caller's terms reach.
+          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten.
           content:
             application/json:
               schema:
@@ -2122,7 +2125,7 @@ paths:
             - A category with no `vocabulary`, or one naming no vocabulary
             - `vocabulary` on another type
             - `analyser` on a type other than `text`, or an unknown analyser
-            - A group scope naming no view group the caller reaches, or a group that takes its views from another
+            - A group scope naming no view group, or a group that takes its views from another
           content:
             application/json:
               schema:
@@ -2138,6 +2141,7 @@ paths:
     put:
       tags: ["control: shards"]
       operationId: declareShards
+      x-mosaica-permission: write-all
       summary: Declare the shard size.
       description: |
         The body is a corpus declaration's `[shards]` table in JSON. The size is the high water at
@@ -2199,6 +2203,7 @@ paths:
     put:
       tags: ["control: vocabularies"]
       operationId: declareVocabulary
+      x-mosaica-permission: write-all
       summary: Declare a vocabulary, the value set a category column draws on.
       description: |
         The body is a corpus declaration's `[[vocabulary]]` block in JSON, without the keys that
@@ -2207,8 +2212,8 @@ paths:
 
         The name, `value_set`, `visibility`, `width` and `reserved` are the vocabulary's identity.
         Declaring it again with the same identity answers `200`, applies `values` as a page, as
-        `PATCH /control/vocabularies/{name}/values` does and answered as it is, and changes nothing
-        else. With a different identity it is `409`.
+        `PATCH /control/vocabularies/{name}/values` does, and changes nothing else. With a
+        different identity it is `409`.
       security:
         - controlCredential: []
       parameters:
@@ -2333,6 +2338,7 @@ paths:
     put:
       tags: ["control: view groups"]
       operationId: declareViewGroup
+      x-mosaica-permission: write-all
       summary: Declare a view group, whose views are created one key at a time.
       description: |
         The body is a corpus declaration's `[[view_group]]` block in JSON, without its roster and
@@ -2341,13 +2347,6 @@ paths:
 
         The name is the group's identity. Declaring it again with the same fields answers `200`
         and changes nothing; with any field different it is `409`.
-
-        A caller holding `write` and not `write-all` reaches the views and groups a session holding
-        its terms reaches. A name a view or a group out of its reach holds is `409`, the name taken,
-        whatever the declaration says: it is never answered `200` and the detail never compares the
-        declarations. A `members` group out of its reach is answered as one
-        not declared. A `visibility` its terms do not satisfy is `422`, whatever holds the name,
-        since it could neither change nor drop the group.
       security:
         - controlCredential: []
       parameters:
@@ -2384,13 +2383,13 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: "`members` names no view group the caller reaches."
+          description: "`members` names no view group."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`, or is held by a view or a group out of the caller's reach.
+          description: The name is declared with a different title, frame, projection, visibility, point default, metadata or `members`.
           content:
             application/json:
               schema:
@@ -2408,7 +2407,6 @@ paths:
             - `members` naming a group that takes its own views from another, or with `metadata`
             - A metadata name declared twice, or of type `category`
             - A `visibility` label or point default that is not an access expression
-            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
           content:
             application/json:
               schema:
@@ -2424,6 +2422,7 @@ paths:
     put:
       tags: ["control: views"]
       operationId: declarePlainView
+      x-mosaica-permission: write-all
       summary: Declare a plain view, a coordinate system that belongs to no group.
       description: |
         The body is a corpus declaration's `[[view]]` block in JSON, without its source. The view
@@ -2433,12 +2432,6 @@ paths:
         The name is the view's identity. Declaring it again with the same fields answers `200` and
         changes nothing; with a different title, frame, projection, visibility or point default it is
         `409`.
-
-        A caller holding `write` and not `write-all` reaches the views and groups a session holding
-        its terms reaches. A name a view or a group out of its reach holds is `409`, the name taken,
-        whatever the declaration says: it is never answered `200` and the detail never compares the
-        declarations. A `visibility` its terms do not satisfy is `422`, whatever holds the name,
-        since it could neither change nor drop the view.
       security:
         - controlCredential: []
       parameters:
@@ -2475,7 +2468,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: The name is declared with a different title, frame, projection, visibility or point default, or is held by a view or a group out of the caller's reach.
+          description: The name is declared with a different title, frame, projection, visibility or point default.
           content:
             application/json:
               schema:
@@ -2491,7 +2484,6 @@ paths:
             - An unknown projection
             - An extent that is not finite or has a maximum below its minimum
             - A `visibility` label or point default that is not an access expression
-            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
           content:
             application/json:
               schema:
@@ -2507,6 +2499,7 @@ paths:
     put:
       tags: ["control: views"]
       operationId: createView
+      x-mosaica-permission: write-all
       summary: Create a view of a view group.
       description: |
         The view's id is `<group>:<key>`. It starts with no rows, and takes the group's frame and
@@ -2517,9 +2510,7 @@ paths:
         a string. The record cannot be changed after it is created.
 
         A key held by a live view is `409`. A dropped key may be created again, and the new view
-        starts with none of the old one's rows or artifacts. To a caller holding `write` and not
-        `write-all`, a group out of its terms' reach is one not declared, and a `visibility` its
-        terms do not satisfy is `422`, since it could neither change nor drop the view.
+        starts with none of the old one's rows or artifacts.
       security:
         - controlCredential: []
       parameters:
@@ -2546,7 +2537,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: No view group the caller reaches has this name.
+          description: No view group has this name.
           content:
             application/json:
               schema:
@@ -2568,7 +2559,6 @@ paths:
             - A metadata value that is null, an array or an object, or that does not match the type the group declares
             - A metadata name the group does not declare, or one it declares left out
             - A `visibility` label that is not an access expression
-            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
             - A group that takes its views from another
           content:
             application/json:
@@ -2583,6 +2573,7 @@ paths:
     delete:
       tags: ["control: views"]
       operationId: dropView
+      x-mosaica-permission: write-all
       summary: Drop a view of a view group and free its key.
       description: |
         The view leaves every roster at once, including the rosters of groups sharing its views,
@@ -2594,10 +2585,7 @@ paths:
         Every item the drop leaves with a row in no view, flushed or buffered, is deleted, as
         `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
         nothing afterwards: a later row carrying one of its unique values creates a new item, and
-        one carrying its `mosaica_id` is refused. To a caller holding `write` and not `write-all`, a
-        view out of its terms' reach is one not created. A view it reaches is dropped whole: the
-        items the drop deletes and `deleted` counts include those outside its terms, and so do the
-        artifacts.
+        one carrying its `mosaica_id` is refused.
       security:
         - controlCredential: []
       parameters:
@@ -2618,7 +2606,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: No live view of this group holds this key, or no group has this name, or the view is out of the caller's reach.
+          description: No live view of this group holds this key, or no group has this name.
           content:
             application/json:
               schema:
@@ -2642,6 +2630,7 @@ paths:
     put:
       tags: ["control: layers"]
       operationId: registerLayer
+      x-mosaica-permission: write-all
       summary: Register an annotation layer.
       description: |
         The body is a corpus declaration's `[[layer]]` block in JSON. `views` may name a view
@@ -2651,8 +2640,6 @@ paths:
 
         A name already registered is `422`, including a second request with the same declaration.
         A dropped layer's name may be registered again. A refusal means the layer does not exist.
-        A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy is
-        `422`, since it could neither change nor drop the layer.
       security:
         - controlCredential: []
       parameters:
@@ -2690,9 +2677,9 @@ paths:
           description: |
             - An unknown field
             - A name that is empty, `all` or registered
-            - A view that is neither a view nor a view group the caller reaches; the detail lists only those
+            - A view that is neither a view nor a view group
             - A view outside the group a group-scoped layer names
-            - A `depends_on` layer that is not registered or that the caller does not reach, or the layer itself
+            - A `depends_on` layer that is not registered, or the layer itself
             - Levels on a `nested` or `dag` layer, none on a `stacked` or `tiered` one, levels not numbered densely from 0, or a level whose `zoom` range holds no depth
             - A `fraction` outside (0, 1], or on a `spatial` or attribute layer
             - `shape` on a layer that is not `spatial`
@@ -2701,7 +2688,6 @@ paths:
             - An unknown computed property
             - A repeated view, level title or content name
             - A label that is not an access expression
-            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
             - A `spatial` layer over both projected and unprojected views
           content:
             application/json:
@@ -2718,13 +2704,11 @@ paths:
     delete:
       tags: ["control: layers"]
       operationId: dropLayer
+      x-mosaica-permission: write-all
       summary: Drop a layer.
       description: |
         The layer and its artifacts stop being served at once. Its name may be registered again, as
         a new layer: none of the dropped layer's `mosaica_id`s names the new layer or its artifacts.
-        To a caller holding `write` and not `write-all`, a layer whose `visibility` its terms do not
-        satisfy is one not registered. A layer it reaches is dropped whole, artifacts outside its
-        terms included.
       security:
         - controlCredential: []
       parameters:
@@ -2745,7 +2729,7 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           description: |
-            - No layer the caller reaches is registered under this name
+            - No layer is registered under this name
             - `wait` has a value other than `visible`
             - The query names another parameter
           content:
@@ -2782,9 +2766,11 @@ paths:
         **The writer's terms, for layers and artifacts.** To a caller holding `write` and not
         `write-all`, a layer whose `visibility` its terms do not satisfy is one not registered, and
         an artifact is outside its terms unless a session holding them would be served it, its
-        suppression aside: its own label, or the layer's default, admits the terms, its view is one
-        they reach, and as many of its members are inside them as `require_member_visibility`
-        asks. A parent or an attachment target outside is answered as one no artifact is. A key an
+        suppression aside: its own label, or the layer's default, admits the terms, it is drawn in
+        a view they reach, what it attaches to is served to them, as many of its members are
+        inside them as `require_member_visibility` asks, and, where the layer supplies content, the
+        generating set of one of its contents is wholly inside them. A parent or an attachment
+        target outside is answered as one no artifact is. A key an
         artifact outside holds is `409`, since a key names one artifact; nothing else of the holder
         is said. An artifact whose `access` labels the terms do not satisfy is refused alone: it is
         listed in `refused` as `{artifact, reason: label_not_held}`, its `mosaica_id` is `null`,
@@ -3825,7 +3811,7 @@ components:
     controlCredential:
       type: http
       scheme: bearer
-      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. A write by a principal holding `write` and not `write-all` names only the items its terms reach, suppressed ones included: an item outside them, by `mosaica_id` or by a unique value, is answered as an absent one is, except that an insert or a row setting a unique value an item outside holds is refused as `value_held`, naming no item, and a row setting a label the terms do not satisfy is refused as `label_not_held`. The layers, views, groups and artifacts it names are bounded alike: one a session holding its terms would not be served is answered as one not declared, a name one holds is taken, and a key an artifact outside holds is not given again. `write-all` lifts the bound, and the operator holds it."
+      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; a declaration and a drop, the operations marked `x-mosaica-permission: write-all`, need `write-all` beside it; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. A write by a principal holding `write` and not `write-all` names only the items its terms reach, suppressed ones included: an item outside them, by `mosaica_id` or by a unique value, is answered as an absent one is, except that an insert or a row setting a unique value an item outside holds is refused as `value_held`, naming no item, and a row setting a label the terms do not satisfy is refused as `label_not_held`. The layers, views and artifacts it names are bounded alike: one a session holding its terms would not be served is answered as one not declared, and a key an artifact outside holds is not given again. `write-all` lifts the bound, and the operator holds it."
     sessionToken:
       type: http
       scheme: bearer
@@ -4194,7 +4180,7 @@ components:
     Permission:
       type: string
       enum: [read, write, authorise-as, admin, read-all, write-all]
-      description: "`write` writes, flushes and compacts, naming only the items, layers, views, groups and artifacts the principal's terms reach; `write-all` lifts that bound, so its writes name every one."
+      description: "`write` writes, flushes and compacts, naming only the items, layers, views and artifacts the principal's terms reach; `write-all` lifts that bound, so its writes name every one, and declares and drops."
 
     CatalogueChange:
       type: object
@@ -7083,7 +7069,7 @@ components:
       type: object
       additionalProperties: false
       required: [key, views]
-      description: What fitting one shape to each of its layer's views did.
+      description: What fitting one shape to each of its layer's views did. A shape is fitted to every view, and reported on those a session holding the caller's terms is served, every one for a caller holding `write-all`.
       properties:
         key:
           type: [string, "null"]

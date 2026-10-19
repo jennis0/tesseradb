@@ -1394,7 +1394,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         # `existing: true` is the held-part arm of the fill rule: the name is there under this
         # identity and the request applied nothing but its values.
         report.already_present += 1 if body.get("existing") else 0
-        report.values_bound += int(body.get("added", body.get("bound", 0)))
+        report.values_bound += int(body.get("added", 0))
         report.titles_set += int(body.get("titles", 0))
     elif page.kind == "vocabulary_values":
         # Here `existing` is a count: the keys of this page the value set already bound. A writer

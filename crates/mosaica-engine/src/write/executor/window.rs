@@ -578,8 +578,8 @@ impl Executor {
     }
 
     /// Whether anything the handler resolved `submission` against has moved since, from memory: a
-    /// named item deleted, edited, joined to the row's view or its entity issued again, or a value
-    /// the batch carries given a holder.
+    /// named item deleted, edited, joined to the row's view or its entity issued again, a value
+    /// the batch carries given a holder, or the holder of a value a row was refused for gone.
     fn moved_since_resolved(&self, submission: &IngestSubmission) -> bool {
         let IngestSubmission {
             rows,
@@ -587,6 +587,7 @@ impl Executor {
             slots,
             keys,
             refused_keys,
+            held_by,
             unique_seq,
             ..
         } = submission;
@@ -597,6 +598,7 @@ impl Executor {
         let deleted = |item: ItemAt| crate::unique::deleted_in(&generation, item);
         let moved = crate::unique::moved_since(&generation, keys, *unique_seq, creates)
             || crate::unique::moved_since(&generation, refused_keys, *unique_seq, false)
+            || held_by.iter().any(|item| deleted(*item))
             || edits.iter().any(|submitted| {
                 let old = submitted.edit.item();
                 deleted(old)

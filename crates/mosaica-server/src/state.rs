@@ -32,8 +32,9 @@ const SWEEP_FLOOR_ENTRIES: usize = 16;
 pub enum Principal {
     /// The holder of the operator credential. It is not in the catalogue and holds no session.
     Superuser,
-    /// A principal stored in the catalogue, by name.
-    Local(String),
+    /// A principal stored in the catalogue: its id, which no other principal is ever given, and
+    /// its name.
+    Local { id: i64, name: String },
     /// An OIDC identity, named by its issuer and subject, and the provider that accepted it.
     Oidc {
         provider: String,
@@ -46,14 +47,19 @@ impl Principal {
     /// The principal as an ingest batch records it: a retry is matched by this and its batch id,
     /// and no two principals share one.
     pub fn write_key(&self) -> String {
-        let parts: Vec<&str> = match self {
-            Principal::Superuser => vec!["superuser"],
-            Principal::Local(name) => vec!["local", name],
+        let parts: Vec<String> = match self {
+            Principal::Superuser => vec!["superuser".into()],
+            Principal::Local { id, .. } => vec!["local".into(), id.to_string()],
             Principal::Oidc {
                 provider,
                 issuer,
                 subject,
-            } => vec!["oidc", provider, issuer, subject],
+            } => vec![
+                "oidc".into(),
+                provider.clone(),
+                issuer.clone(),
+                subject.clone(),
+            ],
         };
         serde_json::to_string(&parts).expect("a list of strings encodes")
     }
@@ -78,7 +84,7 @@ impl SessionEntry {
     /// Whether a catalogue change reported in `affected` ends this session.
     fn affected_by(&self, affected: &mosaica_catalogue::Affected) -> bool {
         let principal = match &self.principal {
-            Principal::Local(name) => affected.principals.contains(name),
+            Principal::Local { name, .. } => affected.principals.contains(name),
             Principal::Oidc { provider, .. } => affected.providers.contains(provider),
             Principal::Superuser => false,
         };

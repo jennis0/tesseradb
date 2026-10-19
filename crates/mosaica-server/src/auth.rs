@@ -66,7 +66,7 @@ impl Caller {
     /// The local principal's name, where the caller is one.
     pub fn local_name(&self) -> Option<&str> {
         match &self.principal {
-            Principal::Local(name) => Some(name),
+            Principal::Local { name, .. } => Some(name),
             _ => None,
         }
     }
@@ -184,7 +184,13 @@ pub fn api_key(catalogue: &Catalogue, key: &str) -> Result<Caller, ApiError> {
         .into_iter()
         .find(|k| k.prefix == prefix)
         .and_then(|k| k.expires_at);
-    local(catalogue, auth.principal, Some(prefix), expires_at)
+    local(
+        catalogue,
+        auth.principal_id,
+        auth.principal,
+        Some(prefix),
+        expires_at,
+    )
 }
 
 /// A local principal by name and password. The check is argon2id, so it runs off the async
@@ -202,24 +208,31 @@ pub async fn password(
                 .catalogue
                 .verify_password(&principal, &password)
                 .map_err(|_| ApiError::BadCredential)?;
-            local(&state.catalogue, auth.principal, None, None)
+            local(
+                &state.catalogue,
+                auth.principal_id,
+                auth.principal,
+                None,
+                None,
+            )
         })
         .await
 }
 
 fn local(
     catalogue: &Catalogue,
-    principal: String,
+    id: i64,
+    name: String,
     api_key: Option<String>,
     expires_at: Option<u64>,
 ) -> Result<Caller, ApiError> {
     let source = Source::Local {
-        principal: principal.clone(),
+        principal: name.clone(),
         api_key: api_key.clone(),
     };
     let resolution = source.resolve(catalogue).ok_or(ApiError::BadCredential)?;
     Ok(Caller {
-        principal: Principal::Local(principal),
+        principal: Principal::Local { id, name },
         api_key,
         resolution,
         expires_at,
@@ -288,12 +301,14 @@ pub fn every_item(catalogue: &Catalogue) -> Caller {
 /// not learn by acting.
 pub fn named(catalogue: &Catalogue, principal: &str) -> Result<Caller, ApiError> {
     let principal = principal.trim().to_owned();
-    local(catalogue, principal.clone(), None, None).map_err(|_| {
+    let unknown = || {
         ApiError::Unknown(format!(
             "there is no enabled principal named `{principal}`; list the principals to find the \
              name"
         ))
-    })
+    };
+    let id = catalogue.principal_id(&principal).ok_or_else(unknown)?;
+    local(catalogue, id, principal.clone(), None, None).map_err(|_| unknown())
 }
 
 /// A minted session, as the session plane and the login route answer it.

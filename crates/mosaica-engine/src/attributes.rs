@@ -125,13 +125,9 @@ pub(crate) enum Resolution {
 /// `is_layer` answers whether a registered layer holds the name: an ingest batch's columns are
 /// declared scalars or layer names, so a column under a layer's name would make a batch mean two
 /// things.
-///
-/// `views` is what the writer reaches, `None` for every view: a group out of its reach is unknown,
-/// and a name a column of one holds is taken.
 pub(crate) fn resolve(
     request: &AttributeRequest,
     manifest: &Manifest,
-    views: Option<&crate::gate::VisibleViews>,
     is_layer: impl Fn(&str) -> bool,
 ) -> Result<Resolution, ExecError> {
     let refused = |detail: String| ExecError::AttributeRefused { detail };
@@ -142,22 +138,12 @@ pub(crate) fn resolve(
             "attribute '{name}': a layer already has that name"
         )));
     }
-    let reached = |group: &str| views.is_none_or(|views| views.contains_group(group));
-    let compiled = compile(request, manifest, reached).map_err(refused)?;
+    let compiled = compile(request, manifest).map_err(refused)?;
 
     // Declaring a held column again is accepted if nothing differs. Type and placement are
     // written into every row, so a difference is a conflict; `unique` is written into no row, so
     // it may change.
     if let Some(held) = held_by_name(manifest, name) {
-        if let CompiledAttribute::Scoped(family) = &held {
-            if !reached(&family.group) {
-                return Err(ExecError::AttributeConflict {
-                    detail: format!(
-                        "the name '{name}' is taken; declare the column under another name"
-                    ),
-                });
-            }
-        }
         return match (&held, &compiled) {
             _ if held == compiled => Ok(Resolution::Existing),
             (_, CompiledAttribute::Entity(asked)) if same_but_unique(&held, &compiled) => {
@@ -250,11 +236,7 @@ pub(crate) fn held_by_name(manifest: &Manifest, name: &str) -> Option<CompiledAt
         })
 }
 
-fn compile(
-    request: &AttributeRequest,
-    manifest: &Manifest,
-    reached: impl Fn(&str) -> bool,
-) -> Result<CompiledAttribute, String> {
+fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAttribute, String> {
     let name = request.name.as_str();
     let group = match &request.scope {
         LayerScope::Entity => None,
@@ -301,7 +283,7 @@ fn compile(
     let descriptor = manifest
         .groups
         .iter()
-        .find(|g| &g.name == group && reached(&g.name))
+        .find(|g| &g.name == group)
         .ok_or_else(|| format!("attribute '{name}': no view group named '{group}'"))?;
     if let Some(owner) = &descriptor.members_of {
         return Err(format!(

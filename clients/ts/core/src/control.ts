@@ -83,8 +83,7 @@ export type RowAnswer = Answer<IngestResponse> & {
  * unique value an item outside the writer's terms holds. `label_not_held`: the row, or an artifact
  * of `publish` or `grow`, sets an access label the writer's terms do not satisfy. `one_item_twice`,
  * `one_value_twice` and `value_held` are given by `ingest` only. A writer without `write-all` names
- * only the items, layers, views, groups and artifacts its terms reach: one outside them is absent
- * to it.
+ * only the items, layers, views and artifacts its terms reach: one outside them is absent to it.
  *
  * @category Control plane
  */
@@ -616,8 +615,8 @@ export type ControlOptions = {
   controlUrl: string;
   /**
    * The credential sent as the bearer token on every request: the operator credential, an API key
-   * or an OIDC access token. Writes, flush and compaction need `write`; status and the catalogue's
-   * verbs need `admin`.
+   * or an OIDC access token. Writes, flush and compaction need `write`; declarations and drops need
+   * `write-all` beside it; status and the catalogue's verbs need `admin`.
    */
   credential: string;
   /** Used for every request in place of the global `fetch`. */

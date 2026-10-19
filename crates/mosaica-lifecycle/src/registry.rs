@@ -1071,7 +1071,6 @@ impl LayerRegistry {
     pub fn prepare_create(
         &self,
         mut declaration: LayerDeclaration,
-        reach: &dyn Reach,
     ) -> Result<WalRecord, RegistryError> {
         declaration.validate()?;
         if self.layers.contains_key(&declaration.name) {
@@ -1080,7 +1079,7 @@ impl LayerRegistry {
         let space =
             LayerSpace::new(self.next_layer_space).map_err(|_| RegistryError::SpacesExhausted)?;
         for dep in &declaration.depends_on {
-            if !self.layers.contains_key(dep) || !reach.layer(dep) {
+            if !self.layers.contains_key(dep) {
                 return Err(RegistryError::MissingDependency {
                     layer: declaration.name.clone(),
                     depends_on: dep.clone(),
@@ -2881,8 +2880,11 @@ impl LayerRegistry {
     /// contract: the caller appends and syncs before applying.
     ///
     /// [`prepare_create`]: LayerRegistry::prepare_create
-    pub fn prepare_drop(&self, name: &str, reach: &dyn Reach) -> Result<WalRecord, RegistryError> {
-        let layer = self.layer_within(name, reach)?;
+    pub fn prepare_drop(&self, name: &str) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(name.to_string()))?;
         Ok(WalRecord::LayerDrop {
             name: name.to_string(),
             space: layer.space,
@@ -3211,7 +3213,7 @@ mod tests {
         reg: &mut LayerRegistry,
         d: LayerDeclaration,
     ) -> Result<(), RegistryError> {
-        let record = reg.prepare_create(d, &Everything)?;
+        let record = reg.prepare_create(d)?;
         reg.apply(&record);
         Ok(())
     }
@@ -3292,7 +3294,7 @@ mod tests {
         register(&mut reg, declaration("clusters/a")).unwrap();
         let first = reg.get("clusters/a").unwrap().clone();
 
-        let drop = reg.prepare_drop("clusters/a", &Everything).unwrap();
+        let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
         assert!(reg.get("clusters/a").is_none());
 
@@ -3302,11 +3304,11 @@ mod tests {
         assert!(reg.in_space(first.space).is_none());
         assert_eq!(reg.next_layer_space(), second.space.raw() + 1);
 
-        let drop = reg.prepare_drop("clusters/a", &Everything).unwrap();
+        let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
         // And dropping what is not there is a refusal, not a silent success.
         assert_eq!(
-            reg.prepare_drop("clusters/a", &Everything).unwrap_err(),
+            reg.prepare_drop("clusters/a").unwrap_err(),
             RegistryError::NoSuchLayer("clusters/a".into())
         );
     }
@@ -3317,7 +3319,7 @@ mod tests {
         register(&mut reg, declaration("clusters/a")).unwrap();
         let first = reg.get("clusters/a").unwrap().space;
 
-        let drop = reg.prepare_drop("clusters/a", &Everything).unwrap();
+        let drop = reg.prepare_drop("clusters/a").unwrap();
         reg.apply(&drop);
         assert_eq!(reg.next_layer_space(), first.raw() + 1, "a drop frees no space");
 
@@ -3331,15 +3333,13 @@ mod tests {
         // layer's ids under every bookmark and suppression naming them.
         let mut live = LayerRegistry::new();
         let create = live
-            .prepare_create(declaration("clusters/a"), &Everything)
+            .prepare_create(declaration("clusters/a"))
             .unwrap();
         let drop_b = {
             let mut r = LayerRegistry::new();
-            let c = r
-                .prepare_create(declaration("clusters/b"), &Everything)
-                .unwrap();
+            let c = r.prepare_create(declaration("clusters/b")).unwrap();
             r.apply(&c);
-            r.prepare_drop("clusters/b", &Everything).unwrap()
+            r.prepare_drop("clusters/b").unwrap()
         };
         live.apply(&create);
 
@@ -3357,17 +3357,17 @@ mod tests {
         let mut live = LayerRegistry::new();
         let mut log = Vec::new();
         for name in ["clusters/a", "clusters/b"] {
-            let record = live.prepare_create(declaration(name), &Everything).unwrap();
+            let record = live.prepare_create(declaration(name)).unwrap();
             live.apply(&record);
             log.push(record);
         }
         for name in ["clusters/a", "clusters/b"] {
-            let drop = live.prepare_drop(name, &Everything).unwrap();
+            let drop = live.prepare_drop(name).unwrap();
             live.apply(&drop);
             log.push(drop);
         }
         let again = live
-            .prepare_create(declaration("clusters/a"), &Everything)
+            .prepare_create(declaration("clusters/a"))
             .unwrap();
         live.apply(&again);
         log.push(again);
@@ -3485,7 +3485,7 @@ mod tests {
             pinned,
             treed,
         ] {
-            let record = reg.prepare_create(d, &Everything).unwrap();
+            let record = reg.prepare_create(d).unwrap();
             reg.apply(&record);
             log.push(record);
         }
@@ -3629,9 +3629,9 @@ mod tests {
         }
     }
 
-    /// **A layer or an artifact out of the writer's reach is one nobody holds, and its key is not
-    /// given again**: a growth, a parent and a drop naming one are refused as for a name nothing
-    /// holds, and a publication or a mint under its key is refused as the key held.
+    /// **An artifact out of the writer's reach is one nobody holds, and its key is not given
+    /// again**: a growth and a parent naming one are refused as for a name nothing holds, and a
+    /// publication or a mint under its key is refused as the key held.
     #[test]
     fn what_a_writer_cannot_reach_is_named_by_nothing_and_its_key_is_not_given_again() {
         let mut reg = LayerRegistry::new();
@@ -3706,12 +3706,6 @@ mod tests {
         assert_eq!(
             child("secret").replace("secret", "K"),
             child("absent").replace("absent", "K")
-        );
-
-        let dropped = |name: &str| reg.prepare_drop(name, &reach).unwrap_err().to_string();
-        assert_eq!(
-            dropped("clusters/hidden").replace("clusters/hidden", "L"),
-            dropped("clusters/never").replace("clusters/never", "L")
         );
     }
 
@@ -4125,7 +4119,7 @@ mod tests {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let create = reg
-            .prepare_create(declaration("clusters/a"), &Everything)
+            .prepare_create(declaration("clusters/a"))
             .unwrap();
         reg.apply(&create);
         let publication = reg
@@ -4181,9 +4175,7 @@ mod tests {
     fn an_extension_replayed_from_the_log_is_not_given_again() {
         let mut reg = LayerRegistry::new();
         let store = ArtifactStore::new();
-        let create = reg
-            .prepare_create(declaration("clusters/a"), &Everything)
-            .unwrap();
+        let create = reg.prepare_create(declaration("clusters/a")).unwrap();
         reg.apply(&create);
         let publication = reg
             .prepare_publish(

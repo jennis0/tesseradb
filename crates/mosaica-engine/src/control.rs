@@ -416,17 +416,7 @@ impl Engine {
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        self.register_layer_as(declaration, WriteScope::All)
-    }
-
-    /// [`Engine::register_layer`] by a writer of `scope`: the views, groups and layers the
-    /// declaration names are the ones the writer reaches.
-    pub fn register_layer_as(
-        &self,
-        declaration: mosaica_types::layer::LayerDeclaration,
-        scope: WriteScope,
-    ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        let space = self.write.register_layer(declaration, scope)?;
+        let space = self.write.register_layer(declaration)?;
         self.issued_id(space, mosaica_types::layer::LAYER_ENTITY)
     }
 
@@ -447,17 +437,7 @@ impl Engine {
     /// Drop a layer. Its name may be registered again, as a new layer whose identifiers share
     /// nothing with the dropped one's.
     pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
-        self.drop_layer_as(name, WriteScope::All)
-    }
-
-    /// [`Engine::drop_layer`] by a writer of `scope`, to whom a layer it does not reach is
-    /// unknown.
-    pub fn drop_layer_as(
-        &self,
-        name: String,
-        scope: WriteScope,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.drop_layer(name, scope)
+        self.write.drop_layer(name)
     }
 
     /// Declare an attribute column while the service runs. `true` where a column of that name
@@ -467,18 +447,7 @@ impl Engine {
         &self,
         request: mosaica_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.declare_attribute_as(request, WriteScope::All)
-    }
-
-    /// [`Engine::declare_attribute`] by a writer of `scope`: a group it does not reach is unknown,
-    /// and a refusal of `unique` over a value held twice names only values whose holders it
-    /// reaches.
-    pub fn declare_attribute_as(
-        &self,
-        request: mosaica_lifecycle::AttributeRequest,
-        scope: WriteScope,
-    ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.write.declare_attribute(request, scope)
+        self.write.declare_attribute(request)
     }
 
     /// Declare the point shard's size while the service runs. `true` where the shard already had
@@ -491,14 +460,13 @@ impl Engine {
         self.write.declare_shards(size)
     }
 
-    /// Declare a vocabulary while the service runs, by a writer of `scope`.
+    /// Declare a vocabulary while the service runs.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn declare_vocabulary(
         &self,
         request: mosaica_lifecycle::VocabularyRequest,
-        scope: WriteScope,
     ) -> std::result::Result<crate::write::VocabularyDeclared, crate::write::AcceptError> {
-        self.write.declare_vocabulary(request, scope)
+        self.write.declare_vocabulary(request)
     }
 
     /// A page of values for a vocabulary that exists, by a writer of `scope`.
@@ -517,44 +485,24 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_view_group(
         &self,
-        declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
-    ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.create_view_group_as(declaration, WriteScope::All)
-    }
-
-    /// [`Engine::create_view_group`] by a writer of `scope`: a name a view or a group it does not
-    /// reach holds is taken, and a group it does not reach is unknown.
-    pub fn create_view_group_as(
-        &self,
         mut declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
-        scope: WriteScope,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
             self.check_point_default(declaration.point_default.as_deref())?;
-        self.write.create_view_group(declaration, scope)
+        self.write.create_view_group(declaration)
     }
 
     /// Create a plain view while the service runs, on [`Engine::create_view_group`]'s rule.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_plain_view(
         &self,
-        declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
-    ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.create_plain_view_as(declaration, WriteScope::All)
-    }
-
-    /// [`Engine::create_plain_view`] by a writer of `scope`, on
-    /// [`Engine::create_view_group_as`]'s rule.
-    pub fn create_plain_view_as(
-        &self,
         mut declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
-        scope: WriteScope,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
             self.check_point_default(declaration.point_default.as_deref())?;
-        self.write.create_plain_view(declaration, scope)
+        self.write.create_plain_view(declaration)
     }
 
     /// [`mosaica_access::point_default`]: the default as stored,
@@ -593,22 +541,8 @@ impl Engine {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.create_view_as(group, key, visibility, metadata, WriteScope::All)
-    }
-
-    /// [`Engine::create_view`] by a writer of `scope`, to whom a group it does not reach is
-    /// unknown.
-    pub fn create_view_as(
-        &self,
-        group: String,
-        key: String,
-        visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
-        scope: WriteScope,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
         let visibility = self.check_visibility(visibility.as_deref())?;
-        self.write
-            .create_view(group, key, visibility, metadata, scope)
+        self.write.create_view(group, key, visibility, metadata)
     }
 
     /// Drop a view, deleting the items it leaves in no view and its artifacts. Its key may be
@@ -618,17 +552,7 @@ impl Engine {
         group: String,
         key: String,
     ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
-        self.drop_view_as(group, key, WriteScope::All)
-    }
-
-    /// [`Engine::drop_view`] by a writer of `scope`, to whom a view it does not reach is unknown.
-    pub fn drop_view_as(
-        &self,
-        group: String,
-        key: String,
-        scope: WriteScope,
-    ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
-        self.write.drop_view(group, key, scope)
+        self.write.drop_view(group, key)
     }
 
     /// [`Engine::put_artifacts_named`] for members as the generation served now holds them, each

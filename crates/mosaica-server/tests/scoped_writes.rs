@@ -81,32 +81,37 @@ async fn control(served: &Served, method: reqwest::Method, path: &str, body: Val
 
 /// A service principal holding `write` and the term `1`, and an API key for it.
 async fn writer(served: &Served) -> String {
+    principal_key(served, WRITER, "write").await
+}
+
+/// A service principal `name` holding `permission` and the term `1`, and an API key for it.
+async fn principal_key(served: &Served, name: &str, permission: &str) -> String {
     let post = reqwest::Method::POST;
     control(
         served,
         post.clone(),
         "/control/principals",
-        json!({ "name": WRITER, "kind": "service" }),
+        json!({ "name": name, "kind": "service" }),
     )
     .await;
     control(
         served,
         post.clone(),
         "/control/grants",
-        json!({ "principal": WRITER, "permission": "write" }),
+        json!({ "principal": name, "permission": permission }),
     )
     .await;
     control(
         served,
         post.clone(),
         "/control/grants",
-        json!({ "principal": WRITER, "terms": ["1"] }),
+        json!({ "principal": name, "terms": ["1"] }),
     )
     .await;
     let key = control(
         served,
         post,
-        &format!("/control/principals/{WRITER}/keys"),
+        &format!("/control/principals/{name}/keys"),
         json!({}),
     )
     .await;
@@ -355,6 +360,36 @@ async fn an_insert_whose_value_is_held_outside_is_refused_value_held_and_inside_
         1,
         "the item inside was edited"
     );
+}
+
+/// **Whether a value is held outside is decided where the batch applies**: a row creating an item
+/// with a value an item outside the writer's terms holds, whose holder the operator deletes after
+/// the batch arrived and before it applies, creates the item.
+#[tokio::test]
+async fn a_value_whose_holder_outside_goes_before_the_batch_applies_is_given() {
+    let (served, key, _) = setup().await;
+    let outside = mosaica_id_of(&served.server, OUTSIDE).to_string();
+    let engine = &served.server.state.engine;
+    engine.hold_next_write_check_for_test();
+    let row = json!([{ "gid": gid_of(OUTSIDE), "x": 500.5, "y": 500.5 }]);
+    let inserting = ingest(&served, &key, "late", false, row);
+    let deleting = async {
+        while !engine.write_check_is_holding_for_test() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let deleted = json!([{ "op": "delete", "match": { "mosaica_id": outside } }]);
+        let (status, body) = changes(&served, OPERATOR_CREDENTIAL, false, deleted).await;
+        assert_eq!((status, &body["accepted"]), (200, &json!(1)), "{body}");
+        engine.release_write_check_for_test();
+    };
+    let ((status, body), ()) = tokio::join!(inserting, deleting);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        (&body["created"], &body["refused"]),
+        (&json!(1), &json!([])),
+        "{body}"
+    );
+    assert!(body["mosaica_ids"][0].is_string(), "{body}");
 }
 
 /// **A label the writer's terms do not satisfy is refused by row**: a new item labelled with it,
@@ -809,6 +844,221 @@ async fn an_artifact_labelled_out_of_the_writers_terms_is_refused_and_the_others
     );
 }
 
+/// Whether a reader holding the writer's terms is served the artifact `id` in `s0`.
+async fn served_to_the_writers_terms(served: &Served, id: &str) -> bool {
+    let auth = authorise(&served.server, &["1"]).await;
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url(&format!("/v1/artifacts/{id}")))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&json!({ "view": "s0" }))
+        .send()
+        .await
+        .unwrap();
+    resp.status().as_u16() == 200
+}
+
+/// The writes `key` sends naming the artifact `name` of the nested `layer`, each answered as the
+/// same write naming a key nobody holds: a growth, a fill naming it as a parent of `reached`, and a
+/// publication naming it as a parent. A publication under its key is refused as the key taken,
+/// naming no artifact, and a change naming its `mosaica_id` is answered as one naming the deleted
+/// artifact `gone`. Every artifact a write publishes carries `parts`.
+#[allow(clippy::too_many_arguments)]
+async fn named_by_nothing(
+    served: &Served,
+    key: &str,
+    layer: &str,
+    name: &str,
+    id: &str,
+    gone: &str,
+    parts: &Value,
+) {
+    let path = format!("/control/layers/{layer}/artifacts");
+    let with = |mut artifact: Value| {
+        for (part, value) in parts.as_object().unwrap() {
+            artifact[part] = value.clone();
+        }
+        json!({ "artifacts": [artifact] })
+    };
+    let (put, patch) = (reqwest::Method::PUT, reqwest::Method::PATCH);
+    let writes = |named: &str| {
+        vec![
+            (
+                patch.clone(),
+                json!({ "artifacts": [{ "key": named, "members": members([6]) }] }),
+            ),
+            (
+                patch.clone(),
+                json!({ "artifacts": [{ "key": "reached", "parent": [named] }] }),
+            ),
+            (
+                put.clone(),
+                with(json!({ "key": "child", "parent": [named], "members": members([6]) })),
+            ),
+        ]
+    };
+    for ((method, a), (_, b)) in writes(name).into_iter().zip(writes("absent")) {
+        let a = send(served, key, method.clone(), &path, a).await;
+        let b = send(served, key, method.clone(), &path, b).await;
+        assert!(a.0 >= 400, "{method} {name}: {a:?}");
+        assert_eq!(spelt(&a, name, "K"), spelt(&b, "absent", "K"), "{method}");
+    }
+    let held = with(json!({ "key": name, "members": members([6]) }));
+    let (status, body) = send(served, key, put, &path, held).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(!body.to_string().contains(id), "{body}");
+    for op in ["suppress", "delete"] {
+        let a = changes(
+            served,
+            key,
+            false,
+            json!([{ "op": op, "match": { "mosaica_id": id } }]),
+        )
+        .await;
+        let b = changes(
+            served,
+            key,
+            false,
+            json!([{ "op": op, "match": { "mosaica_id": gone } }]),
+        )
+        .await;
+        assert_eq!(
+            a.1["refused"],
+            json!([{ "row": 0, "reason": "unknown_mosaica_id" }]),
+            "{a:?}"
+        );
+        assert_eq!(spelt(&a, id, "ID"), spelt(&b, gone, "ID"));
+    }
+}
+
+/// `artifacts` published into `layer` by the operator, and their `mosaica_id`s, the last deleted.
+async fn published(served: &Served, layer: &str, artifacts: Value) -> Vec<String> {
+    let path = format!("/control/layers/{layer}/artifacts?wait=visible");
+    let body = json!({ "artifacts": artifacts });
+    let (status, body) = send(
+        served,
+        OPERATOR_CREDENTIAL,
+        reqwest::Method::PUT,
+        &path,
+        body,
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let ids = artifact_ids(&body);
+    let gone = ids.last().unwrap();
+    let deleted = json!([{ "op": "delete", "match": { "mosaica_id": gone } }]);
+    let (status, body) = changes(served, OPERATOR_CREDENTIAL, false, deleted).await;
+    assert_eq!((status, &body["accepted"]), (200, &json!(1)), "{body}");
+    ids
+}
+
+/// **An artifact attached to one the writer's terms are not served is named by nothing**, as it
+/// is not served to a reader holding them: growing it, filling it, naming it as a parent or by
+/// its `mosaica_id`, and publishing under its key are answered as for an artifact nobody holds or a
+/// key taken. One attached to an artifact they are served is served to such a reader, and grows.
+#[tokio::test]
+async fn an_artifact_attached_to_one_outside_the_writers_terms_is_named_by_nothing() {
+    let (served, key, _) = setup().await;
+    let mut topics = labelled_layer();
+    topics["name"] = json!("topics");
+    register(&served.server, topics).await;
+    let mut notes = labelled_layer();
+    notes["name"] = json!("notes");
+    notes["artifact_visibility"] = json!({ "field": null, "default": "inherited" });
+    notes["depends_on"] = json!(["topics"]);
+    register(&served.server, notes).await;
+    published(
+        &served,
+        "topics",
+        json!([
+            { "key": "hidden", "members": members([INSIDE]), "access": ["0"] },
+            { "key": "shown", "members": members([INSIDE]), "access": ["1"] },
+            { "key": "gone", "members": members([INSIDE]), "access": ["1"] },
+        ]),
+    )
+    .await;
+    let on = |name: &str, topic: &str| {
+        json!({ "key": name, "members": members([INSIDE]),
+                "attached_to": { "layer": "topics", "level": 0, "key": topic } })
+    };
+    let ids = published(
+        &served,
+        "notes",
+        json!([
+            on("on-hidden", "hidden"),
+            on("reached", "shown"),
+            on("gone", "shown")
+        ]),
+    )
+    .await;
+    let (hidden, reached, gone) = (&ids[0], &ids[1], &ids[2]);
+    assert!(!served_to_the_writers_terms(&served, hidden).await);
+    assert!(served_to_the_writers_terms(&served, reached).await);
+
+    named_by_nothing(
+        &served,
+        &key,
+        "notes",
+        "on-hidden",
+        hidden,
+        gone,
+        &json!({}),
+    )
+    .await;
+    let grow = json!({ "artifacts": [{ "key": "reached", "members": members([6]) }] });
+    let path = "/control/layers/notes/artifacts";
+    let (status, body) = send(&served, &key, reqwest::Method::PATCH, path, grow).await;
+    assert_eq!(
+        (status, &body["artifacts"][0]["joined"]),
+        (200, &json!(1)),
+        "{body}"
+    );
+}
+
+/// **An artifact whose every content's generating set holds an item outside the writer's terms
+/// is named by nothing**, as it is not served to a reader holding them, on the writes
+/// [`named_by_nothing`] sends. One with a content wholly inside them is served to such a reader,
+/// and grows.
+#[tokio::test]
+async fn an_artifact_whose_contents_are_generated_from_outside_the_writers_terms_is_named_by_nothing(
+) {
+    let (served, key, _) = setup().await;
+    let mut described = labelled_layer();
+    described["name"] = json!("described");
+    described["artifact_visibility"] = json!({ "field": null, "default": "inherited" });
+    described["content"] = json!({
+        "computed": [],
+        "supplied": [{ "name": "name", "type": "text", "require_member_visibility": "all" }]
+    });
+    register(&served.server, described).await;
+    let content = |items: &[u64]| json!([{ "values": ["c"], "generated_from": members(items.iter().copied()) }]);
+    let ids = published(
+        &served,
+        "described",
+        json!([
+            { "key": "outer", "members": members([INSIDE]), "content": content(&[INSIDE, OUTSIDE]) },
+            { "key": "reached", "members": members([INSIDE]), "content": content(&[INSIDE, 6]) },
+            { "key": "gone", "members": members([INSIDE]), "content": content(&[INSIDE]) },
+        ]),
+    )
+    .await;
+    let (outer, reached, gone) = (&ids[0], &ids[1], &ids[2]);
+    assert!(!served_to_the_writers_terms(&served, outer).await);
+    assert!(served_to_the_writers_terms(&served, reached).await);
+
+    let parts = json!({ "content": content(&[INSIDE]) });
+    named_by_nothing(&served, &key, "described", "outer", outer, gone, &parts).await;
+    let grow = json!({ "artifacts": [{ "key": "reached", "members": members([6]) }] });
+    let path = "/control/layers/described/artifacts";
+    let (status, body) = send(&served, &key, reqwest::Method::PATCH, path, grow).await;
+    assert_eq!(
+        (status, &body["artifacts"][0]["joined"]),
+        (200, &json!(1)),
+        "{body}"
+    );
+}
+
 /// **An artifact is inside the writer's terms only where a reader holding them would be served
 /// it**: on a layer requiring a visible member, an artifact whose members are all outside the
 /// terms is named by nothing, and one with a member inside grows.
@@ -1009,13 +1259,10 @@ fn plain_view(term: &str) -> Value {
     json!({ "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] }, "visibility": term })
 }
 
-/// Requests the writer sends, each naming a layer, view or group out of its reach, as
-/// `(method, path, body, name)` with `NAME` in the path and body standing for the name: the drops
-/// last, so that a drop that went through would not change what the others meet.
+/// Requests the writer sends, each naming a layer out of its reach, as `(method, path, body,
+/// name)` with `NAME` in the path standing for the name.
 fn named_out_of_reach() -> Vec<(reqwest::Method, String, Value, &'static str)> {
     let artifacts = json!({ "artifacts": [{ "key": "a", "members": members([INSIDE]) }] });
-    let mut layer = flat_layer("fresh");
-    layer["views"] = json!(["NAME"]);
     vec![
         (
             reqwest::Method::PUT,
@@ -1027,30 +1274,6 @@ fn named_out_of_reach() -> Vec<(reqwest::Method, String, Value, &'static str)> {
             reqwest::Method::PATCH,
             "/control/layers/NAME/artifacts".into(),
             artifacts,
-            HIDDEN,
-        ),
-        (
-            reqwest::Method::PUT,
-            "/control/layers".into(),
-            layer,
-            SECRET_VIEW,
-        ),
-        (
-            reqwest::Method::PUT,
-            "/control/views/NAME/q2".into(),
-            json!({}),
-            GROUP,
-        ),
-        (
-            reqwest::Method::DELETE,
-            "/control/views/NAME/q1".into(),
-            Value::Null,
-            GROUP,
-        ),
-        (
-            reqwest::Method::DELETE,
-            "/control/layers/NAME".into(),
-            Value::Null,
             HIDDEN,
         ),
     ]
@@ -1083,13 +1306,11 @@ async fn probe_out_of_reach(served: &Served, key: &str) {
     }
 }
 
-/// **A layer, a view or a group out of the writer's reach is unknown to it**: dropping it,
-/// publishing into it, naming it in a layer's views or as a group to create a view of are each
-/// answered as for a name nobody declared, and no refusal lists it. Declaring one under its name
-/// is refused as the name taken, never answered as the declaration held or as one differing from
-/// it. A writer holding `write-all` is answered as the operator is.
+/// **A layer or a view out of the writer's reach is unknown to it**: ingesting into the view,
+/// publishing into the layer or naming it in a column, and naming the layer by its `mosaica_id`
+/// are each answered as for a name nobody declared, and no refusal lists it.
 #[tokio::test]
-async fn a_layer_view_or_group_out_of_the_writers_reach_is_unknown_and_its_name_taken() {
+async fn a_layer_or_view_out_of_the_writers_reach_is_unknown() {
     let (served, key, hidden) = gated_setup().await;
 
     // Ingest names a view by its header and a layer by its column.
@@ -1132,148 +1353,198 @@ async fn a_layer_view_or_group_out_of_the_writers_reach_is_unknown_and_its_name_
         "{a:?}"
     );
 
-    // A declaration the writer would reach, under a name out of its reach, is the name taken,
-    // alike for two declarations.
-    for (path, held) in [
-        (format!("/control/views/{SECRET_VIEW}"), plain_view("2")),
-        (format!("/control/view_groups/{GROUP}"), plain_view("2")),
+    probe_out_of_reach(&served, &key).await;
+}
+
+/// The views `/v1/meta` lists for a reader holding `terms`.
+async fn meta_views(served: &Served, terms: &[&str]) -> Vec<Value> {
+    let token = token_for(&served.server, terms).await;
+    let resp = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    body["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].clone())
+        .collect()
+}
+
+/// **A shape's report names only the views a reader holding the writer's terms is shown**: a
+/// publication into a layer drawn on a view out of the writer's reach reports the shape on the
+/// views `/v1/meta` lists for such a reader, and the operator's on every one.
+#[tokio::test]
+async fn a_shape_report_names_only_the_views_the_writers_terms_reach() {
+    let (served, key, _) = gated_setup().await;
+    let mut layer = flat_layer("boxes");
+    layer["views"] = json!(["s0", SECRET_VIEW]);
+    layer["membership"] = json!("spatial");
+    layer["shape"] = json!({ "kind": "bbox" });
+    register(&served.server, layer).await;
+    let path = "/control/layers/boxes/artifacts";
+    let reported = |body: &Value| -> Vec<Value> {
+        body["shapes"][0]["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| report["view"].clone())
+            .collect()
+    };
+    let shape = |key: &str| json!({ "artifacts": [{ "key": key, "members": {}, "bbox": [0.0, 0.0, 10.0, 10.0] }] });
+    let (status, body) = send(&served, &key, reqwest::Method::PUT, path, shape("theirs")).await;
+    assert_eq!(status, 201, "{body}");
+    let shown = meta_views(&served, &["1"]).await;
+    assert_eq!(reported(&body), vec![json!("s0")], "{body}");
+    assert!(shown.contains(&json!("s0")) && !shown.contains(&json!(SECRET_VIEW)));
+    let (status, body) = send(
+        &served,
+        OPERATOR_CREDENTIAL,
+        reqwest::Method::PUT,
+        path,
+        shape("ours"),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(
+        reported(&body),
+        vec![json!("s0"), json!(SECRET_VIEW)],
+        "{body}"
+    );
+}
+
+/// What a reader holding every term the fixtures use is told of the deployment's schema.
+async fn schema(served: &Served) -> Value {
+    let token = token_for(&served.server, &["0", "1", "2"]).await;
+    let resp = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.json().await.unwrap()
+}
+
+/// A view group nobody gates, holding the view `kept`.
+const OURS: &str = "ours";
+
+/// Every declaration and every drop, as `(method, path, body)`: each names something new, and
+/// each drop something [`OURS`] or the layer `kept` holds.
+fn declarations_and_drops() -> Vec<(reqwest::Method, String, Value)> {
+    let put = reqwest::Method::PUT;
+    let delete = reqwest::Method::DELETE;
+    vec![
+        (
+            put.clone(),
+            "/control/layers".into(),
+            flat_layer("new-layer"),
+        ),
+        (
+            put.clone(),
+            "/control/attributes".into(),
+            json!({ "name": "new_attribute", "type": "keyword" }),
+        ),
+        (
+            put.clone(),
+            "/control/shards".into(),
+            json!({ "size": 1 << 20 }),
+        ),
+        (
+            put.clone(),
+            "/control/vocabularies/new_vocabulary".into(),
+            json!({ "value_set": "open", "visibility": "public", "width": "u8" }),
+        ),
+        (
+            put.clone(),
+            "/control/view_groups/new-group".into(),
+            plain_view("1"),
+        ),
+        (
+            put.clone(),
+            "/control/views/new-view".into(),
+            plain_view("1"),
+        ),
+        (put, format!("/control/views/{OURS}/new-key"), json!({})),
+        (
+            delete.clone(),
+            format!("/control/views/{OURS}/kept"),
+            Value::Null,
+        ),
+        (delete, "/control/layers/kept".into(), Value::Null),
+    ]
+}
+
+/// **Every declaration and every drop needs `write-all`**: a writer holding `write` alone is
+/// refused each, `403` as a caller without `write` is refused a write, and nothing changes. Once
+/// it holds `write-all`, each is made.
+#[tokio::test]
+async fn a_declaration_or_a_drop_needs_write_all() {
+    let (served, key, _) = setup().await;
+    register(&served.server, flat_layer("kept")).await;
+    for (path, body) in [
+        (format!("/control/view_groups/{OURS}"), plain_view("1")),
+        (format!("/control/views/{OURS}/kept"), json!({})),
     ] {
-        let mine = plain_view("1");
-        let mut other = mine.clone();
-        other["extent"]["x"] = json!([0.0, 10.0]);
-        let a = send(&served, &key, reqwest::Method::PUT, &path, mine).await;
-        let b = send(&served, &key, reqwest::Method::PUT, &path, other).await;
-        assert_eq!(a.0, 409, "{path}: {a:?}");
-        assert_eq!(a, b, "{path}");
         let (status, body) = send(
             &served,
             OPERATOR_CREDENTIAL,
             reqwest::Method::PUT,
             &path,
-            held.clone(),
+            body,
         )
         .await;
+        assert_eq!(status, 201, "{path}: {body}");
+    }
+    let reader = principal_key(&served, "reader", "read").await;
+    let (no_write, refusal) = send(
+        &served,
+        &reader,
+        reqwest::Method::PUT,
+        "/control/layers",
+        flat_layer("fresh"),
+    )
+    .await;
+    assert_eq!(no_write, 403, "{refusal}");
+
+    let before = schema(&served).await;
+    for (method, path, body) in declarations_and_drops() {
+        let (status, refused) = send(&served, &key, method.clone(), &path, body).await;
         assert_eq!(
-            (status, &body["existing"]),
-            (200, &json!(true)),
-            "{path}: {body}"
+            (status, &refused["error"]),
+            (no_write, &refusal["error"]),
+            "{method} {path}: {refused}"
         );
     }
-    probe_out_of_reach(&served, &key).await;
-
-    grant_write_all(&served).await;
-    let (status, body) = send(
-        &served,
-        &key,
-        reqwest::Method::PUT,
-        &format!("/control/views/{SECRET_VIEW}"),
-        plain_view("2"),
-    )
-    .await;
-    assert_eq!((status, &body["existing"]), (200, &json!(true)), "{body}");
-}
-
-/// The declarations of a layer, a plain view, a view group and a view of the group [`OURS`],
-/// each named for `name` and gated by `term`, as `(path, body)`.
-fn declarations(name: &str, term: &str) -> Vec<(String, Value)> {
-    let mut layer = flat_layer(&format!("layer-{name}"));
-    layer["visibility"] = json!(term);
-    vec![
-        ("/control/layers".to_string(), layer),
-        (format!("/control/views/plain-{name}"), plain_view(term)),
-        (
-            format!("/control/view_groups/group-{name}"),
-            plain_view(term),
-        ),
-        (
-            format!("/control/views/{OURS}/view-{name}"),
-            json!({ "visibility": term }),
-        ),
-    ]
-}
-
-/// A view group the writer reaches.
-const OURS: &str = "ours";
-
-/// **A writer cannot declare what it would not reach**: a layer, a plain view, a view group or a
-/// view of a group whose visibility its terms do not satisfy is refused, `422`, and nothing is
-/// declared, alike whether or not something out of its reach holds the name. One whose visibility
-/// they satisfy is declared, and a writer holding `write-all` declares either.
-#[tokio::test]
-async fn a_declaration_the_writer_would_not_reach_is_refused() {
-    let (served, key, _) = gated_setup().await;
+    assert_eq!(schema(&served).await, before);
+    // The shard size the writer was refused is one the deployment did not have.
     let (status, body) = send(
         &served,
         OPERATOR_CREDENTIAL,
         reqwest::Method::PUT,
-        &format!("/control/view_groups/{OURS}"),
-        plain_view("1"),
+        "/control/shards",
+        json!({ "size": 1 << 20 }),
     )
     .await;
-    assert_eq!(status, 201, "{body}");
-
-    for (path, body) in declarations("theirs", "2") {
-        let (status, refused) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
-        assert_eq!(status, 422, "{path}: {refused}");
-    }
-    // Under a name something out of the writer's reach holds, the answer is the same.
-    let mut hidden = flat_layer(HIDDEN);
-    hidden["visibility"] = json!("2");
-    for (path, held, fresh) in [
-        ("/control/layers".to_string(), hidden, "layer-never"),
-        (
-            format!("/control/views/{SECRET_VIEW}"),
-            plain_view("2"),
-            "never",
-        ),
-        (
-            format!("/control/view_groups/{GROUP}"),
-            plain_view("2"),
-            "never",
-        ),
-    ] {
-        let named = |name: &str| path.replace(SECRET_VIEW, name).replace(GROUP, name);
-        let mut absent = held.clone();
-        if absent["name"].is_string() {
-            absent["name"] = json!(fresh);
-        }
-        let a = send(&served, &key, reqwest::Method::PUT, &path, held).await;
-        let b = send(&served, &key, reqwest::Method::PUT, &named(fresh), absent).await;
-        assert_eq!(a.0, 422, "{path}: {a:?}");
-        let held_name = [HIDDEN, SECRET_VIEW, GROUP];
-        let spelt_a = held_name
-            .iter()
-            .fold(a.1.to_string(), |text, name| text.replace(name, "NAME"));
-        assert_eq!(spelt_a, b.1.to_string().replace(fresh, "NAME"), "{path}");
-    }
-    let (status, body) = send(
-        &served,
-        OPERATOR_CREDENTIAL,
-        reqwest::Method::PUT,
-        "/control/views/plain-theirs",
-        plain_view("2"),
-    )
-    .await;
-    assert_eq!(
-        (status, &body["existing"]),
-        (201, &json!(false)),
-        "nothing was declared: {body}"
-    );
-
-    for (path, body) in declarations("mine", "1") {
-        let (status, created) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
-        assert_eq!(status, 201, "{path}: {created}");
-    }
+    assert_eq!((status, &body["existing"]), (201, &json!(false)), "{body}");
 
     grant_write_all(&served).await;
-    for (path, body) in declarations("all", "2") {
-        let (status, created) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
-        assert_eq!(status, 201, "{path}: {created}");
+    for (method, path, body) in declarations_and_drops() {
+        let (status, made) = send(&served, &key, method.clone(), &path, body).await;
+        assert!(status == 200 || status == 201, "{method} {path}: {made}");
     }
+    assert_ne!(schema(&served).await, before);
 }
 
-/// **Across a restart** a layer, a view or a group out of the writer's reach stays unknown to it,
-/// and an artifact outside its terms stays named by nothing.
+/// **Across a restart** a layer out of the writer's reach stays unknown to it, and an artifact
+/// outside its terms stays named by nothing.
 #[tokio::test]
 async fn what_is_out_of_the_writers_reach_stays_so_across_a_restart() {
     let (served, _, hidden) = gated_setup().await;
@@ -1308,70 +1579,6 @@ async fn what_is_out_of_the_writers_reach_stays_so_across_a_restart() {
     assert!(a.0 >= 400, "{a:?}");
     assert_eq!(spelt(&a, "secret", "K"), spelt(&b, "absent", "K"));
     probe_out_of_reach(&served, &key).await;
-}
-
-/// `PUT /control/attributes` declaring `code` unique.
-fn unique_code() -> Value {
-    json!({ "name": "code", "type": "keyword", "index": true, "unique": true })
-}
-
-/// **A `unique` declaration over values held twice names to the writer only values every holder
-/// of which is inside its terms**: the count and the values of those, or, where there are none,
-/// that a value is held twice and nothing more. The operator is told every one.
-#[tokio::test]
-async fn a_scoped_unique_declaration_names_only_duplicates_held_inside() {
-    let (served, key, _) = setup().await;
-    let rows = json!([
-        { "gid": gid_of(INSIDE), "code": "dup-in" },
-        { "gid": gid_of(6), "code": "dup-in" },
-        { "gid": gid_of(OUTSIDE), "code": "dup-out" },
-        { "gid": gid_of(4), "code": "dup-out" },
-    ]);
-    let (status, body) = ingest(&served, OPERATOR_CREDENTIAL, "dups", false, rows).await;
-    assert_eq!((status, &body["edited"]), (200, &json!(4)), "{body}");
-    let put = reqwest::Method::PUT;
-    let (status, body) = send(
-        &served,
-        &key,
-        put.clone(),
-        "/control/attributes",
-        unique_code(),
-    )
-    .await;
-    assert_eq!(status, 409, "{body}");
-    let text = body["detail"].as_str().unwrap_or_default().to_string();
-    assert!(
-        text.contains("dup-in") && !text.contains("dup-out"),
-        "{text}"
-    );
-    assert_eq!(numbers_in(&text), vec!["1"], "{text}");
-    let (status, body) = send(
-        &served,
-        OPERATOR_CREDENTIAL,
-        put.clone(),
-        "/control/attributes",
-        unique_code(),
-    )
-    .await;
-    assert_eq!(status, 409, "{body}");
-    let text = body["detail"].as_str().unwrap_or_default().to_string();
-    assert!(
-        text.contains("dup-in") && text.contains("dup-out"),
-        "{text}"
-    );
-    assert_eq!(numbers_in(&text), vec!["2"], "{text}");
-
-    // With only the duplicate held outside left, the writer is told a value is held twice.
-    let rows = json!([{ "gid": gid_of(6), "code": "single" }]);
-    let (status, body) = ingest(&served, OPERATOR_CREDENTIAL, "undup", false, rows).await;
-    assert_eq!(status, 200, "{body}");
-    let (status, body) = send(&served, &key, put, "/control/attributes", unique_code()).await;
-    assert_eq!(status, 409, "{body}");
-    let text = body["detail"].as_str().unwrap_or_default().to_string();
-    assert!(
-        !text.contains("dup-out") && numbers_in(&text).is_empty(),
-        "{text}"
-    );
 }
 
 /// **A page of a derived vocabulary's values answers a writer whose terms bound its writes one

@@ -1680,7 +1680,7 @@ pub(crate) fn publish(
             )));
         }
         let record = registry
-            .prepare_create(declaration.clone(), &mosaica_lifecycle::Everything)
+            .prepare_create(declaration.clone())
             .map_err(|e| BuildError::Invalid(format!("layer {name}: {e}")))?;
         registry.apply(&record);
     }

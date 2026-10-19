@@ -58,6 +58,8 @@ TOPICS = "topics"
 COUNTED = "counted"
 #: How many of a `COUNTED` artifact's members a viewer must see for it to be served.
 COUNTED_REQUIRES = 2
+#: A layer whose artifacts attach to `COUNTED`'s.
+NOTES = "notes"
 
 UNIQUE = {"code": KEYWORD, "num": INTEGER}
 
@@ -114,6 +116,16 @@ visibility                = "public"
 artifact_visibility       = {{ default = "inherited" }}
 require_member_visibility = {{ count = {COUNTED_REQUIRES} }}
 hierarchy                 = {{ kind = "flat" }}
+
+[[layer]]
+name                      = "{NOTES}"
+views                     = ["{VIEW}"]
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = "none"
+hierarchy                 = {{ kind = "flat" }}
+depends_on                = ["{COUNTED}"]
 """
 
 
@@ -391,8 +403,9 @@ def identifiers_of(rng: random.Random, item: int, values: dict) -> dict:
 
 
 def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]:
-    """A batch of `n` rows mixing every case the rule decides."""
-    held = sorted(holdings.items)
+    """A batch of `n` rows mixing every case the rule decides. Items are taken in the order of
+    their values, so a seed picks the same items whatever key blinds their `mosaica_id`s."""
+    held = sorted(holdings.items, key=lambda t: (holdings.items[t]["x"], holdings.items[t]["y"]))
     set_here: list[tuple[str, object]] = []
     named_here: list[int] = []
     rows: list[dict] = []
@@ -428,8 +441,8 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
                 row["code"] = fresh_code()
                 set_here.append(("code", row["code"]))
             named_here.append(item)
-        elif kind == 6:  # two held items
-            a, b = rng.sample(held, 2)
+        elif kind == 6:  # two held items the writer names
+            a, b = rng.sample([t for t in held if holdings.inside(t)], 2)
             row = identifiers_of(rng, a, holdings.items[a])
             other = identifiers_of(rng, b, holdings.items[b])
             clash = [c for c in other if c not in row]
@@ -1163,24 +1176,27 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     assert dep.members(GROUPS, resp.json()["artifacts"][0]["mosaica_id"]) == set(made)
 
 
-def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_served_it(deployment):
-    """An artifact of a layer requiring visible members is inside a scoped writer's terms where as
-    many of its members are inside them: a growth naming one outside is answered as one naming a
-    key nobody holds, and a publication under its key is refused as the key taken. A writer holding
-    `write-all` names every one."""
-    dep = deployment
-    rng = random.Random(57)
-    held = sorted(dep.holdings.items)
-    artifacts = {f"c{i}": set(rng.sample(held, rng.randrange(1, 6))) for i in range(16)}
+def by_id(items) -> dict:
+    """A member table naming `items` by `mosaica_id`."""
+    return member_table([{"mosaica_id": str(t)} for t in sorted(items)])
+
+
+def check_reach(
+    dep: Deployment,
+    layer: str,
+    artifacts: dict[str, dict],
+    inside: dict[str, bool],
+    members: dict[str, set[int]] | None = None,
+):
+    """`artifacts`, by key, published into `layer` by the operator, then each grown by the
+    deployment's writer by its key, and published again under it: a growth is accepted where
+    `inside` says the artifact is, joining a member where `members`, its members by key, do not
+    hold it, and is otherwise answered as one naming a key nobody holds; the publication is
+    accepted, or refused as the key taken."""
     resp = requests.put(
-        f"{dep.server.control_base}/control/layers/{COUNTED}/artifacts",
+        f"{dep.server.control_base}/control/layers/{layer}/artifacts",
         headers={"Authorization": f"Bearer {dep.server.operator_credential}"},
-        json={
-            "artifacts": [
-                {"key": key, "members": member_table([{"mosaica_id": str(t)} for t in sorted(m)])}
-                for key, m in artifacts.items()
-            ]
-        },
+        json={"artifacts": [{"key": key, **parts} for key, parts in artifacts.items()]},
         timeout=60,
     )
     resp.raise_for_status()
@@ -1188,23 +1204,73 @@ def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_serve
     joining = min(dep.holdings.writable())
 
     def grow(key: str) -> dict:
-        members = member_table([{"mosaica_id": str(joining)}])
-        return {"artifacts": [{"key": key, "members": members}]}
+        return {"artifacts": [{"key": key, "members": by_id([joining])}]}
 
-    absent = dep.artifacts("PATCH", COUNTED, grow("nokey-zz"))
+    absent = dep.artifacts("PATCH", layer, grow("nokey-zz"))
     assert absent.status_code == 422, absent.text
-    inside = {
-        key: naming.artifact_inside(dep.holdings, members, COUNTED_REQUIRES)
-        for key, members in artifacts.items()
-    }
     assert any(inside.values()) and (dep.holdings.terms is None or not all(inside.values()))
-    for key, members in artifacts.items():
-        resp = dep.artifacts("PATCH", COUNTED, grow(key))
+    for key in artifacts:
+        resp = dep.artifacts("PATCH", layer, grow(key))
         if inside[key]:
             assert resp.status_code == 200, (key, resp.text)
-            assert resp.json()["artifacts"][0]["joined"] == int(joining not in members), key
+            if members is not None:
+                joined = resp.json()["artifacts"][0]["joined"]
+                assert joined == int(joining not in members[key]), key
         else:
             assert resp.status_code == absent.status_code, (key, resp.text)
             assert resp.json() == json.loads(absent.text.replace("nokey-zz", key)), key
-        resp = dep.artifacts("PUT", COUNTED, {"artifacts": [{"key": key, "members": {}}]})
+        resp = dep.artifacts("PUT", layer, {"artifacts": [{"key": key, "members": {}}]})
         assert resp.status_code == (200 if inside[key] else 409), (key, resp.text)
+
+
+def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_served_it(deployment):
+    """An artifact is inside a scoped writer's terms where a reader of them would be served it: on
+    a layer requiring visible members, where as many of its members are inside them; on a layer
+    supplying content, where every item one of its contents was generated from is; and where it
+    attaches to another artifact, where that one is inside them. A growth naming one outside is
+    answered as one naming a key nobody holds, and a publication under its key is refused as the
+    key taken. A writer holding `write-all` names every one."""
+    dep = deployment
+    rng = random.Random(57)
+    held = sorted(dep.holdings.items)
+
+    def sample(most: int) -> set[int]:
+        return set(rng.sample(held, rng.randrange(1, most)))
+
+    counted = {f"c{i}": sample(6) for i in range(16)}
+    counted_inside = {
+        key: naming.artifact_inside(dep.holdings, members, COUNTED_REQUIRES)
+        for key, members in counted.items()
+    }
+    published = {key: {"members": by_id(members)} for key, members in counted.items()}
+    check_reach(dep, COUNTED, published, counted_inside, counted)
+
+    generated = {f"t{i}": [sample(4) for _ in range(rng.randrange(1, 3))] for i in range(16)}
+    check_reach(
+        dep,
+        TOPICS,
+        {
+            key: {
+                "members": by_id(set().union(*sets)),
+                "content": [{"values": [key], "generated_from": by_id(s)} for s in sets],
+            }
+            for key, sets in generated.items()
+        },
+        {
+            key: naming.artifact_inside(dep.holdings, set().union(*sets), None, contents=sets)
+            for key, sets in generated.items()
+        },
+    )
+
+    check_reach(
+        dep,
+        NOTES,
+        {
+            f"n{key}": {"attached_to": {"layer": COUNTED, "level": 0, "key": key}}
+            for key in counted
+        },
+        {
+            f"n{key}": naming.artifact_inside(dep.holdings, [], None, target=counted_inside[key])
+            for key in counted
+        },
+    )

@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use mosaica_lifecycle::{IngestBuffer, WalScalar};
 use mosaica_store::manifest::{DeclaredScalar, Manifest};
 use mosaica_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
@@ -588,26 +588,14 @@ pub(crate) struct RoundInput {
     pub(crate) out_dir: std::path::PathBuf,
     pub(crate) stem: String,
     pub(crate) memory_budget: usize,
-    /// The items a writer whose terms bound its writes may name, where the declaration is its.
-    pub(crate) inside: Option<Inside>,
 }
-
-/// Whether a writer may name an item of a generation.
-pub(crate) type Inside = Arc<dyn Fn(&Generation, ItemAt) -> bool + Send + Sync>;
-
-/// How many duplicated keys a round looks up the holders of for a writer whose terms bound its
-/// writes, to find the ones every holder of which it may name.
-const DUPLICATES_SCANNED: usize = 4096;
 
 /// What a round wrote and found.
 pub(crate) struct RoundOutput {
     pub(crate) runs: Vec<(mosaica_store::unique::WrittenUniqueRun, mosaica_store::manifest::FileDigest)>,
-    /// Keys more than one live or suppressed item holds.
+    /// Keys more than one live or suppressed item holds, and up to
+    /// [`DUPLICATE_EXAMPLES`] of their values.
     pub(crate) duplicates: u64,
-    /// Of those, the ones a refusal may name: every one, or for a writer whose terms bound its
-    /// writes, those every holder of which it may name, among the first [`DUPLICATES_SCANNED`].
-    pub(crate) shown: u64,
-    /// Up to [`DUPLICATE_EXAMPLES`] of the shown keys' values.
     pub(crate) examples: Vec<String>,
     /// The buffered `(item, key)` pairs this round checked against every run.
     pub(crate) checked: FxHashMap<ItemAt, UniqueKey>,
@@ -671,16 +659,12 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
             None => Ok(()),
         },
     )?;
-    let kept = match input.inside {
-        Some(_) => DUPLICATES_SCANNED,
-        None => DUPLICATE_EXAMPLES,
-    };
     let mut duplicate_keys: Vec<UniqueKey> = Vec::new();
     let mut duplicates = 0u64;
     let written = spill
         .finish(&input.out_dir, &input.stem, |d| {
             duplicates += 1;
-            if duplicate_keys.len() < kept {
+            if duplicate_keys.len() < DUPLICATE_EXAMPLES {
                 duplicate_keys.push(d.key);
             }
         })
@@ -688,7 +672,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let note = |key: UniqueKey, duplicates: &mut u64, keys: &mut Vec<UniqueKey>| {
         if !keys.contains(&key) {
             *duplicates += 1;
-            if keys.len() < kept {
+            if keys.len() < DUPLICATE_EXAMPLES {
                 keys.push(key);
             }
         }
@@ -775,18 +759,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
         }
     }
 
-    let (shown, mut duplicate_keys) = match &input.inside {
-        None => (duplicates, duplicate_keys),
-        Some(inside) if duplicates > 0 => {
-            let held = held_within(&every_run, &buffered, &duplicate_keys, &lookup, |item| {
-                inside(generation, item)
-            })?;
-            (held.len() as u64, held)
-        }
-        Some(_) => (0, Vec::new()),
-    };
-    duplicate_keys.truncate(DUPLICATE_EXAMPLES);
-    let examples = if shown == 0 {
+    let examples = if duplicates == 0 {
         Vec::new()
     } else {
         describe_keys(
@@ -808,44 +781,9 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     Ok(RoundOutput {
         runs,
         duplicates,
-        shown,
         examples,
         checked,
     })
-}
-
-/// Every item holding each of some keys in some runs, as [`run_holders`] answers it.
-pub(crate) type HoldersIn<'a> =
-    dyn Fn(&[(ShardId, String)], &[UniqueKey]) -> Result<Vec<(usize, ItemAt)>, String> + 'a;
-
-/// Of `keys`, in their order, those every holder of which `inside` admits: every item holding one
-/// in `runs`, by `lookup`, and every one of `buffered` holding one.
-pub(crate) fn held_within(
-    runs: &[(ShardId, String)],
-    buffered: &[(ItemAt, UniqueKey)],
-    keys: &[UniqueKey],
-    lookup: &HoldersIn<'_>,
-    inside: impl Fn(ItemAt) -> bool,
-) -> Result<Vec<UniqueKey>, String> {
-    let asked: FxHashSet<UniqueKey> = keys.iter().copied().collect();
-    let mut outside: FxHashSet<UniqueKey> = FxHashSet::default();
-    if !runs.is_empty() {
-        for (at, holder) in lookup(runs, keys)? {
-            if !inside(holder) {
-                outside.insert(keys[at]);
-            }
-        }
-    }
-    for (item, key) in buffered {
-        if asked.contains(key) && !outside.contains(key) && !inside(*item) {
-            outside.insert(*key);
-        }
-    }
-    Ok(keys
-        .iter()
-        .filter(|key| !outside.contains(key))
-        .copied()
-        .collect())
 }
 
 /// Every buffered item's entity-scoped scalars, with the item, over each shard's buffer.

@@ -109,6 +109,8 @@ pub struct ProviderInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authenticated {
     pub principal: String,
+    /// The principal's id, which no other principal is ever given, one deleted included.
+    pub principal_id: i64,
     /// The prefix of the API key used, if one was.
     pub api_key: Option<String>,
 }
@@ -497,23 +499,24 @@ impl Catalogue {
             st.principals
                 .get(name)
                 .filter(|p| !p.disabled)
-                .and_then(|p| p.password.clone())
+                .and_then(|p| Some((p.id, p.password.clone()?)))
         } else {
             None
         };
-        let accepted = match stored {
-            Some(stored) => password::verify(&stored, password),
+        let accepted = match &stored {
+            Some((_, stored)) => password::verify(stored, password),
             None => {
                 password::verify_nothing(password);
                 false
             }
         };
-        if !accepted {
+        let (Some((principal_id, _)), true) = (stored, accepted) else {
             return Err(AuthError::Refused);
-        }
+        };
         self.limiter.succeeded(name);
         Ok(Authenticated {
             principal: name.to_owned(),
+            principal_id,
             api_key: None,
         })
     }
@@ -626,10 +629,25 @@ impl Catalogue {
         if !apikey::matches(&k.hash, secret) || !self.usable(&st, prefix, &k.principal) {
             return Err(AuthError::Refused);
         }
+        let principal_id = st
+            .principals
+            .get(&k.principal)
+            .ok_or(AuthError::Refused)?
+            .id;
         Ok(Authenticated {
             principal: k.principal.clone(),
+            principal_id,
             api_key: Some(prefix.to_owned()),
         })
+    }
+
+    /// The id of the enabled principal `name`, which no other principal is ever given.
+    pub fn principal_id(&self, name: &str) -> Option<i64> {
+        let st = self.state.read();
+        st.principals
+            .get(name.trim())
+            .filter(|p| !p.disabled)
+            .map(|p| p.id)
     }
 
     /// Whether the principal is enabled and, if a key is named, the key is its and unexpired.

@@ -188,19 +188,29 @@ def artifact_inside(
     members: Iterable[int],
     required: int | None,
     labels: Sequence[str] | None = None,
+    contents: Sequence[Iterable[int]] | None = None,
+    target: bool = True,
 ) -> bool:
     """Whether the writer may name an artifact holding `members`, on a layer its terms reach that
     requires `required` of them visible, `None` for no requirement: where a viewer holding its
     terms would be served it, suppression aside. Its own `labels`, where it has any, admit the
-    terms, and that many of its members are held and inside them. A writer holding `write-all`
-    names every artifact."""
+    terms; `target`, whether the artifact it attaches to is inside them, holds; that many of its
+    members are held and inside them; and, on a layer supplying content, every item of one of
+    `contents`, its contents' generating sets, is held and inside them. A writer holding
+    `write-all` names every artifact."""
     if holdings.terms is None:
         return True
+
+    def inside(t: int) -> bool:
+        return t in holdings.items and holdings.inside(t)
+
     if labels and not holdings.holds(labels):
         return False
-    if required is None:
-        return True
-    return sum(1 for t in set(members) if t in holdings.items and holdings.inside(t)) >= required
+    if not target:
+        return False
+    if required is not None and sum(1 for t in set(members) if inside(t)) < required:
+        return False
+    return contents is None or any(all(inside(t) for t in content) for content in contents)
 
 
 def carried(holdings: Holdings, row: Mapping[str, object]) -> set[tuple[str, object]]:

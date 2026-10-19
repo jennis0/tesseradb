@@ -750,18 +750,16 @@ impl WritePath {
     pub(crate) fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
-        scope: WriteScope,
     ) -> Result<LayerSpace, AcceptError> {
         self.submit(|reply| Command::RegisterLayer {
             declaration: Box::new(declaration),
-            scope,
             reply,
         })
     }
 
     /// Drop a layer. Its name may be registered again, as a new layer in a new space.
-    pub(crate) fn drop_layer(&self, name: String, scope: WriteScope) -> Result<(), AcceptError> {
-        self.submit(|reply| Command::DropLayer { name, scope, reply })
+    pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
+        self.submit(|reply| Command::DropLayer { name, reply })
     }
 
     /// Create a view of a view group while the service runs.
@@ -771,14 +769,12 @@ impl WritePath {
         key: String,
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
-        scope: WriteScope,
     ) -> Result<(), AcceptError> {
         self.submit(|reply| Command::CreateView {
             group,
             key,
             visibility,
             metadata,
-            scope,
             reply,
         })
     }
@@ -788,11 +784,9 @@ impl WritePath {
     pub(crate) fn declare_attribute(
         &self,
         request: mosaica_lifecycle::AttributeRequest,
-        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::DeclareAttribute {
             request: Box::new(request),
-            scope,
             reply,
         })
     }
@@ -808,11 +802,9 @@ impl WritePath {
     pub(crate) fn declare_vocabulary(
         &self,
         request: mosaica_lifecycle::VocabularyRequest,
-        scope: WriteScope,
     ) -> Result<VocabularyDeclared, AcceptError> {
         self.submit(|reply| Command::DeclareVocabulary {
             request: Box::new(request),
-            scope,
             reply,
         })
     }
@@ -836,11 +828,9 @@ impl WritePath {
     pub(crate) fn create_view_group(
         &self,
         declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
-        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreateViewGroup {
             declaration: Box::new(declaration),
-            scope,
             reply,
         })
     }
@@ -849,28 +839,16 @@ impl WritePath {
     pub(crate) fn create_plain_view(
         &self,
         declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
-        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreatePlainView {
             declaration: Box::new(declaration),
-            scope,
             reply,
         })
     }
 
     /// Drop a view, freeing its key and killing its incarnation.
-    pub(crate) fn drop_view(
-        &self,
-        group: String,
-        key: String,
-        scope: WriteScope,
-    ) -> Result<ViewDropped, AcceptError> {
-        self.submit(|reply| Command::DropView {
-            group,
-            key,
-            scope,
-            reply,
-        })
+    pub(crate) fn drop_view(&self, group: String, key: String) -> Result<ViewDropped, AcceptError> {
+        self.submit(|reply| Command::DropView { group, key, reply })
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order and

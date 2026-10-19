@@ -16,8 +16,6 @@ use mosaica_types::view::{
     check_metadata_name, check_view_key, GroupMetadataField, ViewMetadataType, DECLARED_INCARNATION,
 };
 
-use crate::gate::VisibleViews;
-
 /// The groups and plain views declared at a running service and not yet written into a
 /// `MANIFEST.json` by a fold, in declaration order: the segments manifest's `groups` and
 /// `plain_views` lists, held live. Written only by the executor; read at every side-manifest
@@ -84,43 +82,13 @@ pub(crate) enum Resolution<T> {
     New(Box<T>),
 }
 
-/// The refusal of a declaration under a name a view or a group the writer does not reach holds,
-/// where `views` is what it reaches: the name is taken, and nothing else of its holder is said.
-fn taken_out_of_reach(
-    name: &str,
-    manifest: &Manifest,
-    views: Option<&VisibleViews>,
-) -> Result<(), ExecError> {
-    let Some(views) = views else {
-        return Ok(());
-    };
-    let held_out_of_reach = manifest
-        .views
-        .iter()
-        .any(|v| v.id == name && !views.contains_view(name))
-        || manifest
-            .groups
-            .iter()
-            .any(|g| g.name == name && !views.contains_group(name));
-    match held_out_of_reach {
-        true => Err(ExecError::ViewConflict {
-            detail: format!("the name '{name}' is taken; declare the view or group under another"),
-        }),
-        false => Ok(()),
-    }
-}
-
 /// Resolve a group declaration: refuse it, recognise the group already held, or compile it.
-/// `views` is what the writer reaches, `None` for every view: a name one out of its reach holds
-/// is taken, and a group out of its reach is unknown.
 pub(crate) fn resolve_group(
     declaration: &ViewGroupDeclaration,
     manifest: &Manifest,
-    views: Option<&VisibleViews>,
 ) -> Result<Resolution<GroupDescriptor>, ExecError> {
     let refused = |detail: String| ExecError::ViewRefused { detail };
     let name = declaration.name.as_str();
-    taken_out_of_reach(name, manifest, views)?;
     let taken = manifest.views.iter().any(|v| v.id == name);
     let (projection, quantisation) =
         compile_common(name, taken, &declaration.projection, &declaration.frame)
@@ -130,12 +98,7 @@ pub(crate) fn resolve_group(
     // and must own its own keys — chains are refused at the declaration, which is what lets every
     // reader take `members_of` as naming an owner.
     if let Some(owner) = &declaration.members {
-        let Some(owner_descriptor) = manifest
-            .groups
-            .iter()
-            .find(|g| &g.name == owner)
-            .filter(|g| views.is_none_or(|views| views.contains_group(&g.name)))
-        else {
+        let Some(owner_descriptor) = manifest.groups.iter().find(|g| &g.name == owner) else {
             return Err(ExecError::ViewUnknown {
                 detail: format!("view group '{name}': `members` names no view group '{owner}'"),
             });
@@ -192,11 +155,9 @@ pub(crate) fn resolve_group(
 pub(crate) fn resolve_plain(
     declaration: &PlainViewDeclaration,
     manifest: &Manifest,
-    views: Option<&VisibleViews>,
 ) -> Result<Resolution<ViewDescriptor>, ExecError> {
     let refused = |detail: String| ExecError::ViewRefused { detail };
     let name = declaration.name.as_str();
-    taken_out_of_reach(name, manifest, views)?;
     let taken = manifest.groups.iter().any(|g| g.name == name);
     let (projection, quantisation) =
         compile_common(name, taken, &declaration.projection, &declaration.frame)

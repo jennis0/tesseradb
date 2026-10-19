@@ -163,7 +163,7 @@ async fn revoke(
 ) -> Result<StatusCode, ApiError> {
     crate::request_log::note_token_id(req.token_id);
     let minter = match &caller.principal {
-        Principal::Local(name) => Some(name.clone()),
+        Principal::Local { name, .. } => Some(name.clone()),
         Principal::Superuser => None,
         Principal::Oidc { .. } => return Ok(StatusCode::NO_CONTENT),
     };

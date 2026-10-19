@@ -92,35 +92,15 @@ impl WriteScope {
     }
 
     /// Whether the writer may know a layer of `declaration` exists: where its `visibility`, as a
-    /// session's layer gate reads it, admits the writer's terms.
+    /// session's layer gate reads it, admits the writer's terms, `None` being `public`.
     pub(crate) fn reaches_layer(
         &self,
         declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> bool {
-        self.reaches_gate(declaration.visibility.as_ref().map(std::slice::from_ref))
-    }
-
-    /// Whether the writer passes a layer's, view's or group's gate `visibility`, `None` being
-    /// `public`.
-    fn reaches_gate<S: AsRef<str>>(&self, visibility: Option<&[S]>) -> bool {
-        visibility.is_none_or(|labels| self.admits(labels))
-    }
-
-    /// The refusal of a declaration of `what`, gated by `visibility`, that the writer would not
-    /// reach once made, and so could neither change nor drop. It says nothing of what is held.
-    pub(crate) fn may_declare<S: AsRef<str>>(
-        &self,
-        what: &str,
-        visibility: Option<&[S]>,
-    ) -> Result<(), String> {
-        match self.reaches_gate(visibility) {
-            true => Ok(()),
-            false => Err(format!(
-                "{what} would be out of this credential's reach, since its terms do not satisfy \
-                 its visibility; declare a visibility they satisfy, or declare it as a principal \
-                 holding write-all"
-            )),
-        }
+        declaration
+            .visibility
+            .as_ref()
+            .is_none_or(|label| self.admits(std::slice::from_ref(label)))
     }
 
     /// The views and groups of `manifest` the writer reaches, as a session holding its terms is
@@ -337,50 +317,16 @@ pub(crate) struct Resolver<'a> {
 /// No shard's fragment: every member is tested alone.
 static NO_MASKS: ScopeMasks = ScopeMasks(Vec::new());
 
-/// What a writer may name among layers alone, for a registry operation that names no artifact:
-/// the layers it reaches, and no artifact unless it reaches every one.
-pub(crate) struct LayerReach(Option<FxHashSet<String>>);
-
-impl LayerReach {
-    pub(crate) fn new(
-        scope: &WriteScope,
-        registry: &mosaica_lifecycle::LayerRegistry,
-    ) -> LayerReach {
-        LayerReach(match scope {
-            WriteScope::All => None,
-            WriteScope::Terms(_) => Some(
-                registry
-                    .iter()
-                    .filter(|(_, held)| scope.reaches_layer(&held.declaration))
-                    .map(|(name, _)| name.to_string())
-                    .collect(),
-            ),
-        })
-    }
-}
-
-impl mosaica_lifecycle::Reach for LayerReach {
-    fn layer(&self, layer: &str) -> bool {
-        self.0
-            .as_ref()
-            .is_none_or(|reached| reached.contains(layer))
-    }
-
-    fn artifact(&self, _: &str, _: u32, _: u32) -> bool {
-        self.0.is_none()
-    }
-}
-
 /// What a writer may name among the layers and artifacts a registry and its store hold, as the
 /// registry resolves a write's keys ([`mosaica_lifecycle::Reach`]). An artifact is inside the
-/// writer's scope where a session holding its terms would be served it, suppression aside: its
-/// layer and its view reached, its own label admitting the terms, and as many of its members
-/// within the scope as the layer's `require_member_visibility` asks.
+/// writer's scope where the one predicate serving decides by ([`crate::artifacts::verdict`])
+/// would serve it to a session holding the writer's terms, suppression aside, read from the store
+/// the write applies to.
 pub(crate) struct ArtifactReach<'r> {
     resolver: &'r Resolver<'r>,
-    /// The declarations of the layers the writer reaches, by name; empty for
+    /// The spaces and declarations of the layers the writer reaches, by name; empty for
     /// [`WriteScope::All`], which reaches every one.
-    layers: FxHashMap<String, mosaica_types::layer::LayerDeclaration>,
+    layers: FxHashMap<String, (LayerSpace, mosaica_types::layer::LayerDeclaration)>,
     store: &'r mosaica_lifecycle::ArtifactStore,
     masks: &'r ScopeMasks,
     views: Option<VisibleViews>,
@@ -399,7 +345,7 @@ impl<'r> ArtifactReach<'r> {
             WriteScope::Terms(_) => registry
                 .iter()
                 .filter(|(_, held)| resolver.scope.reaches_layer(&held.declaration))
-                .map(|(name, held)| (name.to_string(), held.declaration.clone()))
+                .map(|(name, held)| (name.to_string(), (held.space, held.declaration.clone())))
                 .collect(),
         };
         ArtifactReach {
@@ -411,25 +357,57 @@ impl<'r> ArtifactReach<'r> {
         }
     }
 
-    /// How many of the artifact's members, deleted ones aside, are inside the scope.
-    fn members_within(&self, layer: &str, level: u32, ordinal: u32) -> u64 {
-        self.store
-            .shards()
-            .map(|shard| {
-                let Some(slice) = self.store.slice(shard) else {
-                    return 0;
-                };
-                let Some(record) = slice.get(layer, level, ordinal) else {
-                    return 0;
-                };
-                let mut members = slice.members_of(record).whole().into_owned();
-                if let Some(held) = self.resolver.generation.shard(shard) {
-                    members.andnot_inplace(held.overlay.deleted_set());
-                }
-                self.resolver.mask(shard, &mut members, self.masks);
-                members.cardinality()
-            })
-            .sum()
+    /// How many of `set`, entities of `shard`, are inside the scope, deleted ones aside.
+    fn within(&self, shard: ShardId, set: &Bitmap) -> u64 {
+        let mut set = set.clone();
+        if let Some(held) = self.resolver.generation.shard(shard) {
+            set.andnot_inplace(held.overlay.deleted_set());
+        }
+        self.resolver.mask(shard, &mut set, self.masks);
+        set.cardinality()
+    }
+
+    /// Whether a session holding the writer's terms would be served the artifact at `ordinal` of
+    /// `level` of `layer` in a view of `within`, every view where it is `None`, following at most
+    /// `depth` attachments.
+    fn served(
+        &self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        within: Option<&[&str]>,
+        depth: u32,
+    ) -> bool {
+        let held = self.layers.get_key_value(layer);
+        let record = self.store.get(layer, level, ordinal);
+        let manifest = &self.resolver.generation.bundle.manifest;
+        let views = match (held, record, &self.views) {
+            (Some((_, (_, declaration))), Some(record), Some(reached)) => declaration
+                .views
+                .iter()
+                .map(String::as_str)
+                .filter(|view| within.is_none_or(|within| within.contains(view)))
+                .filter(|view| reached.contains_view(view))
+                .filter(|view| {
+                    manifest.incarnation_of(view).is_some_and(|incarnation| {
+                        record.drawn_in(crate::artifacts::view_key(view), incarnation)
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let facts = Reached {
+            reach: self,
+            held: held.map(|(name, (space, declaration))| (name.as_str(), *space, declaration)),
+            level,
+            ordinal,
+            record,
+            views,
+            depth,
+        };
+        let criterion =
+            held.and_then(|(_, (_, declaration))| declaration.require_member_visibility);
+        crate::artifacts::verdict(criterion, &facts).is_served()
     }
 
     /// Whether the writer may name the artifact `entity` of `space`, or the layer itself where
@@ -459,40 +437,151 @@ impl mosaica_lifecycle::Reach for ArtifactReach<'_> {
     }
 
     fn artifact(&self, layer: &str, level: u32, ordinal: u32) -> bool {
-        use mosaica_types::layer::ExistenceCriterion;
-        if matches!(self.resolver.scope, WriteScope::All) {
+        matches!(self.resolver.scope, WriteScope::All)
+            || self.served(
+                layer,
+                level,
+                ordinal,
+                None,
+                crate::artifacts::DEPENDENCY_CHAIN_MAX,
+            )
+    }
+}
+
+/// One artifact as [`ArtifactReach::served`] asks the one predicate about it: read from the store
+/// a write applies to, for a session holding the writer's terms, with its suppression, its
+/// layer's and its target's set aside.
+struct Reached<'f, 'r> {
+    reach: &'f ArtifactReach<'r>,
+    /// The layer's name, space and declaration, where the writer reaches it.
+    held: Option<(
+        &'f str,
+        LayerSpace,
+        &'f mosaica_types::layer::LayerDeclaration,
+    )>,
+    level: u32,
+    ordinal: u32,
+    record: Option<&'r mosaica_lifecycle::membership::ArtifactRecord>,
+    /// The views the writer reaches that the artifact is drawn in.
+    views: Vec<&'f str>,
+    /// How many more attachments the verdict follows.
+    depth: u32,
+}
+
+impl crate::artifacts::ArtifactFacts for Reached<'_, '_> {
+    fn held(&self) -> bool {
+        self.record.is_some() && !self.views.is_empty()
+    }
+
+    fn denied(&self) -> bool {
+        let (Some((_, space, _)), Some(record)) = (self.held, self.record) else {
             return true;
-        }
-        let (Some(declaration), Some(record)) = (
-            self.layers.get(layer),
-            self.store.get(layer, level, ordinal),
-        ) else {
+        };
+        self.reach
+            .resolver
+            .generation
+            .space_overlay(space)
+            .is_deleted(record.entity)
+    }
+
+    fn layer_reached(&self) -> bool {
+        self.held.is_some()
+    }
+
+    fn admits_label(&self) -> bool {
+        let (Some((_, _, declaration)), Some(record)) = (self.held, self.record) else {
             return false;
         };
-        if !self
+        self.reach
             .resolver
             .scope
             .admits_artifact_label(declaration, &record.access)
-        {
-            return false;
-        }
-        if let (Some(views), Some(key)) = (&self.views, record.view.as_deref()) {
-            let reached = declaration
-                .views
-                .iter()
-                .any(|view| crate::artifacts::view_key(view) == key && views.contains_view(view));
-            if !reached {
-                return false;
+    }
+
+    fn attachment_served(&self) -> bool {
+        let Some(attachment) = self.record.and_then(|record| record.attached_to.as_ref()) else {
+            return true;
+        };
+        // The target as the edge names it: its layer under the space it was resolved in, and its
+        // slot holding the entity it names.
+        let target = self
+            .reach
+            .layers
+            .get(&attachment.layer)
+            .filter(|(space, _)| *space == attachment.space)
+            .and_then(|_| {
+                self.reach
+                    .store
+                    .get(&attachment.layer, attachment.level, attachment.ordinal)
+            })
+            .is_some_and(|record| record.entity == attachment.entity);
+        self.depth > 0
+            && target
+            && self.reach.served(
+                &attachment.layer,
+                attachment.level,
+                attachment.ordinal,
+                Some(self.views.as_slice()),
+                self.depth - 1,
+            )
+    }
+
+    fn masked_count(&self) -> u64 {
+        let Some((layer, ..)) = self.held else {
+            return 0;
+        };
+        let store = self.reach.store;
+        store
+            .shards()
+            .filter_map(|shard| {
+                let slice = store.slice(shard)?;
+                let record = slice.get(layer, self.level, self.ordinal)?;
+                Some(self.reach.within(shard, &slice.members_of(record).whole()))
+            })
+            .sum()
+    }
+
+    fn declared_size(&self) -> u64 {
+        self.held.map_or(0, |(layer, ..)| {
+            self.reach
+                .store
+                .declared_size(layer, self.level, self.ordinal)
+        })
+    }
+
+    fn position(&self) -> Result<Option<u32>, crate::artifacts::Withheld> {
+        use crate::artifacts::Containment;
+        let (Some((layer, _, declaration)), Some(record)) = (self.held, self.record) else {
+            return Err(crate::artifacts::Withheld::Containment);
+        };
+        let store = self.reach.store;
+        let shards: Vec<ShardId> = store.shards().collect();
+        let generating = |side: usize, rank: usize| {
+            store
+                .slice(shards[side])?
+                .get(layer, self.level, self.ordinal)?
+                .contents
+                .get(rank)
+                .map(|content| &content.generated_from)
+        };
+        let declared: Vec<u64> = record.contents.iter().map(|c| c.cardinality).collect();
+        let contained = crate::artifacts::satisfied_rank_over(
+            &declared,
+            !declaration.content.supplied.is_empty(),
+            shards.len(),
+            |side, rank| generating(side, rank).map_or(0, Bitmap::cardinality),
+            |side, rank, size| {
+                let held =
+                    generating(side, rank).map_or(0, |set| self.reach.within(shards[side], set));
+                Some(held == size)
+            },
+        );
+        match contained {
+            Some(Containment::NothingToContain) => Ok(None),
+            Some(Containment::Satisfied(rank)) => {
+                Ok(Some(record.content_position(rank as usize) as u32))
             }
-        }
-        match declaration.require_member_visibility {
-            None | Some(ExistenceCriterion::Count(0)) => true,
-            Some(ExistenceCriterion::Count(n)) => self.members_within(layer, level, ordinal) >= n,
-            Some(ExistenceCriterion::Fraction(p)) => {
-                let declared = self.store.declared_size(layer, level, ordinal);
-                declared > 0
-                    && (self.members_within(layer, level, ordinal) as f64) >= p * (declared as f64)
-            }
+            _ => Err(crate::artifacts::Withheld::Containment),
         }
     }
 }

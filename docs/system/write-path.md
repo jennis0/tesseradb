@@ -121,6 +121,8 @@ neither. Beyond those, four checks apply:
 2. A batch id, required on every request, makes a retry safe: identical bytes from the same
    principal under the same id replay the recorded answer, and different bytes are refused. A
    batch id is its principal's, so another principal's batch under the same id is another batch.
+   A local principal is known by an id the catalogue never gives again, so one deleted and
+   created again under its name is another principal.
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
 4. Each row that creates an item, and each edit, takes an id at the window's close. A new item
@@ -241,7 +243,8 @@ check them. It checks what can have moved since the handler's generation, from m
 - an item a row edits that has since been deleted, or added to or dropped from a view;
 - an entity a row names that a compaction has since freed and issued to another item;
 - the unique columns, declared or withdrawn since, where the batch creates items;
-- a value a created or refused row carries that has since been given to an item.
+- a value a created or refused row carries that has since been given to an item;
+- an item holding a value a row was refused as `value_held` for that has since been deleted.
 
 The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
 this check. Where something has moved, the executor resolves and decides the whole batch again
@@ -286,7 +289,9 @@ an edit moving it included, or a fold has since removed, and each row carrying a
 has been given since; every other row stands as it was resolved. Where a fold the write
 predates is no longer kept, every row is resolved again. So a write reaches each item where it is
 when the write applies, a value reaches the item holding it then, and a row whose item is gone
-names nothing and is refused. A change to an item an edit has moved also reaches the entity it
+names nothing. A change whose item is gone has nothing to do: it is listed as refused, and a
+strict request is not refused for it, since a deny is never refused for contention. A change to
+an item an edit has moved also reaches the entity it
 named, so the log names both. A deny that reaches the old entity before the edit commits is
 carried by the check above: the edit is decided again.
 
@@ -415,7 +420,9 @@ accepted, and resolved again where the request applies wherever what it named ha
 refused with `422` and nothing is queued. A change or member naming no item, or two, where the
 request applies is refused and listed in the answer's `refused` by position and reason, and the
 others are applied; with `strict=true`
-the request is refused instead, `404` where the row names no item and `409` where it names two.
+the request is refused instead, `404` where the row names no item and `409` where it names two. A
+change is refused so only where it was refused as its request arrived: one whose item has gone
+since is listed, and the request's others apply.
 Many changes, or members, may name one item. A generating set is refused whole at any member it
 cannot resolve, strict or not, and so is a growth's page joining one, because a viewer must see
 every member of the set to be served the content, and a set missing a member would be served to viewers who cannot. A suppression of an

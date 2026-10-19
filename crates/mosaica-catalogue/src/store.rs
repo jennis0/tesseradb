@@ -25,13 +25,13 @@ use crate::permission::PermissionSet;
 use crate::provider::{ClaimRule, Provider, RoleMapping};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 6;
+pub(crate) const SCHEMA_VERSION: i64 = 7;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
 const LOCK_NAME: &str = "catalogue.lock";
 
 const SCHEMA: &str = "
 CREATE TABLE principal (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL CHECK (kind IN ('person', 'service')),
     disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),

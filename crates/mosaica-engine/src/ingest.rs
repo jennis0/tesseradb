@@ -144,6 +144,9 @@ pub(crate) struct Planned {
     pub(crate) keys: Vec<(u16, u128)>,
     /// The unique values the refused rows carry.
     pub(crate) refused_keys: Vec<(u16, u128)>,
+    /// The items holding a value a row refused as `value_held` carries, which the executor
+    /// decides the batch again without where one has gone.
+    pub(crate) held_by: Vec<ItemAt>,
     pub(crate) artifacts: BatchArtifacts,
     /// The request rows creating or editing an item indexed under more keys than
     /// [`mosaica_authz::MAX_KEYS_PER_ITEM`].
@@ -589,15 +592,52 @@ impl Resolver<'_> {
         }
         let artifacts =
             Self::written_memberships(request, &written_from, &edited_from, &joined_from);
+        let held: Vec<(u16, u128)> = refused
+            .iter()
+            .zip(&identities)
+            .filter(|(reason, _)| **reason == Some(Reason::ValueHeld))
+            .flat_map(|(_, identity)| identity.unique.iter().copied())
+            .collect();
+        let held_by = self.holders_of_keys(&held).map_err(unreadable)?;
         Ok(Planned {
             rows,
             edits,
             slots,
             keys,
             refused_keys,
+            held_by,
             artifacts,
             over_bound,
         })
+    }
+
+    /// Every item holding one of `keys`, each `(declared position, key widened)`, deleted ones
+    /// aside.
+    fn holders_of_keys(
+        &self,
+        keys: &[(u16, u128)],
+    ) -> Result<Vec<ItemAt>, mosaica_store::StoreError> {
+        let declared = &self.generation.bundle.manifest.declared_scalars;
+        let mut by_field: BTreeMap<u16, Vec<u128>> = BTreeMap::new();
+        for (field, key) in keys {
+            by_field.entry(*field).or_default().push(*key);
+        }
+        let mut out = Vec::new();
+        for (field, keys) in by_field {
+            let Some(d) = declared.get(usize::from(field)) else {
+                continue;
+            };
+            let Some(kind) = mosaica_store::unique::KeyKind::of(d.arrow_type) else {
+                continue;
+            };
+            let keys: Vec<mosaica_store::unique::UniqueKey> = keys
+                .into_iter()
+                .map(|key| mosaica_store::unique::UniqueKey::of_widened(kind, key))
+                .collect();
+            let held = crate::unique::holders(self.generation, &d.name, &keys)?;
+            out.extend(held.into_iter().map(|(_, item)| item));
+        }
+        Ok(out)
     }
 
     /// The edit a row makes of the item `old`: every view the item holds a row in, and the batch's

@@ -352,5 +352,11 @@ def test_an_artifact_is_inside_the_writers_terms_where_a_reader_of_them_would_be
     assert not artifact_inside(holdings, [1, 2, 9], 2), "an item not held is no member"
     assert artifact_inside(holdings, [2], None), "a layer requiring no visible member"
     assert not artifact_inside(holdings, [1], None, ["secret"]), "its own label"
+    assert not artifact_inside(holdings, [1], None, target=False), "what it attaches to"
+    assert artifact_inside(holdings, [1], None, contents=[[1, 2], [1]]), "one content inside"
+    assert not artifact_inside(holdings, [1], None, contents=[[1, 2]]), "no content inside"
+    assert not artifact_inside(holdings, [1], None, contents=[[1, 9]]), "an item not held"
+    assert not artifact_inside(holdings, [1], None, contents=[]), "no content at all"
     holdings.terms = None
     assert artifact_inside(holdings, [2], 1) and artifact_inside(holdings, [], 1, ["secret"])
+    assert artifact_inside(holdings, [2], None, contents=[[2]], target=False)
