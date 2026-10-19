@@ -168,6 +168,13 @@ pub(crate) fn holds(shard: &Shard, entity: EntityId) -> bool {
             .any(|data| data.row_space.row_of(entity).is_some())
 }
 
+/// Whether `shard` holds `entity` as an item: a buffered row, a row in some view, or the label a
+/// flush wrote, which an item whose views were all dropped still holds. A fold that removes a
+/// deleted item removes all three.
+pub(crate) fn holds_item(shard: &Shard, entity: EntityId) -> bool {
+    holds(shard, entity) || crate::write::joined::flushed_terms_of(shard, entity).is_some()
+}
+
 /// Whether `shard` holds a row of `entity` in `view`, flushed or buffered. A buffered row is in no
 /// permutation, and missing it would let two batches hand one flush two rows for one entity in one
 /// view.
@@ -183,17 +190,12 @@ pub(crate) fn holds_in_view(shard: &Shard, entity: EntityId, view: &str) -> bool
 /// What one change names, as the request naming it was resolved: its target, and for an item, the
 /// item's `mosaica_id`, which names it wherever an edit or a fold has put it since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NamedTarget {
+pub(crate) struct NamedTarget {
     pub(crate) target: Target,
     pub(crate) item: Option<MosaicaId>,
 }
 
 impl NamedTarget {
-    /// The target as resolved.
-    pub fn target(&self) -> Target {
-        self.target
-    }
-
     /// `targets` as `generation` holds them: each item's `mosaica_id` is taken there, and an item
     /// of a shard `generation` does not hold has none.
     pub(crate) fn all(
@@ -234,7 +236,7 @@ impl NamedTarget {
 /// finds what has moved since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Default))]
-pub struct Stamp {
+pub(crate) struct Stamp {
     pub(crate) folds: u64,
     pub(crate) unique_seq: u64,
 }
@@ -308,24 +310,15 @@ impl crate::Engine {
     pub(crate) fn artifact_id(&self, space: LayerSpace, entity: EntityId) -> Option<MosaicaId> {
         self.identity_key.forward_artifact(space, entity).ok()
     }
+}
 
-    /// The `mosaica_id` of each of `entities` of `shard`: its number's permutation.
-    pub(crate) fn mosaica_ids_of_in(
-        &self,
-        shard: &Shard,
-        entities: &[EntityId],
-    ) -> Result<Vec<MosaicaId>, StoreError> {
-        ids_of_numbers(&self.identity_key, shard, &numbers_of(shard, entities)?)
-    }
-
-    /// [`Self::mosaica_ids_of_in`] for one entity.
-    pub(crate) fn mosaica_id_in(
-        &self,
-        shard: &Shard,
-        entity: EntityId,
-    ) -> Result<MosaicaId, StoreError> {
-        Ok(self.mosaica_ids_of_in(shard, &[entity])?[0])
-    }
+/// The `mosaica_id` of each of `entities` of `shard`: its number's permutation.
+pub(crate) fn mosaica_ids_of(
+    key: &IdentityKey,
+    shard: &Shard,
+    entities: &[EntityId],
+) -> Result<Vec<MosaicaId>, StoreError> {
+    ids_of_numbers(key, shard, &numbers_of(shard, entities)?)
 }
 
 #[cfg(test)]

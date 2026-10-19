@@ -109,6 +109,21 @@ impl<'a> LabelGate<'a> {
     }
 }
 
+/// Whether an artifact carrying no label of its own, of a layer of `declaration`, admits a reader
+/// whose terms satisfy a label where `admits` says so: always where the layer gives its artifacts
+/// no labels, and otherwise by the layer's `artifact_visibility.default`.
+pub(crate) fn unlabelled_admitted(
+    declaration: &LayerDeclaration,
+    admits: impl Fn(&str) -> bool,
+) -> bool {
+    use mosaica_types::layer::MemberDefault;
+    !declaration.artifact_visibility.carries_own_labels()
+        || match &declaration.artifact_visibility.default {
+            MemberDefault::Inherited => true,
+            MemberDefault::Label(label) => admits(label),
+        }
+}
+
 /// Everything the predicate needs about one viewer and one layer, gathered once: what is global
 /// to the layer, and one [`ArtifactSide`] per point shard of the view.
 ///

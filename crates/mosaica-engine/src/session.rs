@@ -242,17 +242,33 @@ impl Session {
         let Some(held) = &self.held else {
             return false;
         };
-        let labels = generation.dict.labels();
         (self.dict_len_at_authorise..generation.dict.len())
             .map(TermId::new)
-            .any(|key| match labels.is_conjunction_key(key) {
-                true => labels.satisfied(key, &|term| self.holds(term)),
-                false => generation
-                    .dict
-                    .descriptor(key)
-                    .is_some_and(|term| held.credentials.contains(term)),
-            })
+            .any(|key| key_satisfied(&generation.dict, key, &held.credentials))
     }
+}
+
+/// Whether a credential holding `credentials` satisfies the index key `key` of `dict`: a term it
+/// holds, or a conjunction its terms satisfy.
+pub(crate) fn key_satisfied(
+    dict: &mosaica_authz::Dict,
+    key: TermId,
+    credentials: &FxHashSet<Vec<u8>>,
+) -> bool {
+    let labels = dict.labels();
+    match labels.is_conjunction_key(key) {
+        true => labels.satisfied(key, &|term| credentials.contains(term.as_bytes())),
+        false => dict
+            .descriptor(key)
+            .is_some_and(|term| credentials.contains(term)),
+    }
+}
+
+/// The grant of the index keys `satisfied`: their postings' union.
+pub(crate) fn grant_of(satisfied: &FxHashSet<TermId>) -> Grant {
+    let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
+    sorted.sort_unstable();
+    Grant::Keys(Arc::new(sorted))
 }
 
 /// The authorisation data [`Engine::authorise_all`] hashes into its sessions' cursors. A
@@ -273,20 +289,18 @@ impl Engine {
         // recorded as seen while `satisfied` was resolved against the one before it.
         let generation = self.generation.load();
         let (satisfied, held) = satisfied_by(&generation, &auth_terms);
-        let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
-        sorted.sort_unstable();
+        let grant = grant_of(&satisfied);
         self.mint(
             &generation,
             auth_data,
             Satisfied::Keys(satisfied),
-            Grant::Keys(Arc::new(sorted)),
+            grant,
             Some(held),
         )
     }
 
-    /// The scope of a writer holding `terms`: the items a session authorised for them may be
-    /// served, suppressed ones included ([`crate::resolver::WriteScope`]). Built once per set of
-    /// terms and kept, and built again where a key promoted since is one the terms satisfy.
+    /// The scope of a writer holding `terms` ([`crate::resolver::WriteScope`]), built once per set
+    /// of terms and again where a key promoted since is one they satisfy.
     pub fn write_scope<'t>(
         &self,
         terms: impl IntoIterator<Item = &'t str>,
@@ -301,7 +315,7 @@ impl Engine {
         let generation = self.generation.load();
         self.write_scopes.get_or_build(&held, &generation, || {
             let (keys, terms) = satisfied_by(&generation, &held);
-            crate::resolver::TermsScope::new(keys, terms.credentials, generation.dict.len())
+            crate::resolver::TermsScope::new(&keys, terms.credentials, generation.dict.len())
         })
     }
 }
@@ -489,13 +503,8 @@ impl Engine {
         session: &'s Session,
         declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> crate::artifacts::LabelGate<'s> {
-        use mosaica_types::layer::MemberDefault;
-        // A layer naming no field has no artifact labels, and its default says nothing.
-        let unlabelled = !declaration.artifact_visibility.carries_own_labels()
-            || match &declaration.artifact_visibility.default {
-                MemberDefault::Inherited => true,
-                MemberDefault::Label(label) => session.admits(&[label]),
-            };
+        let unlabelled =
+            crate::artifacts::unlabelled_admitted(declaration, |label| session.admits(&[label]));
         match &session.held {
             Some(held) => crate::artifacts::LabelGate::new(&held.credentials, unlabelled),
             None => crate::artifacts::LabelGate::every_term(unlabelled),

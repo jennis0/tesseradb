@@ -1,13 +1,7 @@
-//! Every write's names, resolved where the write applies.
-//!
-//! A write names items by `mosaica_id` and by the values of unique fields, under the identity rule
-//! a build applies too ([`mosaica_lifecycle::resolve`]). A [`Resolver`] answers that rule against
-//! one generation for one writer's [`WriteScope`]. A write's handler resolves its names once, off
-//! the write thread, into [`Names`]; the write thread brings them to the generation the write
-//! applies in ([`Names::now`]): a row naming an item that has since been deleted, moved by an edit
-//! or removed by a fold, and a row carrying a value given a holder since, is resolved again there,
-//! and every other row stands as it was resolved. The write thread is the only one that moves an
-//! item, so what it resolves holds when the write applies.
+//! Every write's names, resolved where the write applies. A handler resolves a write's names
+//! once into [`Names`] for one writer's [`WriteScope`]; the write thread, the only one that moves
+//! an item, resolves again ([`Names::now`]) the rows whose item has since been deleted, edited or
+//! folded away, or whose value has gained a holder.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -19,7 +13,7 @@ use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use mosaica_lifecycle::resolve::{self, Batch, Holder, Reason, Refusal, RowIdentity, Verdict};
 use mosaica_lifecycle::ShardSets;
 use mosaica_store::manifest::DeclaredScalar;
-use mosaica_store::unique::{KeyKind, UniqueKey};
+use mosaica_store::unique::UniqueKey;
 use mosaica_store::StoreError;
 use mosaica_types::{
     EntityId, IdentityKey, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId,
@@ -40,7 +34,9 @@ use crate::{EngineError, Generation};
 pub enum WriteScope {
     #[default]
     All,
-    Terms(Arc<TermsScope>),
+    /// The writer's terms, and each shard's fragment of their grant where the write tests an
+    /// artifact's members ([`crate::Engine::scope_masks`]).
+    Terms(Arc<TermsScope>, ScopeMasks),
 }
 
 impl WriteScope {
@@ -49,58 +45,35 @@ impl WriteScope {
     pub(crate) fn is(&self, other: &WriteScope) -> bool {
         match (self, other) {
             (WriteScope::All, WriteScope::All) => true,
-            (WriteScope::Terms(a), WriteScope::Terms(b)) => Arc::ptr_eq(a, b),
+            (WriteScope::Terms(a, _), WriteScope::Terms(b, _)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
 
     /// Whether the writer holds `term`: every term, for [`WriteScope::All`].
-    pub(crate) fn holds(&self, term: &str) -> bool {
+    fn holds(&self, term: &str) -> bool {
         match self {
             WriteScope::All => true,
-            WriteScope::Terms(scope) => scope.holds(term),
+            WriteScope::Terms(scope, _) => scope.holds(term),
         }
     }
 
-    /// Whether the writer satisfies one of the stored access labels `labels`: always, for
-    /// [`WriteScope::All`], which a label that does not parse does not stop.
+    /// Whether the writer satisfies one of the stored access labels `labels`; always for
+    /// [`WriteScope::All`], even where a label does not parse.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
         match self {
             WriteScope::All => true,
-            WriteScope::Terms(_) => mosaica_access::admits(labels, &|term| self.holds(term)),
+            WriteScope::Terms(..) => mosaica_access::admits(labels, &|term| self.holds(term)),
         }
     }
 
-    /// Whether the writer may name `item` in `generation` ([`Resolver::admits`]).
-    pub(crate) fn admits_item(
-        &self,
-        generation: &Generation,
-        live: &LiveState,
-        item: ItemAt,
-    ) -> bool {
-        let WriteScope::Terms(scope) = self else {
-            return true;
-        };
-        let Some(shard) = generation.shard(item.shard) else {
-            return false;
-        };
-        match shard.buffer.get(item.entity) {
-            Some(buffered) => scope.admits_keys(&buffered.terms, generation, live),
-            None => crate::write::joined::flushed_terms_of(shard, item.entity)
-                .is_some_and(|keys| scope.admits_keys(&keys, generation, live)),
-        }
-    }
-
-    /// Whether the writer may know a layer of `declaration` exists: where its `visibility`, as a
-    /// session's layer gate reads it, admits the writer's terms, `None` being `public`.
+    /// Whether the writer may know a layer of `declaration` exists, as a session's layer gate
+    /// reads its `visibility`.
     pub(crate) fn reaches_layer(
         &self,
         declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> bool {
-        declaration
-            .visibility
-            .as_ref()
-            .is_none_or(|label| self.admits(std::slice::from_ref(label)))
+        declaration.reached_by(|label| self.admits(&[label]))
     }
 
     /// The views and groups of `manifest` the writer reaches, as a session holding its terms is
@@ -111,7 +84,7 @@ impl WriteScope {
     ) -> Option<VisibleViews> {
         match self {
             WriteScope::All => None,
-            WriteScope::Terms(_) => Some(crate::gate::resolve(manifest, &|term| self.holds(term))),
+            WriteScope::Terms(..) => Some(crate::gate::resolve(manifest, &|term| self.holds(term))),
         }
     }
 
@@ -123,16 +96,13 @@ impl WriteScope {
         declaration: &mosaica_types::layer::LayerDeclaration,
         access: &[Vec<u8>],
     ) -> bool {
-        use mosaica_types::layer::MemberDefault;
         if matches!(self, WriteScope::All) {
             return true;
         }
         if access.is_empty() {
-            return !declaration.artifact_visibility.carries_own_labels()
-                || match &declaration.artifact_visibility.default {
-                    MemberDefault::Inherited => true,
-                    MemberDefault::Label(label) => self.admits(&[label]),
-                };
+            return crate::artifacts::unlabelled_admitted(declaration, |label| {
+                self.admits(&[label])
+            });
         }
         let labels: Vec<std::borrow::Cow<'_, str>> = access
             .iter()
@@ -145,8 +115,7 @@ impl WriteScope {
 /// What a set of terms satisfies, as a writer's scope holds it: the index keys of the dictionary it
 /// was built against, and the terms, by which a key promoted since is judged.
 pub struct TermsScope {
-    keys: FxHashSet<TermId>,
-    /// `keys` sorted: the grant whose fragment masks a set of items at once.
+    /// The keys satisfied, ascending: the grant whose fragment masks a set of items at once.
     grant: Grant,
     /// Every term held, and `public`.
     credentials: FxHashSet<Vec<u8>>,
@@ -157,7 +126,7 @@ pub struct TermsScope {
 impl std::fmt::Debug for TermsScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TermsScope")
-            .field("keys", &self.keys.len())
+            .field("keys", &self.grant.keys().len())
             .field("dict_len", &self.dict_len)
             .finish_non_exhaustive()
     }
@@ -165,15 +134,12 @@ impl std::fmt::Debug for TermsScope {
 
 impl TermsScope {
     pub(crate) fn new(
-        keys: FxHashSet<TermId>,
+        keys: &FxHashSet<TermId>,
         credentials: FxHashSet<Vec<u8>>,
         dict_len: u32,
     ) -> TermsScope {
-        let mut sorted: Vec<TermId> = keys.iter().copied().collect();
-        sorted.sort_unstable();
         TermsScope {
-            keys,
-            grant: Grant::Keys(Arc::new(sorted)),
+            grant: crate::session::grant_of(keys),
             credentials,
             dict_len,
         }
@@ -189,7 +155,7 @@ impl TermsScope {
 
     /// Whether the terms satisfy the index key `descriptor`: a term, `public`, or a conjunction's
     /// key.
-    pub(crate) fn satisfies_key(&self, descriptor: &[u8]) -> bool {
+    fn satisfies_key(&self, descriptor: &[u8]) -> bool {
         match mosaica_authz::label::label_of_key(descriptor) {
             Some(text) => mosaica_access::admits(&[text], &|term| self.holds(term)),
             None => self.credentials.contains(descriptor),
@@ -202,21 +168,14 @@ impl TermsScope {
         let mut novel: FxHashSet<TermId> = FxHashSet::default();
         let dict = &generation.dict;
         for &key in keys {
-            if self.keys.contains(&key) {
+            if self.grant.keys().binary_search(&key).is_ok() {
                 return true;
             }
             if key.raw() < self.dict_len {
                 continue;
             }
             if key.raw() < dict.len() {
-                let labels = dict.labels();
-                let satisfied = match labels.is_conjunction_key(key) {
-                    true => labels.satisfied(key, &|term| self.holds(term)),
-                    false => dict
-                        .descriptor(key)
-                        .is_some_and(|term| self.credentials.contains(term)),
-                };
-                if satisfied {
+                if crate::session::key_satisfied(dict, key, &self.credentials) {
                     return true;
                 }
             } else {
@@ -234,22 +193,16 @@ impl TermsScope {
     /// terms satisfy: the scope then names fewer items than the terms do, and is built again.
     fn is_stale(&self, generation: &Generation) -> bool {
         let dict = &generation.dict;
-        let labels = dict.labels();
-        (self.dict_len..dict.len()).map(TermId::new).any(|key| {
-            match labels.is_conjunction_key(key) {
-                true => labels.satisfied(key, &|term| self.holds(term)),
-                false => dict
-                    .descriptor(key)
-                    .is_some_and(|term| self.credentials.contains(term)),
-            }
-        })
+        (self.dict_len..dict.len())
+            .map(TermId::new)
+            .any(|key| crate::session::key_satisfied(dict, key, &self.credentials))
     }
 }
 
 /// Each shard's fragment of a scoped writer's grant, built where the write is admitted, so the write
 /// thread masks a set by it and builds none.
 #[derive(Clone, Default)]
-pub(crate) struct ScopeMasks(Vec<(ShardId, Arc<FrozenFragment>)>);
+pub struct ScopeMasks(Vec<(ShardId, Arc<FrozenFragment>)>);
 
 impl std::fmt::Debug for ScopeMasks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -289,7 +242,7 @@ impl WriteScopes {
             .get(terms)
             .cloned();
         if let Some(kept) = kept.filter(|kept| !kept.is_stale(generation)) {
-            return WriteScope::Terms(kept);
+            return WriteScope::Terms(kept, ScopeMasks::default());
         }
         let built = Arc::new(build());
         let mut kept = self
@@ -300,7 +253,7 @@ impl WriteScopes {
             kept.clear();
         }
         kept.insert(terms.to_vec(), Arc::clone(&built));
-        WriteScope::Terms(built)
+        WriteScope::Terms(built, ScopeMasks::default())
     }
 }
 
@@ -310,25 +263,17 @@ pub(crate) struct Resolver<'a> {
     pub(crate) scope: &'a WriteScope,
     pub(crate) key: &'a IdentityKey,
     pub(crate) live: &'a LiveState,
-    /// What an artifact's members are masked by where its existence criterion is tested.
-    masks: &'a ScopeMasks,
 }
 
-/// No shard's fragment: every member is tested alone.
-static NO_MASKS: ScopeMasks = ScopeMasks(Vec::new());
-
-/// What a writer may name among the layers and artifacts a registry and its store hold, as the
-/// registry resolves a write's keys ([`mosaica_lifecycle::Reach`]). An artifact is inside the
-/// writer's scope where the one predicate serving decides by ([`crate::artifacts::verdict`])
-/// would serve it to a session holding the writer's terms, suppression aside, read from the store
-/// the write applies to.
+/// What a writer may name among a registry's layers and its store's artifacts
+/// ([`mosaica_lifecycle::Reach`]): an artifact a session holding the writer's terms would be served
+/// ([`crate::artifacts::verdict`]), suppression aside.
 pub(crate) struct ArtifactReach<'r> {
     resolver: &'r Resolver<'r>,
     /// The spaces and declarations of the layers the writer reaches, by name; empty for
     /// [`WriteScope::All`], which reaches every one.
     layers: FxHashMap<String, (LayerSpace, mosaica_types::layer::LayerDeclaration)>,
     store: &'r mosaica_lifecycle::ArtifactStore,
-    masks: &'r ScopeMasks,
     views: Option<VisibleViews>,
 }
 
@@ -338,11 +283,10 @@ impl<'r> ArtifactReach<'r> {
         resolver: &'r Resolver<'r>,
         registry: &mosaica_lifecycle::LayerRegistry,
         store: &'r mosaica_lifecycle::ArtifactStore,
-        masks: &'r ScopeMasks,
     ) -> ArtifactReach<'r> {
         let layers = match resolver.scope {
             WriteScope::All => FxHashMap::default(),
-            WriteScope::Terms(_) => registry
+            WriteScope::Terms(..) => registry
                 .iter()
                 .filter(|(_, held)| resolver.scope.reaches_layer(&held.declaration))
                 .map(|(name, held)| (name.to_string(), (held.space, held.declaration.clone())))
@@ -352,7 +296,6 @@ impl<'r> ArtifactReach<'r> {
             resolver,
             layers,
             store,
-            masks,
             views: resolver.scope.views(&resolver.generation.bundle.manifest),
         }
     }
@@ -363,7 +306,7 @@ impl<'r> ArtifactReach<'r> {
         if let Some(held) = self.resolver.generation.shard(shard) {
             set.andnot_inplace(held.overlay.deleted_set());
         }
-        self.resolver.mask(shard, &mut set, self.masks);
+        self.resolver.mask(shard, &mut set);
         set.cardinality()
     }
 
@@ -410,8 +353,8 @@ impl<'r> ArtifactReach<'r> {
         crate::artifacts::verdict(criterion, &facts).is_served()
     }
 
-    /// Whether the writer may name the artifact `entity` of `space`, or the layer itself where
-    /// `entity` is the layer's own.
+    /// Whether the writer may name the artifact `entity` of `space` that the store holds, or the
+    /// layer itself where `entity` is the layer's own.
     pub(crate) fn target(
         &self,
         registry: &mosaica_lifecycle::LayerRegistry,
@@ -427,7 +370,10 @@ impl<'r> ArtifactReach<'r> {
         }
         registry
             .locate_in(space, entity)
-            .is_some_and(|(name, level, ordinal)| self.artifact(name, level, ordinal))
+            .is_some_and(|(name, level, ordinal)| {
+                self.store.get(name, level, ordinal).is_some()
+                    && self.artifact(name, level, ordinal)
+            })
     }
 }
 
@@ -448,9 +394,7 @@ impl mosaica_lifecycle::Reach for ArtifactReach<'_> {
     }
 }
 
-/// One artifact as [`ArtifactReach::served`] asks the one predicate about it: read from the store
-/// a write applies to, for a session holding the writer's terms, with its suppression, its
-/// layer's and its target's set aside.
+/// One artifact as [`ArtifactReach::served`] puts it to the verdict.
 struct Reached<'f, 'r> {
     reach: &'f ArtifactReach<'r>,
     /// The layer's name, space and declaration, where the writer reaches it.
@@ -586,7 +530,7 @@ impl crate::artifacts::ArtifactFacts for Reached<'_, '_> {
     }
 }
 
-/// What every one of several writers may name: no reach at all is every layer and artifact.
+/// What every one of several writers may name; an empty list names everything.
 pub(crate) struct ReachOfAll<'r>(pub(crate) Vec<ArtifactReach<'r>>);
 
 impl mosaica_lifecycle::Reach for ReachOfAll<'_> {
@@ -626,30 +570,34 @@ impl<'a> Resolver<'a> {
             scope,
             key,
             live,
-            masks: &NO_MASKS,
         }
-    }
-
-    /// This resolver, masking an artifact's members by `masks` where it tests one.
-    pub(crate) fn with_masks(mut self, masks: &'a ScopeMasks) -> Resolver<'a> {
-        self.masks = masks;
-        self
     }
 
     /// Whether the writer may name `item`: always for [`WriteScope::All`], and otherwise where one
     /// of the item's index keys, buffered or flushed, is one its terms satisfy. An item whose keys
     /// cannot be read is outside.
     pub(crate) fn admits(&self, item: ItemAt) -> bool {
-        self.scope.admits_item(self.generation, self.live, item)
+        let WriteScope::Terms(scope, _) = self.scope else {
+            return true;
+        };
+        let (generation, live) = (self.generation, self.live);
+        let Some(shard) = generation.shard(item.shard) else {
+            return false;
+        };
+        match shard.buffer.get(item.entity) {
+            Some(buffered) => scope.admits_keys(&buffered.terms, generation, live),
+            None => crate::write::joined::flushed_terms_of(shard, item.entity)
+                .is_some_and(|keys| scope.admits_keys(&keys, generation, live)),
+        }
     }
 
     /// `set`, entities of `shard`, less those outside the writer's scope: the flushed ones by the
-    /// shard's fragment in `masks`, where it holds one built at the shard's identity, and the rest
-    /// one at a time.
-    pub(crate) fn mask(&self, shard: ShardId, set: &mut Bitmap, masks: &ScopeMasks) {
-        if matches!(self.scope, WriteScope::All) {
+    /// shard's fragment in the scope's masks, where it holds one built at the shard's identity, and
+    /// the rest one at a time.
+    pub(crate) fn mask(&self, shard: ShardId, set: &mut Bitmap) {
+        let WriteScope::Terms(_, masks) = self.scope else {
             return;
-        }
+        };
         let identity = self.generation.shard(shard).map(|held| held.identity);
         let fragment = masks
             .0
@@ -663,7 +611,7 @@ impl<'a> Resolver<'a> {
                 alone.remove_range(0..u32::try_from(fragment.watermark).unwrap_or(u32::MAX));
                 (fragment.view().and(set), alone)
             }
-            None => (Bitmap::new(), set.clone()),
+            None => (Bitmap::new(), std::mem::take(set)),
         };
         for entity in alone.iter() {
             if self.admits(ItemAt::new(shard, EntityId::new(u64::from(entity)))) {
@@ -673,13 +621,11 @@ impl<'a> Resolver<'a> {
         *set = kept;
     }
 
-    /// The item each of `ids` names: `None` per position for an identifier that names no item,
-    /// an artifact's and a layer's among them. An identifier names a number in its shard, and the
-    /// number names the entity the shard's edited-items map holds for it, or the number itself
-    /// where it has none ([`crate::edited`]). An item is named while its shard holds it
-    /// ([`crate::control::holds_item`]) below the shard's high water and has not deleted it: a fold
-    /// that removes a deleted item also drops its deletion, so the overlay alone no longer says it
-    /// is gone. An item outside the writer's scope is named by none.
+    /// The item each of `ids` names, `None` for one that names no item, an artifact or a layer
+    /// among them. An identifier names a number in its shard, which names the entity the shard's
+    /// edited-items map holds for it ([`crate::edited`]). The item must be below the shard's high
+    /// water, held ([`crate::edited::holds_item`]), not deleted (a fold drops a deletion with the
+    /// item, so the overlay alone does not say it is gone), and inside the writer's scope.
     pub(crate) fn mosaica_items(
         &self,
         ids: &[MosaicaId],
@@ -695,7 +641,7 @@ impl<'a> Resolver<'a> {
             let numbers: Vec<EntityId> = named.iter().map(|(_, _, number)| *number).collect();
             let held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
                 entity.raw() < high_water
-                    && crate::control::holds_item(shard, entity)
+                    && crate::edited::holds_item(shard, entity)
                     && !shard.overlay.is_deleted(entity)
             })?;
             for ((at, ..), entity) in named.iter().zip(held) {
@@ -707,18 +653,24 @@ impl<'a> Resolver<'a> {
         Ok(out)
     }
 
-    /// The layer itself, where `entity` is `space`'s own, or an artifact its level holds that the
-    /// generation has not deleted, where the writer may name it ([`ArtifactReach`]).
-    pub(crate) fn artifact(&self, space: LayerSpace, entity: EntityId) -> Option<Target> {
-        let deleted = self.generation.space_overlay(space).is_deleted(entity);
-        let reached = || {
-            self.live.with_layers_and_artifacts(|registry, store| {
-                ArtifactReach::new(self, registry, store, self.masks)
-                    .target(registry, space, entity)
-            })
-        };
-        (self.live.artifact_held(space, entity) && !deleted && reached())
-            .then_some(Target::Artifact(space, entity))
+    /// What each of `artifacts` names: the layer itself, where the entity is its space's own, or
+    /// an artifact its level holds that the generation has not deleted, where the writer may name
+    /// it ([`ArtifactReach`]).
+    pub(crate) fn artifacts(&self, artifacts: &[(LayerSpace, EntityId)]) -> Vec<Option<Target>> {
+        if artifacts.is_empty() {
+            return Vec::new();
+        }
+        self.live.with_layers_and_artifacts(|registry, store| {
+            let reach = ArtifactReach::new(self, registry, store);
+            artifacts
+                .iter()
+                .map(|&(space, entity)| {
+                    let named = !self.generation.space_overlay(space).is_deleted(entity)
+                        && reach.target(registry, space, entity);
+                    named.then_some(Target::Artifact(space, entity))
+                })
+                .collect()
+        })
     }
 
     /// The unique columns of `table` this generation holds an index of, with their cells, and the
@@ -746,13 +698,9 @@ impl<'a> Resolver<'a> {
     }
 
     /// Which item each of `rows` of `table` names, every row where `rows` is `None`, under the
-    /// identity rule ([`mosaica_lifecycle::resolve`]): a row names the item its `mosaica_id` and
-    /// unique values name, and a row naming none, or naming two, is refused. Many rows may name
-    /// one item. A column that is neither `mosaica_id` nor a unique field names nothing and is
-    /// ignored, as a build ignores it.
-    ///
-    /// Refused with [`EngineError::AddressMalformed`] where a table with rows is left with no
-    /// column to name items by, or a value is not one of its field's.
+    /// identity rule ([`mosaica_lifecycle::resolve`]). A column that is neither `mosaica_id` nor a
+    /// unique field is ignored. Refused with [`EngineError::AddressMalformed`] where a table with
+    /// rows has no column to name items by, or a value is not one of its field's.
     pub(crate) fn items(
         &self,
         table: &AddressTable,
@@ -809,7 +757,6 @@ impl<'a> Resolver<'a> {
                 let mut verdicts: Vec<Verdict> = (0..picked.len()).map(no_item).collect();
                 let field = resolve::Identifier::Unique(*position);
                 for (at, holder) in self.holders_of(d, &keys).map_err(store)? {
-                    // A value held outside the scope names nothing here.
                     let Holder::Inside(item) = holder else {
                         continue;
                     };
@@ -878,6 +825,9 @@ impl<'a> Resolver<'a> {
                 Some((at, space, entity))
             })
             .collect();
+        if artifact_rows.is_empty() {
+            return self.items(table, rows);
+        }
         let mut items = table.clone();
         if let Some(ids) = items.mosaica_id.as_mut() {
             for (at, ..) in &artifact_rows {
@@ -885,9 +835,13 @@ impl<'a> Resolver<'a> {
             }
         }
         let mut resolved = self.items(&items, rows)?;
-        for &(at, space, entity) in &artifact_rows {
+        let named: Vec<(LayerSpace, EntityId)> = artifact_rows
+            .iter()
+            .map(|&(_, space, entity)| (space, entity))
+            .collect();
+        for (&(at, ..), artifact) in artifact_rows.iter().zip(self.artifacts(&named)) {
             let row = picked[at];
-            resolved.verdicts[at] = match (&resolved.verdicts[at], self.artifact(space, entity)) {
+            resolved.verdicts[at] = match (&resolved.verdicts[at], artifact) {
                 (Ok(_), _) => Err(Refusal::NamesTwo {
                     row,
                     named: Vec::new(),
@@ -926,11 +880,8 @@ impl resolve::Holdings for Resolver<'_> {
         keys: &[resolve::Key],
     ) -> Result<Vec<(usize, Holder)>, StoreError> {
         let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
-        let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
-        let keys: Vec<UniqueKey> = keys
-            .iter()
-            .map(|k| UniqueKey::of_widened(kind, *k))
-            .collect();
+        let keys = crate::unique::keys_of_widened(declared, keys.iter().copied())
+            .expect("a unique column's type takes a key");
         self.holders_of(declared, &keys)
     }
 
@@ -945,7 +896,11 @@ fn at_row(refusal: Refusal, row: usize) -> Refusal {
         Refusal::NamesTwo { named, .. } => Refusal::NamesTwo { row, named },
         Refusal::UnknownMosaicaId { .. } => Refusal::UnknownMosaicaId { row },
         Refusal::NamesNoItem { .. } => Refusal::NamesNoItem { row },
-        Refusal::ValueHeld { field, names, .. } => Refusal::ValueHeld { row, field, names },
+        Refusal::ValueHeld { field, creates, .. } => Refusal::ValueHeld {
+            row,
+            field,
+            creates,
+        },
         Refusal::LabelNotHeld { .. } => Refusal::LabelNotHeld { row },
         other => other,
     }
@@ -1001,7 +956,7 @@ fn value_hash(field: u16, key: u128) -> u64 {
 /// in, and what the write thread needs to resolve again the rows something has touched since.
 #[derive(Debug, Clone)]
 pub struct Names {
-    scope: WriteScope,
+    pub(crate) scope: WriteScope,
     stamp: Stamp,
     table: AddressTable,
     /// Whether a row may name an artifact or a layer by its `mosaica_id`, as a change may.
@@ -1050,18 +1005,14 @@ impl Names {
             }
         }
         valued.sort_unstable();
-        let mut names = Names {
-            scope: resolver.scope.clone(),
-            stamp: Stamp::of(resolver.generation),
+        let mut names = Names::unresolved(
+            resolver.scope.clone(),
+            Stamp::of(resolver.generation),
             table,
             targets,
-            ignored: resolved.ignored,
-            verdicts: Vec::new(),
-            refused: Vec::new(),
-            named: ShardSets::default(),
-            by_item: Vec::new(),
             valued,
-        };
+        );
+        names.ignored = resolved.ignored;
         names.take((0..names.table.rows).zip(resolved.verdicts));
         Ok(names)
     }
@@ -1074,20 +1025,31 @@ impl Names {
             mosaica_id: Some(targets.iter().map(|named| named.item).collect()),
             columns: Vec::new(),
         };
-        let mut names = Names {
+        let mut names = Names::unresolved(scope, stamp, table, true, Vec::new());
+        names.take(targets.iter().map(|named| Ok(named.target)).enumerate());
+        names
+    }
+
+    /// Names of `table` with no row resolved yet.
+    fn unresolved(
+        scope: WriteScope,
+        stamp: Stamp,
+        table: AddressTable,
+        targets: bool,
+        valued: Vec<(u64, usize)>,
+    ) -> Names {
+        Names {
             scope,
             stamp,
             table,
-            targets: true,
+            targets,
             ignored: Vec::new(),
             verdicts: Vec::new(),
             refused: Vec::new(),
             named: ShardSets::default(),
             by_item: Vec::new(),
-            valued: Vec::new(),
-        };
-        names.take(targets.iter().map(|named| Ok(named.target)).enumerate());
-        names
+            valued,
+        }
     }
 
     /// Set every row's verdict, and gather the items they name.
@@ -1128,10 +1090,6 @@ impl Names {
             .map(|(_, row)| *row)
     }
 
-    pub fn rows(&self) -> usize {
-        self.table.rows
-    }
-
     /// What row `row` names, or why it names nothing.
     pub fn verdict(&self, row: usize) -> Result<Target, Reason> {
         match self.verdicts[row] {
@@ -1158,15 +1116,11 @@ impl Names {
         &self.ignored
     }
 
-    pub fn stamp(&self) -> Stamp {
-        self.stamp
-    }
-
     pub(crate) fn scope(&self) -> &WriteScope {
         &self.scope
     }
 
-    /// The items row `rows` name, as resolved.
+    /// The items rows `rows` name, as resolved.
     fn items_of(&self, rows: Range<usize>) -> impl Iterator<Item = ItemAt> + '_ {
         self.verdicts[rows]
             .iter()
@@ -1176,19 +1130,25 @@ impl Names {
             })
     }
 
-    /// Bring the names to `at`'s generation, the one the write applies in: resolve again every
-    /// row naming an item `at` has deleted or a fold has removed since the names were resolved,
-    /// and every row carrying a value given a holder since; every item row where a fold since is
-    /// no longer kept or the unique columns have changed. Answers the rows resolved again,
-    /// ascending, with what each named before; every other row names what it named.
-    pub(crate) fn now(&mut self, at: &Resolver) -> Result<Vec<Moved>, EngineError> {
-        let generation = at.generation;
-        let live = &generation.unique_live;
+    /// Bring the names to `generation`, the one the write applies in, and answer the rows resolved
+    /// again, ascending, with what each named before. A row is resolved again where an item it
+    /// names has been deleted or folded away since, or a value it carries has gained a holder;
+    /// every item row is where a fold since is no longer kept or the unique columns have changed.
+    /// Called once, where the write applies.
+    pub(crate) fn now(
+        &mut self,
+        generation: &Generation,
+        key: &IdentityKey,
+        live: &LiveState,
+    ) -> Result<Vec<Moved>, EngineError> {
+        let scope = self.scope.clone();
+        let at = &Resolver::new(generation, &scope, key, live);
+        let unique = &generation.unique_live;
         let retired = generation
             .retirements
             .since(self.stamp.folds, generation.fold_epoch);
         let all = match retired {
-            Some(_) => live.columns_changed_since(self.stamp.unique_seq),
+            Some(_) => unique.columns_changed_since(self.stamp.unique_seq),
             None => true,
         };
         let mut rows: Vec<usize> = match retired {
@@ -1210,9 +1170,6 @@ impl Names {
             true => at.targets(&self.table, Some(&rows))?,
             false => at.items(&self.table, Some(&rows))?,
         };
-        if all {
-            self.ignored = resolved.ignored;
-        }
         self.refused
             .retain(|(row, _)| rows.binary_search(row).is_err());
         let mut moved = Vec::with_capacity(rows.len());
@@ -1230,7 +1187,6 @@ impl Names {
             }
         }
         self.refused.sort_by_key(|(row, _)| *row);
-        self.stamp = Stamp::of(generation);
         Ok(moved)
     }
 
@@ -1302,6 +1258,19 @@ pub enum MemberSet {
     Leaving,
 }
 
+impl MemberSet {
+    /// Whether a refused row of this set refuses the write: one of a content's generating set,
+    /// which a viewer must see whole to be served the content, or of members joining one, where
+    /// the growth is `ranked`.
+    fn whole(self, ranked: bool) -> bool {
+        match self {
+            MemberSet::GeneratedFrom(_) => true,
+            MemberSet::Members => ranked,
+            MemberSet::Excluding | MemberSet::Leaving => false,
+        }
+    }
+}
+
 /// One member table of a write, as the rows of its [`Names`] it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedList {
@@ -1309,8 +1278,6 @@ pub struct NamedList {
     pub artifact: usize,
     pub set: MemberSet,
     pub rows: Range<usize>,
-    /// A refused row refuses the write.
-    pub whole: bool,
 }
 
 /// A publication's or a growth's member tables, resolved as one table.
@@ -1318,36 +1285,21 @@ pub struct NamedList {
 pub struct MemberNames {
     pub(crate) names: Names,
     pub(crate) lists: Vec<NamedList>,
-    /// What a set spelled by exclusion is complemented within, and an artifact's members are
-    /// counted within, for a scoped writer.
-    pub(crate) masks: ScopeMasks,
-    /// A refused artifact refuses the write.
+    /// A refused row, or a refused artifact, refuses the write.
     pub(crate) strict: bool,
 }
 
 impl MemberNames {
-    pub fn new(names: Names, lists: Vec<NamedList>) -> MemberNames {
+    pub fn new(names: Names, lists: Vec<NamedList>, strict: bool) -> MemberNames {
         MemberNames {
             names,
             lists,
-            masks: ScopeMasks::default(),
-            strict: false,
+            strict,
         }
-    }
-
-    /// These names for a write in which a refused artifact refuses the write, where `strict`.
-    pub fn strict(mut self, strict: bool) -> MemberNames {
-        self.strict = strict;
-        self
     }
 
     pub fn names(&self) -> &Names {
         &self.names
-    }
-
-    /// [`Names::now`] over the tables' rows.
-    pub(crate) fn now(&mut self, at: &Resolver) -> Result<Vec<Moved>, EngineError> {
-        self.names.now(at)
     }
 
     /// The set `list` fills: built from its rows where `moved` is `None`, and otherwise `held`,
@@ -1443,15 +1395,18 @@ impl MemberNames {
         }
     }
 
-    /// The first refused row of a list a refused row refuses whole, with its reason.
-    pub(crate) fn refusing(&self) -> Option<(usize, Reason)> {
+    /// The first refused row that refuses the write, with its reason: any, where the write is
+    /// strict, and otherwise one of a set a refused row refuses whole, `ranked` saying which
+    /// artifacts are a ranked growth's.
+    pub(crate) fn refusing(&self, ranked: impl Fn(usize) -> bool) -> Option<(usize, Reason)> {
         self.names
             .refused
             .iter()
             .find(|(row, _)| {
-                self.lists
-                    .iter()
-                    .any(|list| list.whole && list.rows.contains(row))
+                self.lists.iter().any(|list| {
+                    list.rows.contains(row)
+                        && (self.strict || list.set.whole(ranked(list.artifact)))
+                })
             })
             .map(|(row, refusal)| (*row, refusal.kind()))
     }
@@ -1461,11 +1416,11 @@ impl MemberNames {
     pub(crate) fn of_sets<'s>(
         key: &IdentityKey,
         generation: &Generation,
-        lists: impl IntoIterator<Item = (usize, MemberSet, bool, &'s ShardSets)>,
+        lists: impl IntoIterator<Item = (usize, MemberSet, &'s ShardSets)>,
     ) -> Result<MemberNames, StoreError> {
         let mut targets = Vec::new();
         let mut named = Vec::new();
-        for (artifact, set, whole, sets) in lists {
+        for (artifact, set, sets) in lists {
             let start = targets.len();
             for (shard, members) in sets.iter() {
                 targets.extend(
@@ -1478,16 +1433,11 @@ impl MemberNames {
                 artifact,
                 set,
                 rows: start..targets.len(),
-                whole,
             });
         }
         let resolved = NamedTarget::all(key, generation, &targets)?;
-        Ok(MemberNames {
-            names: Names::of_targets(Stamp::of(generation), WriteScope::All, &resolved),
-            lists: named,
-            masks: ScopeMasks::default(),
-            strict: false,
-        })
+        let names = Names::of_targets(Stamp::of(generation), WriteScope::All, &resolved);
+        Ok(MemberNames::new(names, named, false))
     }
 }
 
@@ -1532,8 +1482,6 @@ mod tests {
         entities.iter().copied().collect()
     }
 
-    /// A write resolved before a fold finds what the fold removed while the fold is kept, and is
-    /// resolved again whole once it is not.
     #[test]
     fn a_fold_since_a_write_was_named_is_answered_while_it_is_kept() {
         let mut kept = Retirements::default();

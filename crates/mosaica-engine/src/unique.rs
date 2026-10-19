@@ -460,8 +460,7 @@ pub(crate) fn mosaica_id_text(
     generation
         .shard(item.shard)
         .and_then(|shard| {
-            let numbers = crate::edited::numbers_of(shard, &[item.entity]).ok()?;
-            crate::edited::ids_of_numbers(key, shard, &numbers)
+            crate::edited::mosaica_ids_of(key, shard, &[item.entity])
                 .ok()?
                 .pop()
         })
@@ -481,7 +480,6 @@ pub(crate) fn moved_since(
     seq: u64,
     creates: bool,
 ) -> bool {
-    use mosaica_store::unique::KeyKind;
     let live = &generation.unique_live;
     if creates && live.columns_changed_since(seq) {
         return true;
@@ -497,13 +495,26 @@ pub(crate) fn moved_since(
         let Some(d) = declared.get(usize::from(*field)).filter(|d| d.unique) else {
             return true;
         };
-        let Some(kind) = KeyKind::of(d.arrow_type) else {
+        let Some(keys) = keys_of_widened(d, [*key]) else {
             return true;
         };
-        live.added_since(&d.name, &[UniqueKey::of_widened(kind, *key)], seq)
+        live.added_since(&d.name, &keys, seq)
             .into_iter()
             .any(|(_, holder)| !deleted_in(generation, holder))
     })
+}
+
+/// `keys`, each widened, as unique column `declared` keys them; `None` where its type takes no key.
+pub(crate) fn keys_of_widened(
+    declared: &DeclaredScalar,
+    keys: impl IntoIterator<Item = u128>,
+) -> Option<Vec<UniqueKey>> {
+    let kind = mosaica_store::unique::KeyKind::of(declared.arrow_type)?;
+    Some(
+        keys.into_iter()
+            .map(|key| UniqueKey::of_widened(kind, key))
+            .collect(),
+    )
 }
 
 /// Every value `shard` of `generation` has flushed for column `at` among `wanted`, to `visit`,
