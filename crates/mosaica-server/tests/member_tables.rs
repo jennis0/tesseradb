@@ -166,16 +166,12 @@ async fn a_member_deleted_before_the_publication_applies_is_refused_alone() {
     let engine = &server.state.engine;
     let server = &server;
     let held = |strict: bool, key: &'static str, gone: u64| async move {
-        engine.hold_next_write_check_for_test();
         let publishing = put(
             server,
             strict,
             json!([{ "key": key, "members": { "id": [0, gone, 2] } }]),
         );
         let deleting = async {
-            while !engine.write_check_is_holding_for_test() {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
             let id = mosaica_id_of(server, gone).to_string();
             let deleted = post_changes(
                 server,
@@ -183,9 +179,8 @@ async fn a_member_deleted_before_the_publication_applies_is_refused_alone() {
             )
             .await;
             assert_eq!(deleted.status().as_u16(), 200);
-            engine.release_write_check_for_test();
         };
-        tokio::join!(publishing, deleting).0
+        while_write_held(engine, publishing, deleting).await
     };
 
     let (status, body) = held(true, "s", 3).await;

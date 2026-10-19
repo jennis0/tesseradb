@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use mosaica_engine::{AcceptError, AddressTable, Engine};
 use mosaica_lifecycle::membership::{IncomingAttachment, IncomingGrowth};
-use mosaica_lifecycle::resolve::Refusal;
+use mosaica_lifecycle::resolve::Reason;
 use mosaica_lifecycle::wal::{ChangeOp, WalRecord};
 use mosaica_lifecycle::{ExecError, IncomingArtifact};
 use mosaica_types::{EntityId, LayerSpace, MosaicaId, ShardId, Target};
@@ -113,17 +113,14 @@ fn an_identifier_routes_by_its_kind() {
         ]),
         columns: Vec::new(),
     };
-    let named = engine.name_targets(&table).unwrap();
-    let target = |row: usize| named.verdicts[row].clone().map(|named| named.target());
-    assert_eq!(target(0), Ok(Target::Artifact(space, entity)));
     assert_eq!(
-        named.verdicts[1],
-        Err(Refusal::UnknownMosaicaId { row: 1 })
-    );
-    assert_eq!(target(2), Ok(Target::Item(ShardId::ZERO, point)));
-    assert_eq!(
-        named.verdicts[3],
-        Err(Refusal::UnknownMosaicaId { row: 3 })
+        verdicts(&engine, table, true),
+        vec![
+            Ok(Target::Artifact(space, entity)),
+            Err(Reason::UnknownMosaicaId),
+            Ok(Target::Item(ShardId::ZERO, point)),
+            Err(Reason::UnknownMosaicaId),
+        ]
     );
 
     engine

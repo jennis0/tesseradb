@@ -153,14 +153,14 @@ fn every_file_is_global_or_its_partitions_or_in_its_shard() {
     let mut edit = bare(Some(engine.mosaica_id_of(x).unwrap()));
     edit.scalars[SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != SCORE_AT);
-    send(&engine, "edit", "s0", edit);
+    send(&engine, "edit", "s0", vec![edit]);
     publish_buffered(&engine);
     let stats = engine.write_executor_stats();
     for i in 0..4 {
         let mut row = bare(None);
         row.labels = Some(vec![format!("novel-{i}").into_bytes()]);
         row.position = Some((10.0 + f64::from(i), 20.0));
-        send(&engine, &format!("new-{i}"), "s0", row);
+        send(&engine, &format!("new-{i}"), "s0", vec![row]);
         publish_buffered(&engine);
     }
     tick_until(
@@ -227,7 +227,7 @@ fn a_built_or_folded_view_opens_with_its_base_row_entities_and_field_tallies() {
     let mut row = bare(None);
     row.labels = Some(vec![b"0".to_vec()]);
     row.position = Some((10.0, 20.0));
-    send(&engine, "new", "s0", row);
+    send(&engine, "new", "s0", vec![row]);
     publish_buffered(&engine);
     fold(&engine);
     drop(engine);
@@ -251,7 +251,7 @@ fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
     };
 
     let engine = engine_at(tmp.path(), &root);
-    send(&engine, "new-0", "s0", new_row(0));
+    send(&engine, "new-0", "s0", vec![new_row(0)]);
     publish_buffered(&engine);
     let flushed = shards_of(&root);
     assert_eq!(flushed.0, SHARD_SIZE_DEFAULT, "after a flush");
@@ -263,7 +263,7 @@ fn the_shard_record_and_the_shard_size_survive_a_flush_a_fold_and_a_restart() {
 
     let engine = engine_at(tmp.path(), &root);
     assert_eq!(shards_of(&root), flushed, "after a restart");
-    send(&engine, "new-1", "s0", new_row(1));
+    send(&engine, "new-1", "s0", vec![new_row(1)]);
     publish_buffered(&engine);
     assert_eq!(
         shards_of(&root),

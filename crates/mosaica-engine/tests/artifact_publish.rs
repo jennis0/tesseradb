@@ -13,7 +13,7 @@ mod common;
 use common::*;
 use mosaica_engine::{AcceptError, Engine};
 use mosaica_lifecycle::membership::{IncomingAttachment, IncomingGrowth};
-use mosaica_lifecycle::resolve::Refusal;
+use mosaica_lifecycle::resolve::Reason;
 use mosaica_lifecycle::{wal::ChangeOp, ExecError, IncomingArtifact};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
 use mosaica_types::{EntityId, MosaicaId};
@@ -163,21 +163,16 @@ fn an_artifacts_or_a_layers_identifier_names_no_item() {
         ]),
         columns: Vec::new(),
     };
-    let named = engine.name_items(&table).unwrap();
-    assert!(matches!(
-        named.verdicts[0],
-        Err(Refusal::UnknownMosaicaId { row: 0 })
-    ));
-    assert!(matches!(
-        named.verdicts[1],
-        Err(Refusal::UnknownMosaicaId { row: 1 })
-    ));
     assert_eq!(
-        named.verdicts[2],
-        Ok(mosaica_types::ItemAt::new(
-            mosaica_types::ShardId::ZERO,
-            point
-        ))
+        verdicts(&engine, table, false),
+        vec![
+            Err(Reason::UnknownMosaicaId),
+            Err(Reason::UnknownMosaicaId),
+            Ok(mosaica_types::Target::Item(
+                mosaica_types::ShardId::ZERO,
+                point
+            )),
+        ]
     );
     assert_eq!(items_of(&engine, &[layer_id, ids[0]]), vec![None, None]);
 }

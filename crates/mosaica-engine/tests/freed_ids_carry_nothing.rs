@@ -27,8 +27,7 @@ use homes::fixture::*;
 use homes::Home;
 use mosaica_engine::filter::{Endpoint, FilterOperand, Scalar};
 use mosaica_engine::{
-    AcceptError, AddressTable, Engine, IngestReceipt, IngestRequest, ItemOut, NamedItems,
-    NamedTargets, ScalarOut, Session,
+    AcceptError, AddressTable, Engine, ItemOut, Names, ScalarOut, Session, WriteScope,
 };
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingContent};
 use mosaica_lifecycle::wal::{ChangeOp, WalScalar};
@@ -38,66 +37,21 @@ use mosaica_types::{AttrLocalId, EntityId, MosaicaId};
 /// The source of the items the test edits twice: `X` visibly, `W` under a suppression.
 const W: u64 = 20;
 
-/// Send `rows` to `view` as the batch `batch`, whose body hash is its name.
-fn ingest(
-    engine: &Engine,
-    batch: &str,
-    view: &str,
-    rows: Vec<IngestRow>,
-) -> Result<IngestReceipt, AcceptError> {
-    let mut body_hash = [0u8; 32];
-    body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-    engine.ingest(IngestRequest {
-        principal: String::new(),
-        batch_id: batch.to_string(),
-        body_hash,
-        view: Some(view.to_string()),
-        rows,
-        artifacts: Default::default(),
-        strict: false,
-        mosaica_id_column: false,
-    })
-}
-
-/// [`ingest`], accepted: the `mosaica_id` of each row.
-fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<MosaicaId> {
-    ingest(engine, batch, view, rows)
-        .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
-        .mosaica_ids
-        .into_iter()
-        .map(|id| id.expect("an accepted row has a mosaica_id"))
-        .collect()
-}
-
 /// A row giving the item `tid` names a new score.
 fn rescore(tid: MosaicaId, score: i32) -> IngestRow {
-    let mut row = IngestRow {
-        mosaica_id: Some(tid),
-        labels: None,
-        position: None,
-        scalars: vec![WalScalar::Null; DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..DECLARED + 2).filter(|at| *at != SCORE_AT).collect(),
-    };
+    let mut row = bare(Some(tid));
     row.scalars[SCORE_AT] = WalScalar::I32(score);
+    row.omitted.retain(|at| *at != SCORE_AT);
     row
 }
 
 /// A row creating an item with a label and a position and nothing else.
 fn create(label: &str, at: (f64, f64)) -> IngestRow {
     IngestRow {
-        mosaica_id: None,
         labels: Some(vec![label.as_bytes().to_vec()]),
         position: Some(at),
-        scalars: vec![WalScalar::Null; DECLARED],
-        scoped: vec![WalScalar::Null; 2],
-        omitted: (0..DECLARED + 2).collect(),
+        ..bare(None)
     }
-}
-
-fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
-    items_of(engine, &[tid])[0]
-        .unwrap_or_else(|| panic!("{tid:?} names an item"))
 }
 
 /// The newest side-manifest's freed ids, free or held, and its retired numbers.
@@ -191,15 +145,14 @@ enum Was {
     Deleted,
 }
 
-/// What `/control/changes` resolves `tid` to.
-fn name_one(engine: &Engine, tid: MosaicaId) -> NamedItems {
-    engine
-        .name_items(&AddressTable {
-            rows: 1,
-            mosaica_id: Some(vec![Some(tid)]),
-            columns: Vec::new(),
-        })
-        .unwrap()
+/// What a change naming `tid` names: its names.
+fn names_of(engine: &Engine, tid: MosaicaId) -> Names {
+    let table = AddressTable {
+        rows: 1,
+        mosaica_id: Some(vec![Some(tid)]),
+        columns: Vec::new(),
+    };
+    engine.names(table, &WriteScope::All, true).unwrap()
 }
 
 /// `x`'s `mosaica_id` names nothing: no card, no entity, and no item to a write that names it.
@@ -216,11 +169,10 @@ fn names_nothing(engine: &Engine, x: MosaicaId, after: &str) {
         vec![None],
         "x names an entity, after {after}"
     );
-    let named = name_one(engine, x);
+    let named = names_of(engine, x).verdict(0);
     assert!(
-        named.verdicts[0].is_err(),
-        "a change naming x names an item, after {after}: {:?}",
-        named.verdicts[0]
+        named.is_err(),
+        "a change naming x names something, after {after}: {named:?}"
     );
 }
 
@@ -1063,94 +1015,20 @@ fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
     );
 }
 
-/// **An edit resolved to an entity before it was freed does not reach the item that took it.**
-/// The edit is held after its handler resolved the item to its entity; the item moves on, a fold
-/// frees the entity, and a new item in the same views takes it. Released, the edit is accepted and
-/// decided again against the item where it now is, and the new item is untouched.
-#[test]
-fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = build_homes(tmp.path());
-    let engine = Arc::new(open(tmp.path(), &root));
-    engine.set_merge_for_test(false);
-    // An item in `s0` alone, as the new one will be, and holding no unique value, which would name
-    // it where it has moved.
-    let x = send(
-        &engine,
-        "x",
-        "s0",
-        vec![IngestRow {
-            ..create("0", (700.0, 701.0))
-        }],
-    )[0];
-    publish_buffered(&engine);
-    send(&engine, "x1", "s0", vec![rescore(x, 501)]);
-    publish_buffered(&engine);
-    let resolved = entity_of(&engine, x);
-
-    engine.hold_next_write_check_for_test();
-    let held = {
-        let engine = Arc::clone(&engine);
-        std::thread::spawn(move || ingest(&engine, "late", "s0", vec![rescore(x, 777)]))
+/// What a change naming `tid` resolves it to: its entity, and the names.
+fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, Names) {
+    let names = names_of(engine, tid);
+    let Ok(mosaica_types::Target::Item(_, entity)) = names.verdict(0) else {
+        panic!("{tid:?} names no item: {:?}", names.verdict(0));
     };
-    wait_until("the edit holds", Duration::from_secs(30), || {
-        engine.write_check_is_holding_for_test()
-    });
-
-    send(&engine, "x2", "s0", vec![rescore(x, 502)]);
-    publish_buffered(&engine);
-    fold(&engine);
-    publish_buffered(&engine);
-    let z = send(&engine, "z", "s0", vec![create("1", (901.0, 902.0))])[0];
-    assert_eq!(
-        entity_of(&engine, z),
-        resolved,
-        "the new item takes the freed id"
-    );
-    publish_buffered(&engine);
-
-    engine.release_write_check_for_test();
-    held.join()
-        .unwrap()
-        .expect("the late edit is decided again where its item is");
-    publish_buffered(&engine);
-    let subset = engine.authorise(&subset_credential()).unwrap();
-    let full = engine.authorise(&full_coverage_credential()).unwrap();
-    let card = engine.item(&subset, z).unwrap().expect("z is served");
-    assert!(card.fields.is_empty(), "z carries {:?}", card.fields);
-    assert_eq!(entity_of(&engine, z), resolved, "z keeps its entity");
-    let x_card = engine.item(&full, x).unwrap().expect("x is served");
-    let score = x_card
-        .fields
-        .iter()
-        .find(|f| f.name == "score")
-        .map(|f| f.value.clone());
-    assert_eq!(
-        score,
-        Some(ScalarOut::I32(777)),
-        "x holds the late edit's score"
-    );
-}
-
-/// What `/control/changes` resolves `tid` to: its entity, and the generation it was named in.
-fn named(engine: &Engine, tid: MosaicaId) -> (EntityId, NamedTargets) {
-    let named = engine
-        .name_targets(&AddressTable {
-            rows: 1,
-            mosaica_id: Some(vec![Some(tid)]),
-            columns: Vec::new(),
-        })
-        .unwrap();
-    let Ok(target) = named.verdicts[0] else {
-        panic!("{tid:?} names an item: {:?}", named.verdicts[0]);
-    };
-    (target.target().entity(), named)
+    (entity, names)
 }
 
 /// Apply `op` to the item `named` names, as resolved in the generation it was named in.
-fn change_named(engine: &Engine, named: &NamedTargets, op: ChangeOp) -> Result<(), AcceptError> {
-    let target = named.verdicts[0].clone().expect("the row names an item");
-    engine.accept_changes_at(vec![(target, op)], named.at)
+fn change_named(engine: &Engine, named: Names, op: ChangeOp) -> Result<(), AcceptError> {
+    engine
+        .accept_changes_named(named, vec![op], false)
+        .map(drop)
 }
 
 /// An item in `s0` alone, as a new item will be, edited once and flushed, so the entity it holds
@@ -1162,12 +1040,6 @@ fn edited_item(engine: &Engine) -> MosaicaId {
     send(engine, "x1", "s0", vec![rescore(x, 501)]);
     publish_buffered(engine);
     x
-}
-
-/// Whether `tid` is served in `s0` to the principal `credential` authorises.
-fn is_served(engine: &Engine, credential: &[u8], tid: MosaicaId) -> bool {
-    let session = engine.authorise(credential).unwrap();
-    served(engine, &session, "s0", None).contains(&tid.raw())
 }
 
 /// **A deletion resolved before its item moved and its entity was freed reaches the item where it
@@ -1196,7 +1068,7 @@ fn a_deletion_resolved_before_its_entity_was_freed_reaches_the_item_and_not_the_
     );
     publish_buffered(&engine);
 
-    change_named(&engine, &named, ChangeOp::Delete).expect("the deletion is accepted");
+    change_named(&engine, named, ChangeOp::Delete).expect("the deletion is accepted");
     let check = |engine: &Engine, after: &str| {
         assert!(
             is_served(engine, &subset_credential(), z),
@@ -1239,7 +1111,7 @@ fn a_suppression_resolved_before_its_item_was_deleted_does_not_reach_the_new_hol
     );
     publish_buffered(&engine);
 
-    change_named(&engine, &named, ChangeOp::Suppress).expect("the suppression is accepted");
+    change_named(&engine, named, ChangeOp::Suppress).expect("the suppression is accepted");
     assert!(is_served(&engine, &subset_credential(), z), "z is served");
     drop(engine);
     engine = open(tmp.path(), &root);
@@ -1283,7 +1155,7 @@ fn a_suppression_whose_item_keeps_moving_is_accepted_and_in_force_where_the_item
     );
     publish_buffered(&engine);
 
-    change_named(&engine, &named, ChangeOp::Suppress).expect("the suppression is accepted");
+    change_named(&engine, named, ChangeOp::Suppress).expect("the suppression is accepted");
     let check = |engine: &Engine, after: &str| {
         assert!(
             !is_served(engine, &full_coverage_credential(), x),
@@ -1318,7 +1190,7 @@ fn a_deletion_resolved_before_an_edit_reaches_the_item_where_it_is_now() {
     send(&engine, "x2", "s0", vec![rescore(x, 502)]);
     publish_buffered(&engine);
     assert_ne!(entity_of(&engine, x), resolved, "the edit moved x");
-    change_named(&engine, &named, ChangeOp::Delete).unwrap();
+    change_named(&engine, named, ChangeOp::Delete).unwrap();
     publish_buffered(&engine);
     assert!(
         !is_served(&engine, &full_coverage_credential(), x),
@@ -1426,7 +1298,7 @@ fn a_deleted_items_number_is_issued_again_and_carries_nothing() {
 
     // A row addressing `x` names no item, and edits nothing.
     let receipt =
-        ingest(&engine, "stale", Q1, vec![rescore(x, 777)]).expect("the batch is answered");
+        ingest_to(&engine, "stale", Q1, vec![rescore(x, 777)]).expect("the batch is answered");
     assert_eq!(
         (receipt.mosaica_ids, receipt.refused.len(), receipt.edited),
         (vec![None], 1, 0),

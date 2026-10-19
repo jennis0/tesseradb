@@ -221,7 +221,6 @@ class Deployment:
                 json=body,
                 timeout=60,
             )
-            resp.raise_for_status()
             assert resp.status_code == 200, resp.text
             return resp.json()
 
@@ -1188,18 +1187,12 @@ def check_reach(
     inside: dict[str, bool],
     members: dict[str, set[int]] | None = None,
 ):
-    """`artifacts`, by key, published into `layer` by the operator, then each grown by the
-    deployment's writer by its key, and published again under it: a growth is accepted where
-    `inside` says the artifact is, joining a member where `members`, its members by key, do not
-    hold it, and is otherwise answered as one naming a key nobody holds; the publication is
-    accepted, or refused as the key taken."""
-    resp = requests.put(
-        f"{dep.server.control_base}/control/layers/{layer}/artifacts",
-        headers={"Authorization": f"Bearer {dep.server.operator_credential}"},
-        json={"artifacts": [{"key": key, **parts} for key, parts in artifacts.items()]},
-        timeout=60,
+    """Publish `artifacts` into `layer` as the operator; grow each as the writer and publish under
+    its key: accepted where `inside` says, otherwise answered as a key nobody holds and refused as
+    the key taken."""
+    resp = dep.server.publish_artifacts(
+        layer, artifacts=[{"key": key, **parts} for key, parts in artifacts.items()]
     )
-    resp.raise_for_status()
     assert resp.status_code == 201, resp.text
     joining = min(dep.holdings.writable())
 

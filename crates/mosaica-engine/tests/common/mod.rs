@@ -1093,7 +1093,7 @@ pub fn zero_credential() -> Vec<u8> {
 }
 
 /// The item each of `values` names in the unique field `field`, in its shard, `None` for a value
-/// naming none, asked of [`mosaica_engine::Engine::name_items`].
+/// naming none, asked of [`mosaica_engine::Engine::names`].
 pub fn unique_holders(
     engine: &mosaica_engine::Engine,
     field: &str,
@@ -1110,12 +1110,27 @@ pub fn unique_holders(
                 .collect(),
         )],
     };
-    Ok(engine
-        .name_items(&table)?
-        .verdicts
-        .into_iter()
-        .map(Result::ok)
+    let names = engine.names(table, &mosaica_engine::WriteScope::All, false)?;
+    Ok((0..values.len())
+        .map(|row| match names.verdict(row) {
+            Ok(mosaica_types::Target::Item(shard, entity)) => Some(ItemAt::new(shard, entity)),
+            _ => None,
+        })
         .collect())
+}
+
+/// What each row of `table` names, or why it names nothing, resolved for a writer holding
+/// `write-all`; `targets` lets a row name an artifact or a layer.
+pub fn verdicts(
+    engine: &mosaica_engine::Engine,
+    table: mosaica_engine::AddressTable,
+    targets: bool,
+) -> Vec<Result<mosaica_types::Target, mosaica_lifecycle::resolve::Reason>> {
+    let rows = table.rows;
+    let names = engine
+        .names(table, &mosaica_engine::WriteScope::All, targets)
+        .unwrap();
+    (0..rows).map(|row| names.verdict(row)).collect()
 }
 
 /// Every WAL member file in `dir`, by name and bytes.

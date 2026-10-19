@@ -1236,9 +1236,9 @@ async fn the_session_routes_match_the_description() {
 }
 
 /// Every control operation refuses an accepted credential without the permission it needs with
-/// `403 forbidden`, before the body is read: a write, flush and compaction need `write`, a
-/// declaration and a drop `write-all` beside it, as the description marks them, and status and
-/// the catalogue `admin`.
+/// `403 forbidden`, before the body is read, and nothing changes: a write, flush and compaction
+/// need `write`, a declaration and a drop `write-all` beside it, as the description marks them, and
+/// status and the catalogue `admin`.
 #[tokio::test]
 async fn every_control_route_needs_its_permission() {
     use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
@@ -1262,6 +1262,7 @@ async fn every_control_route_needs_its_permission() {
     let not_admin = key_for("not-admin", &everything_but(&[Permission::Admin]));
     let admin = key_for("admin", &[Permission::Admin]);
 
+    let before = meta(&f.server, &["0", "1"]).await;
     let (mut writes, mut declarations) = (0, 0);
     for (path, item) in doc["paths"].as_object().unwrap() {
         if !path.starts_with("/control/") {
@@ -1325,6 +1326,11 @@ async fn every_control_route_needs_its_permission() {
     assert_eq!(
         declarations, 9,
         "layers, attributes, shards, vocabularies, view groups and views, declared and dropped"
+    );
+    assert_eq!(
+        meta(&f.server, &["0", "1"]).await,
+        before,
+        "nothing was declared"
     );
 }
 

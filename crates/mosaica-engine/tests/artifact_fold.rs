@@ -1017,8 +1017,7 @@ fn the_content_below_a_withdrawn_one_keeps_its_value_across_a_restart() {
 
 /// **A declared member that is deleted names nothing, and is refused alone; a suppressed one is
 /// accepted.** The publication takes every other member and lists the deleted one among its
-/// refused rows. A suppression is an operator's reversible action, and a suppressed member is a
-/// live member temporarily outside every mask.
+/// refused rows.
 #[test]
 fn publication_refuses_a_deleted_member_alone_and_accepts_a_suppressed_one() {
     let fx = fixture();

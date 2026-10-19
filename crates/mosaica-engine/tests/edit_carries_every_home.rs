@@ -322,7 +322,7 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
 }
 
 fn edit(engine: &Engine, batch: &str, view: &str, row: IngestRow) {
-    let receipt = send(engine, batch, view, row);
+    let receipt = ingest_to(engine, batch, view, vec![row]).unwrap();
     assert_eq!(receipt.edited, 1, "{batch} edits the item: {receipt:?}");
 }
 

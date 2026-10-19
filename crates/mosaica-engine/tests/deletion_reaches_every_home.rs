@@ -1103,7 +1103,10 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let mut edit = every::bare(Some(tid));
     edit.scalars[every::SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != every::SCORE_AT);
-    assert_eq!(every::send(&engine, "edit", "s0", edit).edited, 1);
+    let edited = every::ingest_to(&engine, "edit", "s0", vec![edit])
+        .unwrap()
+        .edited;
+    assert_eq!(edited, 1);
     publish_buffered(&engine);
     fold(&engine);
     let moved = items_of(&engine, &[tid])[0].expect("the edited item resolves");
@@ -1236,7 +1239,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 fresh.position = Some((500.0, 500.0));
                 fresh.scalars[every::IDENT_AT] = WalScalar::U64(every::ident_of(every::X));
                 fresh.omitted.retain(|at| *at != every::IDENT_AT);
-                let receipt = every::send(&engine, "fresh", "s0", fresh);
+                let receipt = every::ingest_to(&engine, "fresh", "s0", vec![fresh]).unwrap();
                 assert_eq!(
                     receipt.created, 1,
                     "{home:?}: the deleted item's unique value is free for a new item"

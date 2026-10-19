@@ -175,8 +175,8 @@ class Holdings:
         return access.admits(labels, lambda term: term in terms)
 
     def inside(self, item: int) -> bool:
-        """Whether the writer may name the held item `item`."""
-        return self.holds(self.labels.get(item, [self.default]))
+        """Whether the writer may name `item`: one held whose labels its terms satisfy."""
+        return item in self.items and self.holds(self.labels.get(item, [self.default]))
 
     def writable(self) -> dict[int, dict[str, object]]:
         """The held items the writer may name, with their values."""
@@ -187,30 +187,20 @@ def artifact_inside(
     holdings: Holdings,
     members: Iterable[int],
     required: int | None,
-    labels: Sequence[str] | None = None,
     contents: Sequence[Iterable[int]] | None = None,
     target: bool = True,
 ) -> bool:
-    """Whether the writer may name an artifact holding `members`, on a layer its terms reach that
-    requires `required` of them visible, `None` for no requirement: where a viewer holding its
-    terms would be served it, suppression aside. Its own `labels`, where it has any, admit the
-    terms; `target`, whether the artifact it attaches to is inside them, holds; that many of its
-    members are held and inside them; and, on a layer supplying content, every item of one of
-    `contents`, its contents' generating sets, is held and inside them. A writer holding
-    `write-all` names every artifact."""
+    """Whether a reader holding the writer's terms would be served an artifact holding `members`
+    (suppression aside): `target` holds, at least `required` members are inside, and, where
+    `contents` is given, one content's generating set is wholly inside. `write-all` names every
+    artifact."""
     if holdings.terms is None:
         return True
-
-    def inside(t: int) -> bool:
-        return t in holdings.items and holdings.inside(t)
-
-    if labels and not holdings.holds(labels):
-        return False
     if not target:
         return False
-    if required is not None and sum(1 for t in set(members) if inside(t)) < required:
+    if required is not None and sum(1 for t in set(members) if holdings.inside(t)) < required:
         return False
-    return contents is None or any(all(inside(t) for t in content) for content in contents)
+    return contents is None or any(all(holdings.inside(t) for t in c) for c in contents)
 
 
 def carried(holdings: Holdings, row: Mapping[str, object]) -> set[tuple[str, object]]:
@@ -234,7 +224,7 @@ def named_by(
     items: set[int] = set()
     mosaica_id = row.get(MOSAICA_ID)
     if mosaica_id is not None:
-        if int(mosaica_id) not in holdings.items or not holdings.inside(int(mosaica_id)):
+        if not holdings.inside(int(mosaica_id)):
             return None
         items.add(int(mosaica_id))
     for value in carried(holdings, row):

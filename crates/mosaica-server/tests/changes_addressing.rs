@@ -88,21 +88,16 @@ async fn a_strict_deny_whose_item_goes_before_it_applies_applies_the_rest() {
     let match_of = |id: u64| serde_json::json!({ "mosaica_id": id.to_string() });
     let before = visible(&server, &token).await;
 
-    engine.hold_next_write_check_for_test();
     let request = serde_json::json!([
         { "op": "delete", "match": match_of(gone) },
         { "op": "suppress", "match": match_of(kept) },
     ]);
     let held = post_strict(&server, &request);
     let deleting = async {
-        while !engine.write_check_is_holding_for_test() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
         let deleted = serde_json::json!([{ "op": "delete", "match": match_of(gone) }]);
         assert_eq!(post_changes(&server, &deleted).await.status(), 200);
-        engine.release_write_check_for_test();
     };
-    let (resp, ()) = tokio::join!(held, deleting);
+    let resp = while_write_held(engine, held, deleting).await;
     assert_eq!(resp.status(), 200);
     let answer: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(answer["accepted"], 1, "{answer}");
