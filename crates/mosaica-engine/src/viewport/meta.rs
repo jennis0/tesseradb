@@ -381,12 +381,11 @@ impl EngineMeta {
             .find(|v| v.id == view)
             .map(|v| v.quantisation)
     }
-}
 
-impl EngineMeta {
-    /// These facts as a writer reaching `views` holds them: the views it reaches, and the groups
-    /// it reaches, each listing the views of it reached. `None` reaches every one.
-    pub(crate) fn within(mut self, views: Option<&crate::gate::VisibleViews>) -> EngineMeta {
+    /// These facts as a reader reaching `views` holds them: the views it reaches, and the groups
+    /// and group-scoped families it reaches, each listing the views of it reached. `None` reaches
+    /// every one.
+    pub fn within(mut self, views: Option<&crate::gate::VisibleViews>) -> EngineMeta {
         let Some(views) = views else {
             return self;
         };
@@ -395,6 +394,18 @@ impl EngineMeta {
             .retain(|group| views.contains_group(&group.name));
         for group in &mut self.groups {
             group.views.retain(|id| views.contains_view(id));
+        }
+        let reached: Vec<bool> = self
+            .scoped_scalars
+            .iter()
+            .map(|family| views.contains_group(&family.group))
+            .collect();
+        let mut kept = reached.iter();
+        self.scoped_scalars.retain(|_| kept.next() == Some(&true));
+        let mut kept = reached.iter();
+        self.scoped_views.retain(|_| kept.next() == Some(&true));
+        for family in &mut self.scoped_views {
+            family.retain(|id| views.contains_view(id));
         }
         self
     }

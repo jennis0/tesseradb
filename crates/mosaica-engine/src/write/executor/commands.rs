@@ -310,15 +310,8 @@ impl Executor {
             Command::MintVocabularyValues {
                 vocabulary,
                 values,
-                scope,
                 reply,
-            } => self.commit_vocabulary_page(
-                vocabulary,
-                values,
-                &scope,
-                reply,
-                std::convert::identity,
-            ),
+            } => self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity),
             Command::CreateViewGroup { declaration, reply } => {
                 self.commit_view_group_create(*declaration, reply)
             }
@@ -331,7 +324,7 @@ impl Executor {
                 mut artifacts,
                 mut names,
                 reply,
-            } => match self.members_now(&mut names) {
+            } => match self.members_now(&mut names, |_| false) {
                 Ok(moved) => {
                     names.fill_artifacts(&mut artifacts, Some(&moved));
                     self.commit_artifacts(layer, level, artifacts, &names, reply)
@@ -344,7 +337,7 @@ impl Executor {
                 mut joins,
                 mut names,
                 reply,
-            } => match self.members_now(&mut names) {
+            } => match self.members_now(&mut names, |at| joins[at].rank.is_some()) {
                 Ok(moved) => {
                     names.fill_growth(&mut joins, Some(&moved));
                     self.commit_growth(layer, level, joins, &names, reply)
@@ -354,53 +347,68 @@ impl Executor {
         }
     }
 
-    /// The positions of `labels`, each artifact's access labels where its record states some, that
-    /// the writer of `scope` does not satisfy on `layer`'s label gate. A layer it does not reach
-    /// refuses the write later, in the registry's words.
-    fn labels_not_held<'l>(
+    /// An item whose label the writer's terms do not satisfy is refused alone, or refuses a strict
+    /// batch. Drops from `items` each whose access labels, where `labels` reads some, the writer of
+    /// `scope` does not satisfy on `layer`'s label gate, and answers their positions. A layer the
+    /// writer does not reach refuses the write later, in the registry's words.
+    fn drop_unheld<T>(
         &self,
         scope: &WriteScope,
         layer: &str,
-        labels: impl Iterator<Item = Option<&'l [Vec<u8>]>>,
-    ) -> Vec<usize> {
-        let Some(registered) = self
-            .live
-            .registered_layer(layer)
-            .filter(|_| matches!(scope, WriteScope::Terms(_)))
-            .filter(|held| scope.reaches_layer(&held.declaration))
-        else {
-            return Vec::new();
+        items: &mut Vec<T>,
+        labels: impl Fn(&T) -> Option<&[Vec<u8>]>,
+        strict: bool,
+    ) -> std::result::Result<Vec<usize>, ExecError> {
+        if matches!(scope, WriteScope::All) {
+            return Ok(Vec::new());
+        }
+        let Some(registered) = self.live.reached_layer(layer, scope) else {
+            return Ok(Vec::new());
         };
-        labels
+        let unheld: Vec<usize> = items
+            .iter()
             .enumerate()
-            .filter(|(_, labels)| {
-                labels.is_some_and(|labels| {
+            .filter(|(_, item)| {
+                labels(item).is_some_and(|labels| {
                     !scope.admits_artifact_label(&registered.declaration, labels)
                 })
             })
             .map(|(at, _)| at)
-            .collect()
+            .collect();
+        if let (Some(&artifact), true) = (unheld.first(), strict) {
+            return Err(ExecError::LabelNotHeld { artifact });
+        }
+        let mut at = 0;
+        items.retain(|_| {
+            at += 1;
+            unheld.binary_search(&(at - 1)).is_err()
+        });
+        Ok(unheld)
+    }
+
+    /// A resolver of the names a writer of `scope` sends, against `generation`.
+    pub(super) fn resolver<'a>(
+        &'a self,
+        generation: &'a crate::Generation,
+        scope: &'a WriteScope,
+    ) -> crate::resolver::Resolver<'a> {
+        crate::resolver::Resolver::new(generation, scope, &self.deps.identity_key, &self.live)
     }
 
     /// A batch's member names brought to the generation served now ([`crate::Names::now`]): the
-    /// rows resolved again, or the refusal of a batch whose whole list names a row that names
-    /// nothing.
+    /// rows resolved again, or the refusal of a batch a refused row refuses, `ranked` saying
+    /// which artifacts are a ranked growth's.
     fn members_now(
         &self,
         names: &mut crate::resolver::MemberNames,
+        ranked: impl Fn(usize) -> bool,
     ) -> std::result::Result<Vec<crate::resolver::Moved>, ExecError> {
         let generation = self.generation.load_full();
-        let scope = names.names().scope().clone();
-        let resolver = crate::resolver::Resolver::new(
-            &generation,
-            &scope,
-            &self.deps.identity_key,
-            &self.live,
-        );
-        let moved = names.now(&resolver).map_err(|e| ExecError::Store {
-            detail: e.to_string(),
-        })?;
-        match names.refusing() {
+        let moved = names
+            .names
+            .now(&generation, &self.deps.identity_key, &self.live)
+            .map_err(store_error)?;
+        match names.refusing(ranked) {
             Some((row, reason)) => Err(ExecError::NamesRefused { row, reason }),
             None => Ok(moved),
         }
@@ -425,21 +433,16 @@ impl Executor {
     ) {
         let refused = names.names().refused();
         let scope = names.names().scope();
-        // An artifact setting a label the writer's terms do not satisfy is refused alone, or
-        // refuses a strict batch.
-        let unheld = self.labels_not_held(
+        let unheld = match self.drop_unheld(
             scope,
             &layer,
-            incoming.iter().map(|artifact| artifact.access.as_deref()),
-        );
-        if let (Some(&artifact), true) = (unheld.first(), names.strict) {
-            return reply.fail(ExecError::LabelNotHeld { artifact });
-        }
-        let mut at = 0;
-        incoming.retain(|_| {
-            at += 1;
-            !unheld.contains(&(at - 1))
-        });
+            &mut incoming,
+            |artifact| artifact.access.as_deref(),
+            names.strict,
+        ) {
+            Ok(unheld) => unheld,
+            Err(e) => return reply.fail(e),
+        };
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows: see [`Self::bring_artifacts_forward`].
         // Partitioned before any ordinal is claimed: a key the level holds is compared under the
@@ -464,11 +467,9 @@ impl Executor {
         let served = self.generation.load_full();
         let reached = scope.views(&served.bundle.manifest);
         let views = crate::write::ServedViews(&served.bundle.manifest, reached.as_ref());
-        let resolver =
-            crate::resolver::Resolver::new(&served, scope, &self.deps.identity_key, &self.live);
+        let resolver = self.resolver(&served, scope);
         let prepared = self.live.with_publication_state(|registry, store| {
-            let reach =
-                crate::resolver::ArtifactReach::new(&resolver, registry, store, &names.masks);
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store);
             registry.prepare_put(&layer, level, &incoming, store, &views, &reach)
         });
         let prepared = match prepared {
@@ -577,12 +578,7 @@ impl Executor {
             ));
         };
         let generation = self.generation.load_full();
-        let resolver = crate::resolver::Resolver::new(
-            &generation,
-            names.names().scope(),
-            &self.deps.identity_key,
-            &self.live,
-        );
+        let resolver = self.resolver(&generation, names.names().scope());
         let mut sets: std::collections::HashMap<Option<String>, mosaica_lifecycle::ShardSets> =
             std::collections::HashMap::new();
         for artifact in incoming.iter_mut() {
@@ -609,7 +605,7 @@ impl Executor {
                 let mut entities = mosaica_lifecycle::ShardSets::default();
                 for shard in generation.shards() {
                     let mut set = view_entities(shard, &views);
-                    resolver.mask(shard.id(), &mut set, &names.masks);
+                    resolver.mask(shard.id(), &mut set);
                     entities.set(shard.id(), set);
                 }
                 entities
@@ -669,34 +665,25 @@ impl Executor {
     ) {
         let refused = names.names().refused();
         let scope = names.names().scope();
-        // A row filling a label the writer's terms do not satisfy is refused alone, or refuses a
-        // strict batch.
-        let unheld = self.labels_not_held(
+        let unheld = match self.drop_unheld(
             scope,
             &layer,
-            joins
-                .iter()
-                .map(|join| Some(join.parts.access.as_slice()).filter(|labels| !labels.is_empty())),
-        );
-        if let (Some(&artifact), true) = (unheld.first(), names.strict) {
-            return reply.fail(ExecError::LabelNotHeld { artifact });
-        }
-        let mut at = 0;
-        joins.retain(|_| {
-            at += 1;
-            !unheld.contains(&(at - 1))
-        });
+            &mut joins,
+            |join| Some(join.parts.access.as_slice()).filter(|labels| !labels.is_empty()),
+            names.strict,
+        ) {
+            Ok(unheld) => unheld,
+            Err(e) => return reply.fail(e),
+        };
         let served = self.generation.load_full();
-        let resolver =
-            crate::resolver::Resolver::new(&served, scope, &self.deps.identity_key, &self.live);
+        let resolver = self.resolver(&served, scope);
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
         // The receipt is read beside the preparation, under the same lock and before the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
         let prepared = self.live.with_publication_state(|registry, store| {
-            let reach =
-                crate::resolver::ArtifactReach::new(&resolver, registry, store, &names.masks);
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store);
             let prepared = registry.prepare_grow(&layer, level, &joins, store, &reach)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
             Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
@@ -719,7 +706,12 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack((prepared.space, grown, refused, unheld));
+            reply.ack(crate::write::GrownBatch {
+                space: prepared.space,
+                grown,
+                refused,
+                unheld,
+            });
             return;
         }
 
@@ -732,7 +724,12 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack((prepared.space, grown, refused, unheld));
+        reply.ack(crate::write::GrownBatch {
+            space: prepared.space,
+            grown,
+            refused,
+            unheld,
+        });
     }
 
     /// Validate, append, sync, apply: in that order, which is the whole of the registry's
@@ -1177,11 +1174,9 @@ impl Executor {
             Ok(crate::vocabularies::Resolution::Existing) => {
                 // A redeclaration is the same vocabulary, and its values are a page against it.
                 let (name, values) = (request.name, request.values);
-                self.commit_vocabulary_page(name, values, &WriteScope::All, reply, |values| {
-                    VocabularyDeclared {
-                        existing: true,
-                        values,
-                    }
+                self.commit_vocabulary_page(name, values, reply, |values| VocabularyDeclared {
+                    existing: true,
+                    values,
                 });
                 return;
             }
@@ -1277,14 +1272,10 @@ impl Executor {
     /// A title supplied for a held key replaces the held title and is counted into the
     /// acknowledgement. The key-to-code binding does not move, so a row already carrying the code
     /// means what it meant; what changes is the name a client draws.
-    ///
-    /// A writer whose terms bound its writes is told of a `derived` vocabulary only how many of the
-    /// page's keys are bound ([`VocabularyValues::withheld`]).
     pub(super) fn commit_vocabulary_page<T>(
         &mut self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
-        scope: &WriteScope,
         reply: Reply<T>,
         answer: impl Fn(VocabularyValues) -> T,
     ) {
@@ -1309,8 +1300,6 @@ impl Executor {
                 return;
             }
         };
-        let withheld = matches!(scope, WriteScope::Terms(_))
-            && held.visibility() == mosaica_types::vocabulary::Visibility::Derived;
         let mut minter = held.clone();
         let mut codes = Vec::with_capacity(values.len());
         let mut added = 0u64;
@@ -1345,7 +1334,7 @@ impl Executor {
                 added,
                 existing,
                 titles: 0,
-                withheld,
+                withheld: false,
             }));
             return;
         }
@@ -1388,7 +1377,7 @@ impl Executor {
             added,
             existing,
             titles,
-            withheld,
+            withheld: false,
         }));
     }
 

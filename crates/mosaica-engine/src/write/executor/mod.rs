@@ -92,6 +92,13 @@ impl Drop for Executor {
     }
 }
 
+/// A store failure while a write was read or resolved, as the write's refusal.
+pub(super) fn store_error(e: impl std::fmt::Display) -> ExecError {
+    ExecError::Store {
+        detail: e.to_string(),
+    }
+}
+
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,

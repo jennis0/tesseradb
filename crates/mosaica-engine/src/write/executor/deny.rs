@@ -94,13 +94,9 @@ impl Executor {
     }
 
     /// A request's changes as they apply now, row `i` of `names` taking `ops[i]`, and the rows
-    /// that name nothing now: on this thread, which is the only one that moves an item, so
-    /// nothing moves one between this and the apply ([`crate::Names::now`]). A row whose item an
-    /// edit has moved also changes the entity it named, which the log then names beside the one
-    /// the item holds. `Err` where the names cannot be read, or where `strict` and a row was
-    /// refused as the request arrived. A row whose item has gone since names nothing, and is
-    /// answered so whatever `strict` says: a deny on an item that no longer exists has nothing to
-    /// do, and is never refused for contention.
+    /// that name nothing now. A row whose item an edit has moved also changes the entity it named,
+    /// so the log names both. `Err` where the names cannot be read, or where `strict` and a row was
+    /// refused as the request arrived; a row whose item has gone since is listed, never refused.
     pub(super) fn changes_now(
         &self,
         names: &mut crate::resolver::Names,
@@ -108,17 +104,10 @@ impl Executor {
         strict: bool,
     ) -> std::result::Result<(Vec<(Target, ChangeOp)>, crate::resolver::Refused), ExecError> {
         let generation = self.generation.load_full();
-        let scope = names.scope().clone();
-        let resolver = crate::resolver::Resolver::new(
-            &generation,
-            &scope,
-            &self.deps.identity_key,
-            &self.live,
-        );
         let arrived = names.refused();
-        let moved = names.now(&resolver).map_err(|e| ExecError::Store {
-            detail: e.to_string(),
-        })?;
+        let moved = names
+            .now(&generation, &self.deps.identity_key, &self.live)
+            .map_err(store_error)?;
         let refused = names.refused();
         let refusing = refused
             .iter()
@@ -137,16 +126,13 @@ impl Executor {
             else {
                 continue;
             };
-            let Some(held) = generation
-                .shard(shard)
-                .filter(|_| at == shard && now != old)
-            else {
+            if at != shard || now == old {
+                continue;
+            }
+            let Some(held) = generation.shard(shard) else {
                 continue;
             };
-            let numbers =
-                crate::edited::numbers_of(held, &[old, now]).map_err(|e| ExecError::Store {
-                    detail: e.to_string(),
-                })?;
+            let numbers = crate::edited::numbers_of(held, &[old, now]).map_err(store_error)?;
             if numbers[0] == numbers[1] && held.overlay.is_deleted(old) {
                 changes.push((Target::Item(shard, old), ops[row]));
             }

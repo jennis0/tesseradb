@@ -98,10 +98,9 @@ pub use config::{
     MIN_SELECTION_WIDTH,
 };
 pub use control::{
-    AddressTable, AddressValue, GrownMembership, NamedItems, NamedTargets, PublishedArtifacts,
+    AddressTable, AddressValue, GrownMembership, GrownMemberships, PublishedArtifacts,
 };
-pub use edited::{NamedTarget, Stamp};
-pub use resolver::{MemberNames, MemberSet, NamedList, Names, Refused, TermsScope, WriteScope};
+pub use resolver::{MemberNames, MemberSet, NamedList, Names, Refused, WriteScope};
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;

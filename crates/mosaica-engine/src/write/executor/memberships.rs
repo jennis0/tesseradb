@@ -329,7 +329,6 @@ impl Executor {
         &self,
         artifacts: &mosaica_lifecycle::BatchArtifacts,
         scope: &WriteScope,
-        masks: &crate::resolver::ScopeMasks,
     ) -> Result<
         (
             Vec<mosaica_lifecycle::ResolvedMembership>,
@@ -341,10 +340,9 @@ impl Executor {
             return Ok((Vec::new(), Vec::new()));
         }
         let generation = self.generation.load_full();
-        let resolver =
-            crate::resolver::Resolver::new(&generation, scope, &self.deps.identity_key, &self.live);
+        let resolver = self.resolver(&generation, scope);
         self.live.with_publication_state(|registry, store| {
-            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store, masks);
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store);
             let memberships: Vec<mosaica_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
@@ -486,16 +484,16 @@ impl Executor {
     /// carried the join.
     pub(super) fn mint_records(
         &mut self,
-        closed: &mut [mosaica_lifecycle::ClosedEntry<IngestReply, EntryScope>],
+        closed: &mut [mosaica_lifecycle::ClosedEntry<IngestReply, WriteScope>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed)? else {
             return Ok((Vec::new(), minted_per_entry));
         };
         // Each writer's scope once, however many of its batches the window holds.
-        let mut scopes: Vec<&EntryScope> = Vec::new();
+        let mut scopes: Vec<&WriteScope> = Vec::new();
         for entry in closed.iter() {
-            if !scopes.iter().any(|held| held.0.is(&entry.scope.0)) {
+            if !scopes.iter().any(|held| held.is(&entry.scope)) {
                 scopes.push(&entry.scope);
             }
         }
@@ -527,31 +525,21 @@ impl Executor {
         &self,
         wanted: &MintPlan,
         edges: &[mosaica_lifecycle::BatchEdge],
-        scopes: &[&EntryScope],
+        scopes: &[&WriteScope],
     ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest, None);
-        let resolvers: Vec<(crate::resolver::Resolver<'_>, &crate::resolver::ScopeMasks)> = scopes
+        let resolvers: Vec<crate::resolver::Resolver<'_>> = scopes
             .iter()
-            .filter(|(scope, _)| matches!(scope, WriteScope::Terms(_)))
-            .map(|(scope, masks)| {
-                let resolver = crate::resolver::Resolver::new(
-                    &served,
-                    scope,
-                    &self.deps.identity_key,
-                    &self.live,
-                );
-                (resolver, masks)
-            })
+            .filter(|scope| matches!(scope, WriteScope::Terms(..)))
+            .map(|scope| self.resolver(&served, scope))
             .collect();
         self.live.with_publication_state(|registry, store| {
             let reach = crate::resolver::ReachOfAll(
                 resolvers
                     .iter()
-                    .map(|(resolver, masks)| {
-                        crate::resolver::ArtifactReach::new(resolver, registry, store, masks)
-                    })
+                    .map(|resolver| crate::resolver::ArtifactReach::new(resolver, registry, store))
                     .collect(),
             );
             let parents = parent_of_each_child(edges)?;

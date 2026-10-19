@@ -223,13 +223,11 @@ impl Executor {
                 .iter()
                 .map(|(space, parts)| (*space, &*parts.overlay)),
         );
-        let horizon = crate::write::live::ReplayHorizon {
-            age_ms: self.deps.flush_max_age_secs.saturating_mul(1_000),
-            rows: self.deps.flush_max_items as u64,
-        };
-        let carried = self
-            .live
-            .batches_to_carry(&horizon, crate::write::live::now_ms());
+        let carried = self.live.batches_to_carry(
+            self.deps.flush_max_age_secs.saturating_mul(1_000),
+            self.deps.flush_max_items as u64,
+            crate::write::live::now_ms(),
+        );
         match self.log.wal.rotate(&snapshot, &carried, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();

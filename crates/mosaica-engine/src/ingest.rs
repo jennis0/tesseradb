@@ -136,17 +136,24 @@ pub(crate) type Prepared = FxHashMap<(usize, ItemAt), SubmittedEdit>;
 
 /// A batch resolved against one generation: the rows it writes, and what every request row
 /// became.
+#[derive(Default)]
 pub(crate) struct Planned {
+    /// The rows the batch writes: items it creates, and items it adds to its view in place.
     pub(crate) rows: Vec<UnallocatedRow>,
+    /// The items the batch moves to new entities.
     pub(crate) edits: Vec<SubmittedEdit>,
+    /// One per row of the request: the written row it became, or the item it left unchanged.
     pub(crate) slots: Vec<Slot>,
     /// The unique values the created and edited rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
-    /// The unique values the refused rows carry.
+    /// The unique values the refused rows carry; the executor resolves again where one gains a
+    /// holder.
     pub(crate) refused_keys: Vec<(u16, u128)>,
-    /// The items holding a value a row refused as `value_held` carries, which the executor
-    /// decides the batch again without where one has gone.
+    /// The items holding the values of rows refused as `value_held`; the executor resolves again
+    /// where one has gone.
     pub(crate) held_by: Vec<ItemAt>,
+    /// The artifacts the written rows name in a column named for a layer, resolved and grown when
+    /// the window closes, in the same commit as the rows.
     pub(crate) artifacts: BatchArtifacts,
     /// The request rows creating or editing an item indexed under more keys than
     /// [`mosaica_authz::MAX_KEYS_PER_ITEM`].
@@ -178,8 +185,8 @@ impl Engine {
         self.ingest_as(request, WriteScope::All)
     }
 
-    /// [`Engine::ingest`] by a writer of `scope`: a row names only the items inside it, and a row
-    /// setting a label its terms do not satisfy is refused as `label_not_held`.
+    /// [`Engine::ingest`] by a writer of `scope` ([`WriteScope`]); a row setting a label its terms
+    /// do not satisfy is refused as `label_not_held`.
     pub fn ingest_as(
         &self,
         request: IngestRequest,
@@ -212,18 +219,17 @@ impl Engine {
         drop(generation);
         #[cfg(feature = "fault-injection")]
         self.switches.hold_write_check_if_wanted();
-        // The artifacts a scoped writer's layer columns name are judged by its grant's fragments.
-        let masks = match &scope {
-            WriteScope::Terms(terms) if !request.artifacts.is_empty() => self.scope_masks(terms)?,
-            _ => Default::default(),
+        // Built only where a layer column names artifacts.
+        let scope = match request.artifacts.is_empty() {
+            true => scope,
+            false => self.scope_masks(&scope).map_err(AcceptError::Engine)?,
         };
-        let submission = IngestSubmission::of(
-            planned,
-            std::sync::Arc::new(request),
+        let submission = IngestSubmission {
+            request: std::sync::Arc::new(request),
             scope,
-            masks,
+            planned,
             unique_seq,
-        );
+        };
         let ingested = self.write.accept_ingest(submission)?;
         Ok(IngestReceipt::of(
             &ingested.receipt,
@@ -288,9 +294,7 @@ impl Resolver<'_> {
         }
 
         // A row carrying no position cannot create an item, so a batch without one creates nothing
-        // and refuses a row naming no item, as a build refuses an attribute file's. Where some rows
-        // carry positions, a row without one that would create is refused, and the batch is
-        // decided again without its values, so that a refused row sets none a later row sets.
+        // and refuses a row naming no item, as a build refuses an attribute file's.
         let creates = view.is_some() && request.rows.iter().any(|row| row.position.is_some());
         let batch = match creates {
             true => resolve::Batch::Creates,
@@ -321,10 +325,13 @@ impl Resolver<'_> {
         // left to the row's decision, which refuses the batch where the row would write it.
         let mut unheld: FxHashSet<usize> = FxHashSet::default();
         let mut default_held = true;
-        if let WriteScope::Terms(scope) = self.scope {
+        if let WriteScope::Terms(..) = self.scope {
             let satisfied = |at: usize, labels: &[Vec<u8>]| {
-                index_keys(at, labels)
-                    .map_or(true, |keys| keys.iter().any(|key| scope.satisfies_key(key)))
+                let texts: Vec<std::borrow::Cow<'_, str>> = labels
+                    .iter()
+                    .map(|label| String::from_utf8_lossy(label))
+                    .collect();
+                self.scope.admits(&texts) || index_keys(at, labels).is_err()
             };
             for (at, row) in request.rows.iter().enumerate() {
                 if row
@@ -337,7 +344,7 @@ impl Resolver<'_> {
                 }
             }
             if let Some(default) = view.and_then(|view| view.point_default.as_ref()) {
-                default_held = satisfied(0, &[default.as_bytes().to_vec()]);
+                default_held = self.scope.admits(&[default]);
             }
         }
         // A row that would create an item and cannot is refused: one carrying no position, as
@@ -349,7 +356,7 @@ impl Resolver<'_> {
             let verdicts = resolve::resolve(&identities, self, batch).map_err(unreadable)?;
             let creating = |at: usize| match &verdicts[at] {
                 resolve::Verdict::Creates => true,
-                resolve::Verdict::Refused(Refusal::ValueHeld { names, .. }) => names.is_none(),
+                resolve::Verdict::Refused(Refusal::ValueHeld { creates, .. }) => *creates,
                 _ => false,
             };
             let more: Vec<usize> = (0..request.rows.len())
@@ -627,13 +634,9 @@ impl Resolver<'_> {
             let Some(d) = declared.get(usize::from(field)) else {
                 continue;
             };
-            let Some(kind) = mosaica_store::unique::KeyKind::of(d.arrow_type) else {
+            let Some(keys) = crate::unique::keys_of_widened(d, keys) else {
                 continue;
             };
-            let keys: Vec<mosaica_store::unique::UniqueKey> = keys
-                .into_iter()
-                .map(|key| mosaica_store::unique::UniqueKey::of_widened(kind, key))
-                .collect();
             let held = crate::unique::holders(self.generation, &d.name, &keys)?;
             out.extend(held.into_iter().map(|(_, item)| item));
         }

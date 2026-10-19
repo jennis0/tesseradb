@@ -202,6 +202,9 @@ pub enum AcceptError {
     /// unique column's index, the edited-items map, or an item's label, values or rows. Nothing
     /// was submitted.
     Unreadable(String),
+    /// The engine refused as it does a read: a fragment of the writer's grant is being built by
+    /// another request, or could not be read. Nothing was submitted.
+    Engine(EngineError),
     /// The batch conflicts with what is stored: a row names two items or a `mosaica_id` nobody
     /// holds, or two rows name one item or set one value. The detail names rows by position,
     /// values as sent and items by `mosaica_id`. Nothing was submitted.
@@ -215,6 +218,7 @@ impl std::fmt::Display for AcceptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AcceptError::Submit(e) => write!(f, "{e}"),
+            AcceptError::Engine(e) => write!(f, "{e}"),
             AcceptError::Exec(e) => write!(f, "{e}"),
             AcceptError::ScalarArity {
                 index,
@@ -814,12 +818,10 @@ impl WritePath {
         &self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
-        scope: WriteScope,
     ) -> Result<VocabularyValues, AcceptError> {
         self.submit(|reply| Command::MintVocabularyValues {
             vocabulary,
             values,
-            scope,
             reply,
         })
     }
@@ -869,8 +871,8 @@ impl WritePath {
         })
     }
 
-    /// Grow the memberships of artifacts that already exist, answering one receipt per join in
-    /// the caller's order. See `Executor::commit_growth`.
+    /// Grow the memberships of artifacts that already exist, answering one receipt per join
+    /// applied, in the caller's order. See `Executor::commit_growth`.
     pub(crate) fn grow_memberships(
         &self,
         layer: String,
