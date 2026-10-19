@@ -44,6 +44,16 @@ pub enum WriteScope {
 }
 
 impl WriteScope {
+    /// Whether `other` is this scope: both [`WriteScope::All`], or the one scope built for one set
+    /// of terms.
+    pub(crate) fn is(&self, other: &WriteScope) -> bool {
+        match (self, other) {
+            (WriteScope::All, WriteScope::All) => true,
+            (WriteScope::Terms(a), WriteScope::Terms(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     /// Whether the writer holds `term`: every term, for [`WriteScope::All`].
     pub(crate) fn holds(&self, term: &str) -> bool {
         match self {
@@ -87,10 +97,30 @@ impl WriteScope {
         &self,
         declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> bool {
-        declaration
-            .visibility
-            .as_ref()
-            .is_none_or(|label| self.admits(&[label]))
+        self.reaches_gate(declaration.visibility.as_ref().map(std::slice::from_ref))
+    }
+
+    /// Whether the writer passes a layer's, view's or group's gate `visibility`, `None` being
+    /// `public`.
+    fn reaches_gate<S: AsRef<str>>(&self, visibility: Option<&[S]>) -> bool {
+        visibility.is_none_or(|labels| self.admits(labels))
+    }
+
+    /// The refusal of a declaration of `what`, gated by `visibility`, that the writer would not
+    /// reach once made, and so could neither change nor drop. It says nothing of what is held.
+    pub(crate) fn may_declare<S: AsRef<str>>(
+        &self,
+        what: &str,
+        visibility: Option<&[S]>,
+    ) -> Result<(), String> {
+        match self.reaches_gate(visibility) {
+            true => Ok(()),
+            false => Err(format!(
+                "{what} would be out of this credential's reach, since its terms do not satisfy \
+                 its visibility; declare a visibility they satisfy, or declare it as a principal \
+                 holding write-all"
+            )),
+        }
     }
 
     /// The views and groups of `manifest` the writer reaches, as a session holding its terms is
@@ -464,6 +494,21 @@ impl mosaica_lifecycle::Reach for ArtifactReach<'_> {
                     && (self.members_within(layer, level, ordinal) as f64) >= p * (declared as f64)
             }
         }
+    }
+}
+
+/// What every one of several writers may name: no reach at all is every layer and artifact.
+pub(crate) struct ReachOfAll<'r>(pub(crate) Vec<ArtifactReach<'r>>);
+
+impl mosaica_lifecycle::Reach for ReachOfAll<'_> {
+    fn layer(&self, layer: &str) -> bool {
+        self.0.iter().all(|reach| reach.layer(layer))
+    }
+
+    fn artifact(&self, layer: &str, level: u32, ordinal: u32) -> bool {
+        self.0
+            .iter()
+            .all(|reach| reach.artifact(layer, level, ordinal))
     }
 }
 

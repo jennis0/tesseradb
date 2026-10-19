@@ -305,6 +305,99 @@ async fn two_principals_sending_one_batch_id_each_write_and_each_replay_their_ow
     );
 }
 
+/// Post one ingest batch as the operator, answered once its rows are served: each such answer
+/// follows a flush, which rotates the log.
+async fn post_visible(server: &TestServer, batch_id: &str, body: Vec<u8>) -> serde_json::Value {
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-mosaica-batch-id", batch_id)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    assert_eq!(status, 200, "{answer}");
+    answer
+}
+
+/// How many items the service holds, by the entity ids it has issued.
+async fn issued(server: &TestServer) -> Option<u64> {
+    control_status(server).await["entity_id_high_water"].as_u64()
+}
+
+/// **A batch retried after the flush its answer waited for is replayed, not applied again**: the
+/// flush rotates the log past the batch's record, and the retry is answered the first acceptance's
+/// `mosaica_ids` with nothing written, before and after further flushes, and after a restart.
+#[tokio::test]
+async fn a_batch_retried_after_its_answer_waited_for_a_flush_is_replayed() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
+    let first = post_visible(&server, "visible", body.clone()).await;
+    assert_eq!(first["created"], 2, "{first}");
+    let ids = ingested_ids(&first);
+    let replayed = |again: &serde_json::Value| {
+        assert_eq!(again["replayed"], true, "{again}");
+        assert_eq!(again["created"], 0, "{again}");
+        assert_eq!(ingested_ids(again), ids);
+    };
+
+    replayed(&post_visible(&server, "visible", body.clone()).await);
+    post_visible(&server, "another", build_ingest_batch_labels(&[&["0"]])).await;
+    replayed(&post_visible(&server, "visible", body.clone()).await);
+    assert_eq!(issued(&server).await, Some(N_ITEMS + 3));
+
+    let server = restart(server, &tmp).await;
+    replayed(&post_visible(&server, "visible", body.clone()).await);
+    assert_eq!(issued(&server).await, Some(N_ITEMS + 3));
+}
+
+/// **A batch is remembered for the flush tick after it was accepted, or until `flush_max_items`
+/// rows of later batches**, whichever ends first; a retry after that is a new batch.
+#[tokio::test]
+async fn a_batch_retried_past_its_horizon_is_a_new_batch() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture(tmp.path(), N_ITEMS);
+    let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
+
+    // Past the tick.
+    let ticking = EngineConfig {
+        flush_max_age_secs: 1,
+        ..default_engine_config()
+    };
+    let server = open_with(&tmp, ticking).await;
+    post_visible(&server, "aged", body.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    post_visible(&server, "later", build_ingest_batch_labels(&[&["0"]])).await;
+    let again = post_visible(&server, "aged", body.clone()).await;
+    assert_eq!(
+        (again.get("replayed"), &again["created"]),
+        (None, &serde_json::json!(2)),
+        "{again}"
+    );
+    server.shutdown().await;
+
+    // Past the rows.
+    let bounded = EngineConfig {
+        flush_max_items: 3,
+        ..default_engine_config()
+    };
+    let server = open_with(&tmp, bounded).await;
+    post_visible(&server, "early", body.clone()).await;
+    let later = build_ingest_batch_labels(&[&["0"], &["0"], &["0"]]);
+    post_visible(&server, "three", later).await;
+    let again = post_visible(&server, "early", body.clone()).await;
+    assert_eq!(
+        (again.get("replayed"), &again["created"]),
+        (None, &serde_json::json!(2)),
+        "{again}"
+    );
+}
+
 /// A second row carrying the `id` of an item ingested at the running service edits that item: it
 /// keeps its `mosaica_id` and takes one new entity id.
 #[tokio::test]

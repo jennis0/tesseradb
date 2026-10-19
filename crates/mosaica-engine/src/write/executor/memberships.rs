@@ -26,8 +26,8 @@ pub(super) struct HeldMembers<'a> {
 
 /// The items of a window's join rows and of the items it places in artifacts in place, by shard:
 /// the only rows that can restate a membership.
-pub(super) fn joining_items<W>(
-    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+pub(super) fn joining_items<W, S>(
+    closed: &[mosaica_lifecycle::ClosedEntry<W, S>],
 ) -> mosaica_lifecycle::ShardSets {
     mosaica_lifecycle::ShardSets::of_items(closed.iter().flat_map(|entry| {
         let rows = entry.rows();
@@ -125,8 +125,8 @@ pub(super) fn grouped_growth<'a>(
 /// counted for the first entry naming the pair. A key the close mints holds nothing yet. `store`
 /// is read only where a row can restate a membership, which `restating` says; each item is asked
 /// of its own shard's slice.
-pub(super) fn joined_per_entry<W>(
-    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+pub(super) fn joined_per_entry<W, S>(
+    closed: &[mosaica_lifecycle::ClosedEntry<W, S>],
     store: Option<&mosaica_lifecycle::ArtifactStore>,
 ) -> Vec<u64> {
     use std::collections::BTreeMap;
@@ -219,8 +219,8 @@ pub(super) fn grouped_mints<'a>(
 
 /// The growth records one closed window owes, in the order to append them. The entities are
 /// `items[row]`, the assignment this window just made.
-pub(super) fn growth_records<W>(
-    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+pub(super) fn growth_records<W, S>(
+    closed: &[mosaica_lifecycle::ClosedEntry<W, S>],
     held: Option<HeldMembers<'_>>,
 ) -> Result<Vec<(WalRecord, usize)>, String> {
     grouped_growth(
@@ -233,8 +233,8 @@ pub(super) fn growth_records<W>(
 /// What a closed window is about to mint, and the edges its close has to settle. `None` where it
 /// has neither. Minting happens at the close, not admission, so [`Executor::prepare_mints`]
 /// re-resolves the plan against the store in case a publication landed since.
-pub(super) fn mint_plan<W>(
-    closed: &[mosaica_lifecycle::ClosedEntry<W>],
+pub(super) fn mint_plan<W, S>(
+    closed: &[mosaica_lifecycle::ClosedEntry<W, S>],
 ) -> Result<Option<(MintPlan, Vec<mosaica_lifecycle::BatchEdge>)>, String> {
     let wanted = grouped_mints(
         closed.iter().map(|entry| entry.memberships.as_slice()),
@@ -486,17 +486,24 @@ impl Executor {
     /// carried the join.
     pub(super) fn mint_records(
         &mut self,
-        closed: &mut [mosaica_lifecycle::ClosedEntry<IngestReply>],
+        closed: &mut [mosaica_lifecycle::ClosedEntry<IngestReply, EntryScope>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed)? else {
             return Ok((Vec::new(), minted_per_entry));
         };
+        // Each writer's scope once, however many of its batches the window holds.
+        let mut scopes: Vec<&EntryScope> = Vec::new();
+        for entry in closed.iter() {
+            if !scopes.iter().any(|held| held.0.is(&entry.scope.0)) {
+                scopes.push(&entry.scope);
+            }
+        }
         let PreparedMints {
             records,
             resolved,
             minted,
-        } = self.prepare_mints(&wanted, &edges)?;
+        } = self.prepare_mints(&wanted, &edges, &scopes)?;
 
         for entry in closed.iter_mut() {
             settle_resolved_ordinals(&mut entry.memberships, &resolved);
@@ -512,15 +519,41 @@ impl Executor {
     /// Prepare one set of mints: the publications that create the artifacts a caller's keys named
     /// and no artifact holds, one implementation shared by both write doors. The records come back
     /// in the order to append: ascending level, coarse first.
+    ///
+    /// The keys and parents are resolved as every writer of `scopes` may name them, by the rule
+    /// admission resolved them by: a key an artifact outside one of their reaches has come to hold
+    /// since refuses the window, whose batches then close one at a time.
     pub(super) fn prepare_mints(
         &self,
         wanted: &MintPlan,
         edges: &[mosaica_lifecycle::BatchEdge],
+        scopes: &[&EntryScope],
     ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
         let views = crate::write::ServedViews(&served.bundle.manifest, None);
+        let resolvers: Vec<(crate::resolver::Resolver<'_>, &crate::resolver::ScopeMasks)> = scopes
+            .iter()
+            .filter(|(scope, _)| matches!(scope, WriteScope::Terms(_)))
+            .map(|(scope, masks)| {
+                let resolver = crate::resolver::Resolver::new(
+                    &served,
+                    scope,
+                    &self.deps.identity_key,
+                    &self.live,
+                );
+                (resolver, masks)
+            })
+            .collect();
         self.live.with_publication_state(|registry, store| {
+            let reach = crate::resolver::ReachOfAll(
+                resolvers
+                    .iter()
+                    .map(|(resolver, masks)| {
+                        crate::resolver::ArtifactReach::new(resolver, registry, store, masks)
+                    })
+                    .collect(),
+            );
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
             let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
@@ -529,7 +562,10 @@ impl Executor {
             let mut to_mint: BTreeMap<(&str, u32, Option<&str>), Minting<'_>> = BTreeMap::new();
             for (at, (_, members)) in wanted {
                 let (layer, level, view, key) = at;
-                match store.ordinal_of_key(layer, *level, view.as_deref(), key) {
+                match registry
+                    .resolve_or_mint(layer, *level, view.as_deref(), key, store, &reach)
+                    .map_err(|e| e.to_string())?
+                {
                     Some(ordinal) => {
                         resolved.insert(at.clone(), ordinal);
                     }
@@ -572,15 +608,7 @@ impl Executor {
                     })
                 };
                 let record = registry
-                    .prepare_publish(
-                        layer,
-                        *level,
-                        &incoming,
-                        store,
-                        &pending,
-                        &views,
-                        &mosaica_lifecycle::Everything,
-                    )
+                    .prepare_publish(layer, *level, &incoming, store, &pending, &views, &reach)
                     .map_err(|e| e.to_string())?;
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
                     unreachable!("prepare_publish returns an ArtifactPublish");
@@ -645,7 +673,7 @@ impl Executor {
                         store,
                         &pending,
                         window_edges.entry(edge.layer.as_str()).or_default(),
-                        &mosaica_lifecycle::Everything,
+                        &reach,
                     )
                     .map_err(|e| e.to_string())?
                 {

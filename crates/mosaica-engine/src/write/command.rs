@@ -111,6 +111,10 @@ impl<T> Pending<T> {
 /// the executor resolved it again.
 pub(crate) type IngestReply = Reply<Result<Ingested, AcceptError>>;
 
+/// What the writer of a batch may name, and its grant's fragments: what the batch's window entry
+/// carries to the close, which resolves the keys the batch names under it.
+pub(crate) type EntryScope = (crate::resolver::WriteScope, crate::resolver::ScopeMasks);
+
 /// What a growth answers: the layer's space, one receipt per join applied, the member rows
 /// refused, and the joins refused for an access label the writer's terms do not satisfy.
 pub(crate) type GrownBatch = (

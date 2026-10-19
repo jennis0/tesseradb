@@ -275,6 +275,11 @@ impl Executor {
                 scope,
                 reply,
             } => {
+                let what = format!("layer '{}'", declaration.name);
+                let gate = declaration.visibility.as_ref().map(std::slice::from_ref);
+                if let Err(detail) = scope.may_declare(&what, gate) {
+                    return reply.fail(ExecError::LayerRefused { detail });
+                }
                 // Named as the generation the declaration applies in holds its views, and as the
                 // writer reaches them.
                 let generation = self.generation.load_full();
@@ -849,6 +854,10 @@ impl Executor {
         scope: &WriteScope,
         reply: Reply<()>,
     ) {
+        let what = format!("view '{key}' of '{group}'");
+        if let Err(detail) = scope.may_declare(&what, visibility.as_deref()) {
+            return reply.fail(ExecError::ViewRefused { detail });
+        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let reached = scope.views(&generation.bundle.manifest);
@@ -1092,6 +1101,10 @@ impl Executor {
         scope: &WriteScope,
         reply: Reply<bool>,
     ) {
+        let what = format!("view group '{}'", declaration.name);
+        if let Err(detail) = scope.may_declare(&what, declaration.visibility.as_deref()) {
+            return reply.fail(ExecError::ViewRefused { detail });
+        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
@@ -1143,6 +1156,10 @@ impl Executor {
         scope: &WriteScope,
         reply: Reply<bool>,
     ) {
+        let what = format!("view '{}'", declaration.name);
+        if let Err(detail) = scope.may_declare(&what, declaration.visibility.as_deref()) {
+            return reply.fail(ExecError::ViewRefused { detail });
+        }
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;

@@ -25,9 +25,9 @@ pub(super) enum BatchState {
 impl BatchState {
     /// Look `principal`'s `batch_id` up: the durable index, then the open window, then unknown. The
     /// two sets are disjoint: a batch enters `accepted_batches` only at `close_window`.
-    pub(super) fn of<W>(
+    pub(super) fn of<W, S>(
         live: &LiveState,
-        window: &CommitWindow<W>,
+        window: &CommitWindow<W, S>,
         principal: &str,
         batch_id: &str,
     ) -> BatchState {
@@ -48,7 +48,7 @@ impl BatchState {
 /// [`ClosingWindow::fail_wal`], [`ClosingWindow::ack`] and [`ClosingWindow::reopen`] are its four
 /// exits.
 pub(super) struct ClosingWindow {
-    closed: Vec<ClosedEntry<IngestReply>>,
+    closed: Vec<ClosedEntry<IngestReply, EntryScope>>,
     /// Entries, not rows: what the service estimate is per.
     entries: u64,
     /// When the window opened, so the service covers the wait as well as the close.
@@ -140,7 +140,7 @@ pub(super) struct OpenedShards {
 
 impl ClosingWindow {
     pub(super) fn new(
-        closed: Vec<ClosedEntry<IngestReply>>,
+        closed: Vec<ClosedEntry<IngestReply, EntryScope>>,
         placing: Placing,
         entries: u64,
         started: std::time::Instant,
@@ -153,11 +153,11 @@ impl ClosingWindow {
         }
     }
 
-    pub(super) fn entries(&self) -> &[ClosedEntry<IngestReply>] {
+    pub(super) fn entries(&self) -> &[ClosedEntry<IngestReply, EntryScope>] {
         &self.closed
     }
 
-    pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<IngestReply>] {
+    pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<IngestReply, EntryScope>] {
         &mut self.closed
     }
 
@@ -170,7 +170,7 @@ impl ClosingWindow {
 
     /// Before the append: nothing was appended or applied. Every id the window took is given back,
     /// and its entries come back as they were admitted.
-    pub(super) fn reopen(self) -> Vec<WindowEntry<IngestReply>> {
+    pub(super) fn reopen(self) -> Vec<WindowEntry<IngestReply, EntryScope>> {
         drop(self.placing);
         self.closed
             .into_iter()
@@ -368,7 +368,8 @@ impl Executor {
         let max_rows = self.health.commit_window_max_rows();
         #[cfg(feature = "fault-injection")]
         self.deps.switches.hold_work_pass_if_paused();
-        let mut window: CommitWindow<IngestReply> = CommitWindow::new(self.next_window_seq());
+        let mut window: CommitWindow<IngestReply, EntryScope> =
+            CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
 
         loop {
@@ -458,8 +459,8 @@ impl Executor {
     /// replacement would charge its predecessor's whole service to itself.
     pub(super) fn close_and_reopen(
         &mut self,
-        window: CommitWindow<IngestReply>,
-    ) -> CommitWindow<IngestReply> {
+        window: CommitWindow<IngestReply, EntryScope>,
+    ) -> CommitWindow<IngestReply, EntryScope> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -474,10 +475,10 @@ impl Executor {
     /// be admitted into a fresh window twice.
     pub(super) fn admit_ingest(
         &mut self,
-        mut window: CommitWindow<IngestReply>,
+        mut window: CommitWindow<IngestReply, EntryScope>,
         mut submission: IngestSubmission,
         reply: IngestReply,
-    ) -> (CommitWindow<IngestReply>, Admission) {
+    ) -> (CommitWindow<IngestReply, EntryScope>, Admission) {
         let request = Arc::clone(&submission.request);
         match BatchState::of(&self.live, &window, &request.principal, &request.batch_id) {
             BatchState::Accepted {
@@ -551,7 +552,7 @@ impl Executor {
                     submission.edits.iter().map(|e| e.edit.shard),
                 );
                 let live = Arc::clone(&self.live);
-                let room = |window: &CommitWindow<IngestReply>| {
+                let room = |window: &CommitWindow<IngestReply, EntryScope>| {
                     let mut total = window.wanted().clone();
                     total.add(wanted.clone());
                     live.window_room(&total.edits, total.items)
@@ -725,7 +726,7 @@ impl Executor {
         &mut self,
         submission: IngestSubmission,
         reply: IngestReply,
-    ) -> Option<WindowEntry<IngestReply>> {
+    ) -> Option<WindowEntry<IngestReply, EntryScope>> {
         let IngestSubmission {
             request,
             scope,
@@ -755,6 +756,7 @@ impl Executor {
             body_hash: request.body_hash,
             memberships,
             edges,
+            scope: (scope, masks),
             waiters: vec![reply],
         })
     }
@@ -875,7 +877,7 @@ impl Executor {
     /// artifact publications and the growths against them, in that order, since a mint must be
     /// durable before the rows it colours and a publication must exist before anything addresses
     /// it. A failure applies nothing, and gives every id the window took back to its shard.
-    pub(super) fn close_window(&mut self, window: CommitWindow<IngestReply>) {
+    pub(super) fn close_window(&mut self, window: CommitWindow<IngestReply, EntryScope>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
         let mut mark = StageMark::now();
@@ -1127,7 +1129,7 @@ impl Executor {
     /// Index every entry of a committed window by its principal and batch id, after the swap.
     pub(super) fn record_accepted_batches(
         &mut self,
-        closed: &[ClosedEntry<IngestReply>],
+        closed: &[ClosedEntry<IngestReply, EntryScope>],
         positions: &[u64],
     ) {
         let m = StageMark::now();
@@ -1246,7 +1248,7 @@ impl Executor {
     /// the new rows flush, and nobody who loses access by the edit keeps it past the ack.
     pub(super) fn apply_window(
         &self,
-        closed: &mut [ClosedEntry<IngestReply>],
+        closed: &mut [ClosedEntry<IngestReply, EntryScope>],
         positions: &[u64],
         vocabularies: Vocabularies,
         mints: &[(String, String, u32)],

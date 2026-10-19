@@ -1765,7 +1765,10 @@ paths:
         batch under the same id is another batch, written and answered on its own. The same bytes
         sent again by the same caller under the same id answer `200` with `replayed: true`, the
         first acceptance's `mosaica_ids` and `refused`, and change nothing, whatever `strict` says;
-        different bytes under an id the caller has used are `409`.
+        different bytes under an id the caller has used are `409`. A batch id is remembered for
+        `ingest.flush_max_age_secs` after its acceptance, or until `ingest.flush_max_items` rows of
+        later batches have been accepted, whichever ends first, however many flushes run meanwhile
+        and across a restart; a retry after that is a new batch.
 
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
         `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
@@ -2343,7 +2346,8 @@ paths:
         its terms reaches. A name a view or a group out of its reach holds is `409`, the name taken,
         whatever the declaration says: it is never answered `200` and the detail never compares the
         declarations. A `members` group out of its reach is answered as one
-        not declared.
+        not declared. A `visibility` its terms do not satisfy is `422`, whatever holds the name,
+        since it could neither change nor drop the group.
       security:
         - controlCredential: []
       parameters:
@@ -2404,6 +2408,7 @@ paths:
             - `members` naming a group that takes its own views from another, or with `metadata`
             - A metadata name declared twice, or of type `category`
             - A `visibility` label or point default that is not an access expression
+            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
           content:
             application/json:
               schema:
@@ -2432,7 +2437,8 @@ paths:
         A caller holding `write` and not `write-all` reaches the views and groups a session holding
         its terms reaches. A name a view or a group out of its reach holds is `409`, the name taken,
         whatever the declaration says: it is never answered `200` and the detail never compares the
-        declarations.
+        declarations. A `visibility` its terms do not satisfy is `422`, whatever holds the name,
+        since it could neither change nor drop the view.
       security:
         - controlCredential: []
       parameters:
@@ -2485,6 +2491,7 @@ paths:
             - An unknown projection
             - An extent that is not finite or has a maximum below its minimum
             - A `visibility` label or point default that is not an access expression
+            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
           content:
             application/json:
               schema:
@@ -2511,7 +2518,8 @@ paths:
 
         A key held by a live view is `409`. A dropped key may be created again, and the new view
         starts with none of the old one's rows or artifacts. To a caller holding `write` and not
-        `write-all`, a group out of its terms' reach is one not declared.
+        `write-all`, a group out of its terms' reach is one not declared, and a `visibility` its
+        terms do not satisfy is `422`, since it could neither change nor drop the view.
       security:
         - controlCredential: []
       parameters:
@@ -2560,6 +2568,7 @@ paths:
             - A metadata value that is null, an array or an object, or that does not match the type the group declares
             - A metadata name the group does not declare, or one it declares left out
             - A `visibility` label that is not an access expression
+            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
             - A group that takes its views from another
           content:
             application/json:
@@ -2586,7 +2595,9 @@ paths:
         `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
         nothing afterwards: a later row carrying one of its unique values creates a new item, and
         one carrying its `mosaica_id` is refused. To a caller holding `write` and not `write-all`, a
-        view out of its terms' reach is one not created.
+        view out of its terms' reach is one not created. A view it reaches is dropped whole: the
+        items the drop deletes and `deleted` counts include those outside its terms, and so do the
+        artifacts.
       security:
         - controlCredential: []
       parameters:
@@ -2640,6 +2651,8 @@ paths:
 
         A name already registered is `422`, including a second request with the same declaration.
         A dropped layer's name may be registered again. A refusal means the layer does not exist.
+        A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy is
+        `422`, since it could neither change nor drop the layer.
       security:
         - controlCredential: []
       parameters:
@@ -2688,6 +2701,7 @@ paths:
             - An unknown computed property
             - A repeated view, level title or content name
             - A label that is not an access expression
+            - A `visibility` the terms of a caller holding `write` and not `write-all` do not satisfy
             - A `spatial` layer over both projected and unprojected views
           content:
             application/json:
@@ -2709,7 +2723,8 @@ paths:
         The layer and its artifacts stop being served at once. Its name may be registered again, as
         a new layer: none of the dropped layer's `mosaica_id`s names the new layer or its artifacts.
         To a caller holding `write` and not `write-all`, a layer whose `visibility` its terms do not
-        satisfy is one not registered.
+        satisfy is one not registered. A layer it reaches is dropped whole, artifacts outside its
+        terms included.
       security:
         - controlCredential: []
       parameters:
@@ -3894,7 +3909,7 @@ components:
       name: x-mosaica-batch-id
       in: header
       required: true
-      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. Missing, or not UTF-8, is `422`.
+      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. The id is remembered for `ingest.flush_max_age_secs` after the batch is accepted, or until `ingest.flush_max_items` rows of later batches are, whichever ends first; a retry after that is a new batch. Missing, or not UTF-8, is `422`.
       schema:
         type: string
     WriteView:

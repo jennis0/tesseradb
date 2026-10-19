@@ -484,6 +484,27 @@ pub enum WalRecord {
     ShardOpen { shard: ShardId },
     /// A point shard sealed: it takes no new item at its high water again. Replay seals it.
     ShardSeal { shard: ShardId },
+    /// The accepted batches a rotation carries past the members it reclaims, whose records those
+    /// members held, so that a retry inside the replay horizon is answered as it was after a
+    /// restart too. Written beside the rotation's [`WalRecord::OverlaySnapshot`], where it has
+    /// any batch to carry.
+    BatchesCarried { batches: Vec<CarriedBatch> },
+}
+
+/// One accepted batch a [`WalRecord::BatchesCarried`] carries: what its [`WalRecord::IngestBatch`]
+/// said of the request, where that record lay, and when the batch was accepted.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedBatch {
+    pub principal: String,
+    pub batch_id: String,
+    pub body_hash: [u8; 32],
+    pub receipt: Vec<RowReceipt>,
+    /// The position of the batch's own record, which a reclaimed member held.
+    pub wal_pos: u64,
+    /// When the batch was accepted, in milliseconds since the Unix epoch.
+    pub accepted_ms: u64,
 }
 
 /// One index run a [`WalRecord::UniqueDeclare`] adopts.
@@ -558,7 +579,8 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         | WalRecord::UniqueDeclare { .. }
         | WalRecord::ShardsDeclare { .. }
         | WalRecord::ShardOpen { .. }
-        | WalRecord::ShardSeal { .. } => None,
+        | WalRecord::ShardSeal { .. }
+        | WalRecord::BatchesCarried { .. } => None,
     }
 }
 
@@ -570,6 +592,9 @@ pub struct BatchIdentity<'a> {
     pub batch_id: &'a str,
     pub body_hash: [u8; 32],
     pub receipt: &'a [RowReceipt],
+    /// Where the batch's own record lay and when the batch was accepted, for a batch a rotation
+    /// carried; `None` for the batch's own record, which lies where it is read.
+    pub carried: Option<(u64, u64)>,
 }
 
 /// What an accepted ingest batch did with one of its rows, and the `mosaica_id` of the item the
@@ -621,8 +646,8 @@ pub struct WalEdit {
     pub rows: Vec<WalRow>,
 }
 
-/// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
-/// index is built by**, at restart and at every accept.
+/// The batches a record was written for or carries — **the one rule the accepted-batch index is
+/// built by**, at restart and at every accept.
 ///
 /// The index that answers `x-mosaica-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
@@ -631,7 +656,7 @@ pub struct WalEdit {
 /// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
 /// decision taken here, and the compiler asks for it rather than a default answering "carries no
 /// batch" for something that does.
-pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
+pub fn batch_identities(record: &WalRecord) -> Vec<BatchIdentity<'_>> {
     match record {
         WalRecord::IngestBatch {
             principal,
@@ -639,12 +664,23 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
             body_hash,
             receipt,
             ..
-        } => Some(BatchIdentity {
+        } => vec![BatchIdentity {
             principal,
             batch_id,
             body_hash: *body_hash,
             receipt,
-        }),
+            carried: None,
+        }],
+        WalRecord::BatchesCarried { batches } => batches
+            .iter()
+            .map(|batch| BatchIdentity {
+                principal: &batch.principal,
+                batch_id: &batch.batch_id,
+                body_hash: batch.body_hash,
+                receipt: &batch.receipt,
+                carried: Some((batch.wal_pos, batch.accepted_ms)),
+            })
+            .collect(),
         // Listed rather than caught by a wildcard, for this function's whole reason.
         WalRecord::VocabularyMint { .. }
         | WalRecord::OverlaySnapshot { .. }
@@ -663,7 +699,7 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
         | WalRecord::ArtifactFill { .. }
         | WalRecord::ShardsDeclare { .. }
         | WalRecord::ShardOpen { .. }
-        | WalRecord::ShardSeal { .. } => None,
+        | WalRecord::ShardSeal { .. } => Vec::new(),
     }
 }
 
@@ -1121,7 +1157,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // its batch id. A log at 39 is refused.
 // **41**: a receipt's refused row may give `value_held` or `label_not_held` as its reason. A log
 // at 40 is refused.
-const WAL_VERSION: u16 = 41;
+// **42**: the variant table gained `BatchesCarried`, the accepted batches a rotation carries past
+// the members it reclaims. A log at 41 is refused.
+const WAL_VERSION: u16 = 42;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1924,7 +1962,8 @@ impl Wal {
     /// ```text
     /// fsync the active member                     ← its durable length is the next base position
     /// create member n+1, headered and fsynced
-    /// append the overlay snapshot, fsynced        ← §7.2, and before any deletion
+    /// append the overlay snapshot and the         ← §7.2, and before any deletion
+    ///   batches carried, fsynced
     /// delete members wholly below reclaim_below,  ← oldest first
     ///   oldest first
     /// ```
@@ -1947,12 +1986,15 @@ impl Wal {
     /// An **empty** overlay still writes the record. The alternative is a conditional whose only
     /// benefit is a few bytes, and whose cost is that the snapshot's absence stops meaning
     /// "nothing was denied" and starts meaning either that or "no rotation happened here".
+    /// `carried`, the accepted batches still answered as replays, is written only where it holds
+    /// one.
     ///
     /// A poisoned handle rotates nothing — nothing above the last durable offset may be built on,
     /// and the caller has a repair to attempt first.
     pub fn rotate(
         &mut self,
         snapshot: &[OverlaySnapshotEntry],
+        carried: &[CarriedBatch],
         reclaim_below: u64,
     ) -> Result<Vec<u64>> {
         if self.state != WalState::Healthy {
@@ -1975,6 +2017,11 @@ impl Wal {
         self.append(&WalRecord::OverlaySnapshot {
             entries: snapshot.to_vec(),
         })?;
+        if !carried.is_empty() {
+            self.append(&WalRecord::BatchesCarried {
+                batches: carried.to_vec(),
+            })?;
+        }
         self.fsync()?;
 
         let mut deleted = Vec::new();
@@ -2390,19 +2437,20 @@ impl ExecutorWal {
         self.wal.retained_from()
     }
 
-    /// Seal the active member, carry `snapshot` forward and reclaim below `reclaim_below` — see
-    /// [`Wal::rotate`]. Not metered: a rotation makes nothing newly durable that an `fsync` did not
-    /// already count.
+    /// Seal the active member, carry `snapshot` and `carried` forward and reclaim below
+    /// `reclaim_below` — see [`Wal::rotate`]. Not metered: a rotation makes nothing newly durable
+    /// that an `fsync` did not already count.
     pub fn rotate(
         &mut self,
         snapshot: &[OverlaySnapshotEntry],
+        carried: &[CarriedBatch],
         reclaim_below: u64,
     ) -> Result<Vec<u64>> {
         #[cfg(feature = "fault-injection")]
         if self.injected.is_some() {
             return Err(WalError::Poisoned);
         }
-        self.wal.rotate(snapshot, reclaim_below)
+        self.wal.rotate(snapshot, carried, reclaim_below)
     }
 
     /// Every surviving member's number — see [`Wal::members`].

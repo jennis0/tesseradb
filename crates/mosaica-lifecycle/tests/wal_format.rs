@@ -176,13 +176,14 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// ranked before it had been withdrawn, and a 38 fill takes the next record's bytes for its set.
 /// **39** is the version before an ingest batch carried the principal that sent it: a 39 batch
 /// read at 40 takes its batch id for the principal and its body hash's leading bytes for the id.
-/// **40** is the version before a receipt could give `value_held` or `label_not_held`.
+/// **40** is the version before a receipt could give `value_held` or `label_not_held`. **41** is
+/// the version before the variant table gained `BatchesCarried`.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
     for (index, version) in [
         15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-        37, 38, 39, 40,
+        37, 38, 39, 40, 41,
     ]
         .into_iter()
         .enumerate()
@@ -200,7 +201,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(41, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(42, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -317,7 +318,7 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
-        "4d57414c29000100000000000000000000000000000089000000010170016200000000000000000000000000\
+        "4d57414c2a000100000000000000000000000000000089000000010170016200000000000000000000000000\
          0000000000000000000000000000000000000001000301760000000000000000e03f000000000000d03f0e00\
          0101ab02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff0109\
          0000c03f0a00000000000002c00b8080f281838985060c016b0d0101010000b20d3123"

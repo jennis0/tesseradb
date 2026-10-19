@@ -49,7 +49,7 @@ fn wal_with_files(base: &Path, files: u64) -> (Wal, Vec<u64>) {
         if i + 1 < files {
             ends.push(wal.position());
             // `reclaim_below = 0`: rotate, keep everything.
-            assert!(wal.rotate(&[], 0).unwrap().is_empty());
+            assert!(wal.rotate(&[], &[], 0).unwrap().is_empty());
         }
     }
     (wal, ends)
@@ -84,7 +84,7 @@ fn positions_continue_across_a_rotation() {
     let before = wal.position();
     assert!(before > 0);
 
-    wal.rotate(&[], 0).unwrap();
+    wal.rotate(&[], &[], 0).unwrap();
     assert!(
         wal.position() > before,
         "the new member continues the sequence's positions rather than restarting at zero"
@@ -102,7 +102,7 @@ fn reclamation_deletes_oldest_first() {
     let (mut wal, ends) = wal_with_files(&base, 4);
 
     // Everything below member 3's start: members 1 and 2 lie wholly below it, member 3 does not.
-    let deleted = wal.rotate(&[], ends[1]).unwrap();
+    let deleted = wal.rotate(&[], &[], ends[1]).unwrap();
 
     assert_eq!(deleted, vec![1, 2]);
     assert!(!member(&base, 1).exists());
@@ -122,7 +122,7 @@ fn a_member_still_live_above_the_reclamation_point_survives() {
     let (mut wal, ends) = wal_with_files(&base, 3);
 
     // One byte short of member 1's end.
-    let deleted = wal.rotate(&[], ends[0] - 1).unwrap();
+    let deleted = wal.rotate(&[], &[], ends[0] - 1).unwrap();
     assert!(deleted.is_empty());
     assert_eq!(wal.members(), vec![1, 2, 3, 4]);
 }
@@ -134,7 +134,7 @@ fn the_active_member_is_never_reclaimed() {
     let base = dir.path().join("wal.log");
     let (mut wal, _) = wal_with_files(&base, 2);
 
-    let deleted = wal.rotate(&[], u64::MAX).unwrap();
+    let deleted = wal.rotate(&[], &[], u64::MAX).unwrap();
     assert_eq!(deleted, vec![1, 2], "everything sealed goes");
     assert_eq!(wal.members(), vec![3], "and the active member stays");
     assert!(member(&base, 3).exists());
@@ -168,7 +168,9 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
         overlay.apply(entity, ChangeOp::Suppress);
         // Rotate with everything below the current position reclaimable: the member holding the
         // change record goes, and only the snapshot carries the suppression forward.
-        let deleted = wal.rotate(&overlay.snapshot(item), wal.position()).unwrap();
+        let deleted = wal
+            .rotate(&overlay.snapshot(item), &[], wal.position())
+            .unwrap();
         assert_eq!(deleted, vec![1], "the record's own member must actually go");
     }
 
@@ -206,7 +208,7 @@ fn recovery_walks_every_surviving_member_in_order() {
         wal.append(&change(0)).unwrap();
         wal.fsync().unwrap();
         // Nothing reclaimed, so member 1 survives with its record above nothing at all...
-        wal.rotate(&[suppression_of(7)], 0).unwrap();
+        wal.rotate(&[suppression_of(7)], &[], 0).unwrap();
         wal.append(&change(1)).unwrap();
         wal.fsync().unwrap();
     }
@@ -335,7 +337,7 @@ fn a_poisoned_handle_rotates_nothing() {
     wal.append(&change(1)).unwrap();
     assert!(matches!(wal.fsync(), Err(WalError::Io(_))));
 
-    assert!(matches!(wal.rotate(&[], 0), Err(WalError::Poisoned)));
+    assert!(matches!(wal.rotate(&[], &[], 0), Err(WalError::Poisoned)));
 
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(wal.members(), vec![1], "and no member was created");

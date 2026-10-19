@@ -134,8 +134,7 @@ async fn ingest(
     send_ingest(served, key, batch_id, &query, rows).await
 }
 
-/// One batch under `query`. A batch answered after `wait=visible` may be answered after a flush
-/// that rotates the log past it, which ends its replays, so a replayed batch is sent without one.
+/// One batch under `query`.
 async fn send_ingest(
     served: &Served,
     key: &str,
@@ -909,6 +908,77 @@ async fn an_ingest_column_naming_an_artifact_outside_the_writers_terms_names_not
     assert_eq!((status, &body["minted"]), (200, &json!(1)), "{body}");
 }
 
+/// `key`'s batch `batch`, one row naming the artifact `artifact` of the open layer `minted`, held
+/// before its window closes while the operator publishes `artifact` with members outside the
+/// writer's terms: the batch's answer.
+async fn ingest_raced_by_a_publication(
+    served: &Served,
+    key: &str,
+    batch: &str,
+    gid: u64,
+    artifact: &str,
+) -> (u16, Value) {
+    let engine = &served.server.state.engine;
+    let queued = |n: u64| async move {
+        while engine.work_enqueued_for_test() < n {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    engine.set_work_pass_paused_for_test(true);
+    let enqueued = engine.work_enqueued_for_test();
+    let row = json!([{ "gid": gid, "x": 2.5, "y": 2.5, "access": ["1"], "minted": artifact }]);
+    let ingesting = ingest(served, key, batch, false, row);
+    let publishing = async {
+        queued(enqueued + 1).await;
+        send(
+            served,
+            OPERATOR_CREDENTIAL,
+            reqwest::Method::PUT,
+            "/control/layers/minted/artifacts",
+            json!({ "artifacts": [{ "key": artifact, "members": members([OUTSIDE, 4]) }] }),
+        )
+        .await
+    };
+    let releasing = async {
+        queued(enqueued + 2).await;
+        engine.set_work_pass_paused_for_test(false);
+    };
+    let (ingested, published, ()) = tokio::join!(ingesting, publishing, releasing);
+    assert_eq!(published.0, 201, "{published:?}");
+    ingested
+}
+
+/// **A key an artifact outside the writer's terms comes to hold between its batch's admission and
+/// the close is answered as at admission**: the batch is refused as the key held, and its item
+/// joins nothing. A writer holding `write-all` grows the artifact, as before.
+#[tokio::test]
+async fn a_key_held_outside_the_writers_terms_by_the_close_is_answered_as_at_admission() {
+    let (served, key, _) = setup().await;
+    let mut layer = flat_layer("minted");
+    layer["value_set"] = json!("open");
+    layer["require_member_visibility"] = json!({ "count": 1 });
+    register(&served.server, layer).await;
+
+    let raced = ingest_raced_by_a_publication(&served, &key, "raced", 8_002, "late").await;
+    assert!(raced.0 >= 400, "{raced:?}");
+    let row = json!([{ "gid": 8_002, "x": 2.5, "y": 2.5, "access": ["1"], "minted": "late" }]);
+    let admitted = ingest(&served, &key, "raced", false, row).await;
+    assert_eq!(raced, admitted);
+    assert_eq!(
+        served_where(&served, json!({ "gid": { "eq": "8002" } })).await,
+        0
+    );
+
+    grant_write_all(&served).await;
+    let (status, body) =
+        ingest_raced_by_a_publication(&served, &key, "raced-all", 8_003, "later").await;
+    assert_eq!(
+        (status, &body["minted"], &body["joined"]),
+        (200, &json!(0), &json!(1)),
+        "{body}"
+    );
+}
+
 const HIDDEN: &str = "hidden";
 const SECRET_VIEW: &str = "secret";
 const GROUP: &str = "quarters";
@@ -1062,15 +1132,16 @@ async fn a_layer_view_or_group_out_of_the_writers_reach_is_unknown_and_its_name_
         "{a:?}"
     );
 
-    // A declaration under a name out of reach is the name taken, alike for the declaration held
-    // and for another.
+    // A declaration the writer would reach, under a name out of its reach, is the name taken,
+    // alike for two declarations.
     for (path, held) in [
         (format!("/control/views/{SECRET_VIEW}"), plain_view("2")),
         (format!("/control/view_groups/{GROUP}"), plain_view("2")),
     ] {
-        let mut other = held.clone();
+        let mine = plain_view("1");
+        let mut other = mine.clone();
         other["extent"]["x"] = json!([0.0, 10.0]);
-        let a = send(&served, &key, reqwest::Method::PUT, &path, held.clone()).await;
+        let a = send(&served, &key, reqwest::Method::PUT, &path, mine).await;
         let b = send(&served, &key, reqwest::Method::PUT, &path, other).await;
         assert_eq!(a.0, 409, "{path}: {a:?}");
         assert_eq!(a, b, "{path}");
@@ -1100,6 +1171,105 @@ async fn a_layer_view_or_group_out_of_the_writers_reach_is_unknown_and_its_name_
     )
     .await;
     assert_eq!((status, &body["existing"]), (200, &json!(true)), "{body}");
+}
+
+/// The declarations of a layer, a plain view, a view group and a view of the group [`OURS`],
+/// each named for `name` and gated by `term`, as `(path, body)`.
+fn declarations(name: &str, term: &str) -> Vec<(String, Value)> {
+    let mut layer = flat_layer(&format!("layer-{name}"));
+    layer["visibility"] = json!(term);
+    vec![
+        ("/control/layers".to_string(), layer),
+        (format!("/control/views/plain-{name}"), plain_view(term)),
+        (
+            format!("/control/view_groups/group-{name}"),
+            plain_view(term),
+        ),
+        (
+            format!("/control/views/{OURS}/view-{name}"),
+            json!({ "visibility": term }),
+        ),
+    ]
+}
+
+/// A view group the writer reaches.
+const OURS: &str = "ours";
+
+/// **A writer cannot declare what it would not reach**: a layer, a plain view, a view group or a
+/// view of a group whose visibility its terms do not satisfy is refused, `422`, and nothing is
+/// declared, alike whether or not something out of its reach holds the name. One whose visibility
+/// they satisfy is declared, and a writer holding `write-all` declares either.
+#[tokio::test]
+async fn a_declaration_the_writer_would_not_reach_is_refused() {
+    let (served, key, _) = gated_setup().await;
+    let (status, body) = send(
+        &served,
+        OPERATOR_CREDENTIAL,
+        reqwest::Method::PUT,
+        &format!("/control/view_groups/{OURS}"),
+        plain_view("1"),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    for (path, body) in declarations("theirs", "2") {
+        let (status, refused) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
+        assert_eq!(status, 422, "{path}: {refused}");
+    }
+    // Under a name something out of the writer's reach holds, the answer is the same.
+    let mut hidden = flat_layer(HIDDEN);
+    hidden["visibility"] = json!("2");
+    for (path, held, fresh) in [
+        ("/control/layers".to_string(), hidden, "layer-never"),
+        (
+            format!("/control/views/{SECRET_VIEW}"),
+            plain_view("2"),
+            "never",
+        ),
+        (
+            format!("/control/view_groups/{GROUP}"),
+            plain_view("2"),
+            "never",
+        ),
+    ] {
+        let named = |name: &str| path.replace(SECRET_VIEW, name).replace(GROUP, name);
+        let mut absent = held.clone();
+        if absent["name"].is_string() {
+            absent["name"] = json!(fresh);
+        }
+        let a = send(&served, &key, reqwest::Method::PUT, &path, held).await;
+        let b = send(&served, &key, reqwest::Method::PUT, &named(fresh), absent).await;
+        assert_eq!(a.0, 422, "{path}: {a:?}");
+        let held_name = [HIDDEN, SECRET_VIEW, GROUP];
+        let spelt_a = held_name
+            .iter()
+            .fold(a.1.to_string(), |text, name| text.replace(name, "NAME"));
+        assert_eq!(spelt_a, b.1.to_string().replace(fresh, "NAME"), "{path}");
+    }
+    let (status, body) = send(
+        &served,
+        OPERATOR_CREDENTIAL,
+        reqwest::Method::PUT,
+        "/control/views/plain-theirs",
+        plain_view("2"),
+    )
+    .await;
+    assert_eq!(
+        (status, &body["existing"]),
+        (201, &json!(false)),
+        "nothing was declared: {body}"
+    );
+
+    for (path, body) in declarations("mine", "1") {
+        let (status, created) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
+        assert_eq!(status, 201, "{path}: {created}");
+    }
+
+    grant_write_all(&served).await;
+    for (path, body) in declarations("all", "2") {
+        let (status, created) = send(&served, &key, reqwest::Method::PUT, &path, body).await;
+        assert_eq!(status, 201, "{path}: {created}");
+    }
 }
 
 /// **Across a restart** a layer, a view or a group out of the writer's reach stays unknown to it,

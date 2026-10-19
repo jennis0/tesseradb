@@ -636,21 +636,22 @@ def test_a_strict_batch_is_refused_whole_at_its_first_refused_row(deployment):
 
 
 def test_a_replayed_batch_answers_its_first_acceptance(deployment):
-    """A retry answers the first acceptance's `mosaica_ids` and `refused` whatever `strict` says.
-    The retries are sent before any flush, since a flush forgets the batch ids below the write-ahead
-    log it keeps."""
+    """A retry answers the first acceptance's `mosaica_ids` and `refused` whatever `strict` says,
+    after the flushes each answer waited for, and writes nothing."""
     dep = deployment
     rows = generate_batch(random.Random(21), dep.holdings, 25)
-    first = dep.ingest(rows, batch_id="identity-replay", wait=False)
+    first = dep.ingest(rows, batch_id="identity-replay")
     assert first.status_code == 200, first.text
     assert first.json()["refused"], "the batch plants refusals"
+    issued = dep.server.status()["entity_id_high_water"]
     for strict in (False, True):
-        again = dep.ingest(rows, strict=strict, batch_id="identity-replay", wait=False)
+        again = dep.ingest(rows, strict=strict, batch_id="identity-replay")
         assert again.status_code == 200, again.text
         assert again.json().get("replayed") is True, (first.json(), again.json())
         assert again.json()["mosaica_ids"] == first.json()["mosaica_ids"]
         assert again.json()["refused"] == first.json()["refused"]
         assert again.json()["created"] == 0
+    assert dep.server.status()["entity_id_high_water"] == issued
 
 
 # ---------------------------------------------------------------------------------------------

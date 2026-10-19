@@ -11,14 +11,32 @@ pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],
     pub(in crate::write) receipt: Vec<mosaica_lifecycle::RowReceipt>,
     /// Where the record carrying this batch lies in the log. The index is a cache of the WAL
-    /// ([`mosaica_lifecycle::batch_identity`]), so an entry outlives its record only until the
-    /// rotation that deletes the member holding it. `Executor::rotate_wal` forgets everything
-    /// below [`ExecutorWal::retained_from`], which is the horizon a restart would rebuild.
+    /// ([`mosaica_lifecycle::batch_identities`]): an entry is held while the log holds its record,
+    /// and past that while a rotation carries it ([`ReplayHorizon`]).
     pub(in crate::write) wal_pos: u64,
+    /// When the batch was accepted, in milliseconds since the Unix epoch; for a batch read back
+    /// from its own record at a restart, when the restart read it.
+    pub(in crate::write) accepted_ms: u64,
 }
 
 /// The `/control/ingest` idempotency index: (principal, batch id) -> what was accepted under it.
 pub(in crate::write) type AcceptedBatches = FxHashMap<(String, String), AcceptedBatch>;
+
+/// How long a rotation carries an accepted batch past the reclaiming of its record: for `age_ms`
+/// after its acceptance, and until `rows` rows of later batches have been accepted, whichever ends
+/// first. The flush triggers, `flush_max_age_secs` and `flush_max_items`, which bound how long the
+/// log holds a record when no flush is asked for.
+pub(in crate::write) struct ReplayHorizon {
+    pub(in crate::write) age_ms: u64,
+    pub(in crate::write) rows: u64,
+}
+
+/// Now, in milliseconds since the Unix epoch.
+pub(in crate::write) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
 
 /// The descriptor resolver's detached extension state: interned novel descriptors, plus the next
 /// extension id to hand out.
@@ -968,19 +986,57 @@ impl LiveState {
                 body_hash,
                 receipt,
                 wal_pos,
+                accepted_ms: now_ms(),
             },
         );
     }
 
-    /// Forget every batch whose record lay below `retained_from`: the rotation half of the
-    /// idempotency horizon.
-    ///
-    /// A restart rebuilds this index from the members that survive, so dropping entries here
-    /// keeps the horizon the same on both sides of a restart. Returns how many entries went.
-    pub(in crate::write) fn forget_batches_below(&self, retained_from: u64) -> usize {
+    /// The accepted batches inside `horizon` at `now_ms`, which a rotation carries.
+    pub(in crate::write) fn batches_to_carry(
+        &self,
+        horizon: &ReplayHorizon,
+        now_ms: u64,
+    ) -> Vec<mosaica_lifecycle::CarriedBatch> {
+        let index = lock_recover(&self.accepted_batches);
+        let mut newest_first: Vec<(&(String, String), &AcceptedBatch)> = index.iter().collect();
+        newest_first.sort_unstable_by_key(|(_, held)| std::cmp::Reverse(held.wal_pos));
+        let mut later_rows = 0u64;
+        let mut carried = Vec::new();
+        for ((principal, batch_id), held) in newest_first {
+            if later_rows >= horizon.rows {
+                break;
+            }
+            if now_ms.saturating_sub(held.accepted_ms) < horizon.age_ms {
+                carried.push(mosaica_lifecycle::CarriedBatch {
+                    principal: principal.clone(),
+                    batch_id: batch_id.clone(),
+                    body_hash: held.body_hash,
+                    receipt: held.receipt.clone(),
+                    wal_pos: held.wal_pos,
+                    accepted_ms: held.accepted_ms,
+                });
+            }
+            later_rows += held.receipt.len() as u64;
+        }
+        carried
+    }
+
+    /// Forget every batch whose record lay below `retained_from` and that the rotation did not
+    /// carry, as a restart reading the members that survive would.
+    pub(in crate::write) fn forget_batches(
+        &self,
+        retained_from: u64,
+        carried: &[mosaica_lifecycle::CarriedBatch],
+    ) -> usize {
+        let kept: FxHashSet<(&str, &str)> = carried
+            .iter()
+            .map(|batch| (batch.principal.as_str(), batch.batch_id.as_str()))
+            .collect();
         let mut index = lock_recover(&self.accepted_batches);
         let before = index.len();
-        index.retain(|_, held| held.wal_pos >= retained_from);
+        index.retain(|(principal, batch_id), held| {
+            held.wal_pos >= retained_from || kept.contains(&(principal.as_str(), batch_id.as_str()))
+        });
         before - index.len()
     }
 }

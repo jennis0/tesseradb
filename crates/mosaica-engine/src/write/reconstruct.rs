@@ -378,9 +378,10 @@ impl WritePath {
         // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
         // pair no run holds, by shard; kept where the entity ends buffered or deleted.
         let mut edits: Vec<(ShardId, (EntityId, EntityId))> = Vec::new();
-        // Every batch-carrying record, by the rule both accept sites use
-        // ([`mosaica_lifecycle::batch_identity`]).
+        // Every batch a record was written for or carries, by the rule both accept sites use
+        // ([`mosaica_lifecycle::batch_identities`]).
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
+        let opened_ms = super::live::now_ms();
 
         for item in wal.records() {
             let (position, record) = item.map_err(EngineError::Wal)?;
@@ -425,7 +426,8 @@ impl WritePath {
                     }
                 }
             }
-            if let Some(identity) = mosaica_lifecycle::batch_identity(&record) {
+            for identity in mosaica_lifecycle::batch_identities(&record) {
+                let (wal_pos, accepted_ms) = identity.carried.unwrap_or((position, opened_ms));
                 accepted_batches.insert(
                     (
                         identity.principal.to_string(),
@@ -434,7 +436,8 @@ impl WritePath {
                     AcceptedBatch {
                         body_hash: identity.body_hash,
                         receipt: identity.receipt.to_vec(),
-                        wal_pos: position,
+                        wal_pos,
+                        accepted_ms,
                     },
                 );
             }

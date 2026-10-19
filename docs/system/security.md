@@ -53,10 +53,12 @@ label the terms do not satisfy is refused. Layers, views, groups and artifacts a
 one a session holding the writer's terms would not be served, suppression aside, is absent to the
 write, whether it is dropped, published into, grown, named as a parent, an attachment target, a
 layer's view or dependency, a view's group, an ingest batch's view or column, or a change's
-`mosaica_id`, and a refusal listing views lists only those the writer reaches. The operator holds
-`write-all`, which lifts the bound. **Not built yet:** dropping a view the writer reaches deletes
-every item it leaves in no view, outside its terms included, and counts them in the answer;
-dropping a layer deletes every artifact of it.
+`mosaica_id`, and a refusal listing views lists only those the writer reaches. A declaration of a
+layer, a view or a group whose `visibility` the writer's terms do not satisfy is refused, since the
+writer could neither change nor drop it. A drop is the exception: dropping a view the writer
+reaches deletes every item it leaves in no view, those outside its terms included, and `deleted`
+counts them all; dropping a layer the writer reaches deletes every artifact of it. The operator
+holds `write-all`, which lifts the bound.
 
 `admin` can grant any permission to any principal, itself included. A principal holding `admin`
 can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is

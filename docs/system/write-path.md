@@ -183,9 +183,10 @@ within the writer's reach, the one rule the registry applies to every write nami
 (`registry.rs`, `Reach`; `resolver.rs`, `ArtifactReach`): an artifact is inside where a session
 holding the writer's terms would be served it, suppression aside. A key an artifact outside holds is
 the unknown key on a `closed` layer, and on an `open` one is refused as held, naming no artifact;
-either refuses the batch, as any key the layer refuses does. **Not built yet:** a key given to an
-artifact out of the writer's reach between the batch's admission and the close of its window takes
-the batch's members.
+either refuses the batch, as any key the layer refuses does. The close resolves the keys again
+within the reach of each batch's writer, by the same rule: a key an artifact out of a writer's
+reach has come to hold since admission refuses that writer's batch as it would have at admission,
+and the window's other batches close without it.
 
 | What the row's values name | What the handler decides |
 |---|---|
@@ -329,9 +330,13 @@ keys or a layer refusing what they name, gives back its ids and its codes, and e
 closes again in a window of its own, in the order they were admitted. Only a batch that cannot
 close alone is refused, with its own reason, and the others commit as if it had not been sent. A retry of an accepted batch answers the `mosaica_id`s its
 first acceptance did, and the rows it refused, after a restart too, since the record carries them.
-The index of accepted batches, by principal and batch id, is built from the WAL members retained, so
-a batch id is remembered until the flush whose WAL rotation removes the member holding its record,
-and a retry sent after that is decided as a new batch.
+The index of accepted batches, by principal and batch id, is built from the WAL members retained
+and from what each rotation carries past the members it removes: the batches accepted within the
+flush tick (`flush_max_age_secs`), up to `flush_max_items` rows of batches counted newest first. A
+batch id is therefore remembered while the log holds its record, and past that for the flush tick
+after its acceptance or until `flush_max_items` rows of later batches are accepted, whichever ends
+first, however many flushes run meanwhile, `wait=visible`'s included, and across a restart. A
+retry sent after that is decided as a new batch.
 
 ### What the writer observes
 

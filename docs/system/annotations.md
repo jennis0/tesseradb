@@ -306,7 +306,9 @@ reach, or that has fewer members inside them than the layer's `require_member_vi
 growth, a parent, an attachment target, an ingest column's key or a change naming one is answered
 as naming nothing. A publication under the key of one out of reach is refused as the key taken,
 naming no artifact, and an artifact setting a label its terms do not satisfy is refused by its
-position as `label_not_held`, the batch's others applied.
+position as `label_not_held`, the batch's others applied. Registering a layer whose `visibility`
+its terms do not satisfy is refused, since the writer could neither change nor drop it. Dropping a
+layer it reaches deletes every artifact of the layer, those outside its terms included.
 
 ## What an artifact carries
 

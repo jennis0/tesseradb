@@ -442,8 +442,10 @@ admits them, in a view they reach, with as many of its members inside the scope 
   that a value is held twice.
 - A page of a `derived` vocabulary's values answers one count, of the page's keys the vocabulary
   holds, and not which were held before: a derived key is held because some item carried it.
-- Declaring a view, a group or a layer with a `visibility` the writer does not satisfy is
-  accepted, and the declaration is then out of its reach.
+- Declaring a view, a group or a layer with a `visibility` the writer does not satisfy is refused
+  with `422`, whatever holds the name: the writer could neither change nor drop what it declared.
+  The message says to declare a visibility its terms satisfy, or to declare it as a principal
+  holding `write-all`.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
   collision, `value_held`, and so is a row setting such a value on an item it names. It is never
   treated as an update of that item, and the refusal carries no `mosaica_id`. It tells the writer that an item with that value exists, and nothing else about it.
@@ -456,11 +458,9 @@ outside. A set of items, the complement of an exclusion or an artifact's members
 its layer's requirement, is masked by the fragment a session of the writer's terms would be served,
 built when the write is admitted, and the items the fragment does not cover one at a time.
 
-**Not built yet:** dropping a view the writer reaches deletes every item the drop leaves in no
-view, outside the scope included, and its `deleted` counts them; dropping a layer deletes every
-artifact of it. A key an ingest batch's layer column names, given to an artifact out of the
-writer's reach between the batch's admission and the close of its commit window, takes the batch's
-members.
+A drop is not bounded by the scope. Dropping a view the writer reaches deletes every item the
+drop leaves in no view, those outside the scope included, and its `deleted` counts them all.
+Dropping a layer the writer reaches deletes every artifact of it, those outside the scope included.
 
 ## Bootstrap
 

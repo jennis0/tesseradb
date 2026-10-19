@@ -917,7 +917,7 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
 
     let engine = restart(&fx, engine);
     assert!(
-        engine.accepted_batch("", "join").is_none(),
+        !wal_members(&fx.tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string()),
         "the log rotated past the batches, so nothing but the stored value answers"
     );
     assert_eq!(

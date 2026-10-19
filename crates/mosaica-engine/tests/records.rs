@@ -2817,6 +2817,7 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                 let held = present.len() as u64;
                 assert_eq!(viewport_counts(&fx.engine, &session, "s0", None).0, held);
                 let later: Vec<u64> = (0..300).map(|k| next + 527 + 1000 * k).collect();
+                let batch = format!("late-{next}");
                 next += 1_000_000;
                 assert!(later.iter().all(|&s| position(s).0 == 499.25));
                 let fields = names(&["prose"]);
@@ -2834,7 +2835,7 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                     vec![
                         Box::new(|| {
                             engine.set_refresh_paused_for_test(true);
-                            *inserted.borrow_mut() = ingest_sources(engine, "late", &later);
+                            *inserted.borrow_mut() = ingest_sources(engine, &batch, &later);
                             publish_buffered(engine);
                             assert_eq!(
                                 viewport_counts(engine, &session, "s0", None).0,
