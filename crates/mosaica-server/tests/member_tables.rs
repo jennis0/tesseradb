@@ -155,6 +155,53 @@ async fn a_member_naming_no_item_or_two_is_left_out_or_refuses_a_strict_request(
     assert_eq!(count(&server, 2).await, vec![1, 2]);
 }
 
+/// A member deleted after the request arrived and before it applies is refused alone where it
+/// applies: the answer lists its row, the other members are published, and a strict request is
+/// `404` with nothing published.
+#[tokio::test]
+async fn a_member_deleted_before_the_publication_applies_is_refused_alone() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, flat_layer(LAYER)).await;
+    let engine = &server.state.engine;
+    let server = &server;
+    let held = |strict: bool, key: &'static str, gone: u64| async move {
+        engine.hold_next_write_check_for_test();
+        let publishing = put(
+            server,
+            strict,
+            json!([{ "key": key, "members": { "id": [0, gone, 2] } }]),
+        );
+        let deleting = async {
+            while !engine.write_check_is_holding_for_test() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let id = mosaica_id_of(server, gone).to_string();
+            let deleted = post_changes(
+                server,
+                &json!([{ "op": "delete", "match": { "mosaica_id": id } }]),
+            )
+            .await;
+            assert_eq!(deleted.status().as_u16(), 200);
+            engine.release_write_check_for_test();
+        };
+        tokio::join!(publishing, deleting).0
+    };
+
+    let (status, body) = held(true, "s", 3).await;
+    assert_eq!(status, 404, "{body}");
+    count(server, 0).await;
+
+    let (status, body) = held(false, "a", 1).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["joined"], 2, "{body}");
+    assert_eq!(
+        body["refused"],
+        json!([{ "artifact": 0, "list": "members", "row": 1, "reason": "names_no_item" }])
+    );
+    assert_eq!(count(server, 1).await, vec![2]);
+}
+
 /// A content's generating set is refused whole at a member naming nothing, strict or not: a
 /// viewer must see the whole set to be served the content.
 #[tokio::test]

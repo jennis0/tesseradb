@@ -2038,7 +2038,6 @@ impl Executor {
                 Arc::make_mut(&mut parts.overlay).retire(deleted);
             }
         }
-        let frees = !freeing.ids.is_empty();
         // At the log position no later record can name the freed ids at.
         let freed = mosaica_store::manifest::HeldEntities {
             position: self.log.wal.position(),
@@ -2477,7 +2476,6 @@ impl Executor {
             &folded_tiers,
             executed,
             executed_artifacts,
-            frees,
         ) {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
@@ -2662,8 +2660,7 @@ impl Executor {
     }
 
     /// Opens the prefix `CURRENT` now names and swaps onto it, retiring `retired` from the shard's
-    /// overlay and `retired_artifacts` from each space's and, where `frees`, moving the epoch that
-    /// makes every write resolved before it stale.
+    /// overlay and `retired_artifacts` from each space's.
     #[allow(clippy::too_many_arguments)]
     fn swap_onto_folded_prefix(
         &mut self,
@@ -2673,7 +2670,6 @@ impl Executor {
         folded_tiers: &[String],
         retired: croaring::Bitmap,
         retired_artifacts: std::collections::BTreeMap<LayerSpace, croaring::Bitmap>,
-        frees: bool,
     ) -> Result<(), String> {
         let shard = live.shard_of(shard_id);
         let live_tiers = &shard.data.record.deltas;
@@ -2685,7 +2681,6 @@ impl Executor {
             Some(&live.bundle),
         )
         .map_err(|e| format!("the folded prefix would not open ({e})"))?;
-        rotation.frees = frees;
         rotation.retired_artifacts = retired_artifacts;
         let delta_postings = folded_tiers
             .iter()

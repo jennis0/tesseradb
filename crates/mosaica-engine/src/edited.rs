@@ -180,53 +180,6 @@ pub(crate) fn holds_in_view(shard: &Shard, entity: EntityId, view: &str) -> bool
         || shard.buffer.contains_in_view(entity, view)
 }
 
-/// The entity holding the item `entity` held, where an edit has moved the item since; `None`
-/// where it has not moved or its item is gone.
-pub(crate) fn moved_to(shard: &Shard, entity: EntityId) -> Result<Option<EntityId>, StoreError> {
-    let number = numbers_of(shard, &[entity])?[0];
-    let now = entities_of_numbers(shard, &[number], |e| holds(shard, e))?[0];
-    Ok(now.filter(|now| *now != entity))
-}
-
-/// Each member of `set` an edit has moved, replaced by the entity its item holds now. Only a
-/// member the overlay deletes can have moved: an edit deletes the entity it moves away from.
-pub(crate) fn follow_moves(shard: &Shard, set: &mut croaring::Bitmap) -> Result<(), StoreError> {
-    let deleted = set.and(shard.overlay.deleted_set());
-    for old in deleted.iter() {
-        if let Some(now) = moved_to(shard, EntityId::new(u64::from(old)))? {
-            set.remove(old);
-            set.add(narrow(now));
-        }
-    }
-    Ok(())
-}
-
-/// `changes` with each change naming an entity an edit has moved an item away from also applied
-/// to the entity the item holds now, in the item's shard of `generation`. The change to the old
-/// entity stays, so the log names both. An artifact is never moved.
-pub(crate) fn follow_changes(
-    generation: &Generation,
-    changes: &mut Vec<(Target, mosaica_lifecycle::ChangeOp)>,
-) -> Result<(), StoreError> {
-    let mut followed = Vec::new();
-    for &(target, op) in changes.iter() {
-        let Target::Item(at, entity) = target else {
-            continue;
-        };
-        let Some(shard) = generation.shard(at) else {
-            continue;
-        };
-        if !shard.overlay.is_deleted(entity) && holds(shard, entity) {
-            continue;
-        }
-        if let Some(now) = moved_to(shard, entity)? {
-            followed.push((Target::Item(at, now), op));
-        }
-    }
-    changes.extend(followed);
-    Ok(())
-}
-
 /// What one change names, as the request naming it was resolved: its target, and for an item, the
 /// item's `mosaica_id`, which names it wherever an edit or a fold has put it since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,164 +229,21 @@ impl NamedTarget {
     }
 }
 
-/// `changes`, resolved at `stamp`, as they apply in `generation`. A change naming an entity an edit
-/// has moved an item away from also reaches the item where it is now ([`follow_changes`]). Where
-/// the names are stale by [`Since`]'s rule, each item is found again by its `mosaica_id`, and the
-/// change reaches the entity the item holds now, or none where the item's number has been issued
-/// again, since the item is gone.
-pub(crate) fn changes_in(
-    stamp: Stamp,
-    generation: &Generation,
-    key: &IdentityKey,
-    changes: Vec<(NamedTarget, mosaica_lifecycle::ChangeOp)>,
-) -> Result<Vec<(Target, mosaica_lifecycle::ChangeOp)>, StoreError> {
-    let mut targets: Vec<(Target, mosaica_lifecycle::ChangeOp)> = changes
-        .iter()
-        .map(|(named, op)| (named.target, *op))
-        .collect();
-    if stamp.follow_since(generation, |generation| {
-        follow_changes(generation, &mut targets)
-    }) {
-        return Ok(targets);
-    }
-    let mut now = Vec::with_capacity(changes.len());
-    for (named, op) in changes {
-        let target = match named.item {
-            Some(id) => match item_now(key, generation, id)? {
-                Some(target) => target,
-                None => continue,
-            },
-            None => named.target,
-        };
-        now.push((target, op));
-    }
-    Ok(now)
-}
-
-/// The entity the item `id` names holds in `generation`: of its number's entries the newest it has
-/// not deleted, or the newest where it has deleted them all, or the number itself where it has
-/// none. `None` where `id` names no number at its tenancy.
-fn item_now(
-    key: &IdentityKey,
-    generation: &Generation,
-    id: MosaicaId,
-) -> Result<Option<Target>, StoreError> {
-    let Some((shard, number)) = number_named(key, generation, id) else {
-        return Ok(None);
-    };
-    let entries = entries_of(shard, &[narrow(number)])?.remove(0);
-    let entity = entries
-        .iter()
-        .rev()
-        .find(|entity| !shard.overlay.is_deleted(**entity) && holds(shard, **entity))
-        .or(entries.last())
-        .copied()
-        .unwrap_or(number);
-    Ok(Some(Target::Item(shard.id(), entity)))
-}
-
-/// Every set of `sets` following moves, each in its own shard of `generation`.
-fn follow_sets(
-    generation: &Generation,
-    sets: &mut mosaica_lifecycle::ShardSets,
-) -> Result<(), StoreError> {
-    sets.try_for_each_mut(|id, set| match generation.shard(id) {
-        Some(shard) => follow_moves(shard, set),
-        None => Ok(()),
-    })
-}
-
-/// Every entity set of `artifacts`, members and generating sets, following moves.
-pub(crate) fn follow_artifacts(
-    generation: &Generation,
-    artifacts: &mut [mosaica_lifecycle::IncomingArtifact],
-) -> Result<(), StoreError> {
-    for artifact in artifacts {
-        follow_sets(generation, &mut artifact.members)?;
-        if let Some(excluding) = artifact.excluding.as_mut() {
-            follow_sets(generation, excluding)?;
-        }
-        for content in &mut artifact.contents {
-            follow_sets(generation, &mut content.generated_from)?;
-        }
-    }
-    Ok(())
-}
-
-/// Every entity set of `joins`, following moves.
-pub(crate) fn follow_growth(
-    generation: &Generation,
-    joins: &mut [mosaica_lifecycle::IncomingGrowth],
-) -> Result<(), StoreError> {
-    for join in joins {
-        follow_sets(generation, &mut join.joining)?;
-        follow_sets(generation, &mut join.leaving)?;
-    }
-    Ok(())
-}
-
-/// The generation a write's entities were resolved against, which [`crate::Engine::name_items`]
-/// answers with its names and the write carries to the executor. [`Since`] is what a later
-/// generation can have done to those entities, and whether the write's names still hold.
+/// The generation a write's names were resolved in, which [`crate::Names`] carries to the write
+/// thread: the folds published and the unique entries added by then, from which the write thread
+/// finds what has moved since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Default))]
 pub struct Stamp {
-    edits: u64,
-    folds: u64,
-    frees: u64,
-}
-
-/// What has happened to a write's entities since its [`Stamp`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Since {
-    /// No edit committed and no fold freed an id: every entity is where it was.
-    Still,
-    /// An edit committed and no fold retired an entity. An edit moves its item to a new entity,
-    /// and [`follow_moves`] finds where each moved entity's item is now.
-    Edited,
-    /// A fold freed ids, and may have issued one the write names to another item. Or an edit
-    /// committed and a fold retired entities, which can drop the map entry saying where an item
-    /// went. The names are resolved again.
-    Folded,
+    pub(crate) folds: u64,
+    pub(crate) unique_seq: u64,
 }
 
 impl Stamp {
     pub(crate) fn of(generation: &Generation) -> Stamp {
         Stamp {
-            edits: generation.edit_epoch,
             folds: generation.fold_epoch,
-            frees: generation.free_epoch,
-        }
-    }
-
-    fn since(self, generation: &Generation) -> Since {
-        if generation.free_epoch != self.frees {
-            return Since::Folded;
-        }
-        match (
-            generation.edit_epoch == self.edits,
-            generation.fold_epoch == self.folds,
-        ) {
-            (true, _) => Since::Still,
-            (false, true) => Since::Edited,
-            (false, false) => Since::Folded,
-        }
-    }
-
-    /// Whether a write resolved at this stamp names its entities where their items are in
-    /// `generation`, `follow` having moved each that an edit has moved since. A write's entities
-    /// are followed here and nowhere else, so each is followed once, from the generation it was
-    /// resolved against. `false` where the names are stale by [`Since`]'s rule or `follow` cannot
-    /// read the edited items: the caller resolves the write's names again.
-    pub(crate) fn follow_since(
-        self,
-        generation: &Generation,
-        follow: impl FnOnce(&Generation) -> Result<(), StoreError>,
-    ) -> bool {
-        match self.since(generation) {
-            Since::Still => true,
-            Since::Edited => follow(generation).is_ok(),
-            Since::Folded => false,
+            unique_seq: generation.unique_live.seq(),
         }
     }
 }
@@ -574,45 +384,6 @@ mod tests {
             Some((shard, number, false))
                 if shard.id() == generation.only_shard().id() && number == EntityId::new(7)
         ));
-    }
-
-    /// A write resolved at a stamp follows its entities after an edit alone, and is resolved
-    /// again after a fold that freed ids, edit or none, or after an edit and a fold that retired
-    /// entities.
-    #[test]
-    fn a_stamp_answers_what_has_happened_to_its_entities_since() {
-        let at = Generation::synthetic("v00000", 1, 0, Overlay::new(), IngestBuffer::new());
-        let stamp = Stamp::of(&at);
-        let later = |edits: u64, folds: u64, frees: u64| {
-            at.with(|g| {
-                g.edit_epoch += edits;
-                g.fold_epoch += folds;
-                g.free_epoch += frees;
-            })
-        };
-        assert_eq!(stamp.since(&at), Since::Still, "nothing since");
-        assert_eq!(
-            stamp.since(&later(0, 1, 0)),
-            Since::Still,
-            "a fold freeing nothing"
-        );
-        assert_eq!(stamp.since(&later(1, 0, 0)), Since::Edited, "an edit");
-        assert_eq!(stamp.since(&later(2, 0, 0)), Since::Edited, "two edits");
-        assert_eq!(
-            stamp.since(&later(1, 1, 0)),
-            Since::Folded,
-            "an edit and a fold"
-        );
-        assert_eq!(
-            stamp.since(&later(0, 1, 1)),
-            Since::Folded,
-            "a fold freeing ids"
-        );
-        assert_eq!(
-            stamp.since(&later(1, 1, 1)),
-            Since::Folded,
-            "an edit and a fold freeing ids"
-        );
     }
 
     #[test]

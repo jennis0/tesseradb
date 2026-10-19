@@ -1806,8 +1806,6 @@ paths:
 
             - The batch id was used for a different body
             - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
-            - An item a row edits changed while the batch was checked; sending it again answers
-            - The items the batch names changed while it was checked twice; sending it again answers
             - The batch's new items would need a point shard past the 524,288 a bundle holds, or its edits would carry a shard's high water past 4,294,967,295, where the shard's ids end; the detail gives the figures
           content:
             application/json:
@@ -2715,8 +2713,10 @@ paths:
         The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
         its members by `members`, or by `excluding`, the view's items it leaves out. Each is a
         `MemberTable`: one row per member, naming it by `mosaica_id` and the values of fields
-        declared unique. A member whose values name no item, a deleted item included, or name two,
-        is refused: it is left out and listed in `refused` with its reason, and the rest are
+        declared unique. Members are resolved where the publication applies, so a member names the
+        item it names then, however edits and compactions have moved it since the request
+        arrived. A member whose values name no item, a deleted item included, or name two, is
+        refused: it is left out and listed in `refused` with its reason, and the rest are
         published. With `strict=true` the request is refused at its first refused member instead,
         `404` where it names no item and `409` where it names two. A content's `generated_from`
         is refused whole at any refused member, strict or not, since a viewer must see the whole
@@ -2794,7 +2794,6 @@ paths:
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved
             - An unknown layer or level, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
             - Labels the layer does not take, or none where it requires them
@@ -2900,7 +2899,6 @@ paths:
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved
             - A shape the layer does not take
             - A content without a generating set on a layer whose content requires every member visible
           content:

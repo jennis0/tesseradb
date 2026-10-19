@@ -26,7 +26,9 @@ pub(super) struct DenyEntry {
     pub(super) changes: Vec<(Target, ChangeOp)>,
     /// `None` for the deletions a window's deletions cascade to, which have no caller to answer
     /// but are otherwise an ordinary entry.
-    pub(super) reply: Option<Reply<()>>,
+    pub(super) reply: Option<Reply<crate::resolver::Refused>>,
+    /// The request's rows that named nothing where it applied, which its answer lists.
+    pub(super) refused: crate::resolver::Refused,
 }
 
 impl DenyEntry {
@@ -50,8 +52,9 @@ impl Executor {
                 break;
             };
             let Command::Changes {
-                changes,
-                stamp,
+                mut names,
+                ops,
+                strict,
                 reply,
             } = command
             else {
@@ -63,12 +66,12 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
-            let changes = match self.changes_now(changes, stamp) {
-                Ok(changes) if changes.is_empty() => {
-                    reply.ack(());
+            let (changes, refused) = match self.changes_now(&mut names, &ops, strict) {
+                Ok((changes, refused)) if changes.is_empty() => {
+                    reply.ack(refused);
                     continue;
                 }
-                Ok(changes) => changes,
+                Ok(answer) => answer,
                 Err(e) => {
                     reply.fail(e);
                     continue;
@@ -78,6 +81,7 @@ impl Executor {
             entries.push(DenyEntry {
                 changes,
                 reply: Some(reply),
+                refused,
             });
         }
 
@@ -89,23 +93,59 @@ impl Executor {
         true
     }
 
-    /// A request's changes, resolved at `stamp`, as they apply now: on this thread, which is the
-    /// only one that moves an item, so nothing moves one between this and the apply. `Err` where
-    /// the edited items cannot be read.
+    /// A request's changes as they apply now, row `i` of `names` taking `ops[i]`, and the rows
+    /// that name nothing now: on this thread, which is the only one that moves an item, so
+    /// nothing moves one between this and the apply ([`crate::Names::now`]). A row whose item an
+    /// edit has moved also changes the entity it named, which the log then names beside the one
+    /// the item holds. `Err` where the names cannot be read, or where `strict` and a row is
+    /// refused.
     pub(super) fn changes_now(
         &self,
-        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
-        stamp: crate::edited::Stamp,
-    ) -> std::result::Result<Vec<(Target, ChangeOp)>, ExecError> {
-        crate::edited::changes_in(
-            stamp,
-            &self.generation.load_full(),
+        names: &mut crate::resolver::Names,
+        ops: &[ChangeOp],
+        strict: bool,
+    ) -> std::result::Result<(Vec<(Target, ChangeOp)>, crate::resolver::Refused), ExecError> {
+        let generation = self.generation.load_full();
+        let scope = names.scope().clone();
+        let resolver = crate::resolver::Resolver::new(
+            &generation,
+            &scope,
             &self.deps.identity_key,
-            changes,
-        )
-        .map_err(|e| ExecError::Store {
+            &self.live,
+        );
+        let moved = names.now(&resolver).map_err(|e| ExecError::Store {
             detail: e.to_string(),
-        })
+        })?;
+        let refused = names.refused();
+        if let Some(&(row, reason)) = refused.first().filter(|_| strict) {
+            return Err(ExecError::NamesRefused { row, reason });
+        }
+        let mut changes: Vec<(Target, ChangeOp)> = ops
+            .iter()
+            .enumerate()
+            .filter_map(|(row, op)| Some((names.verdict(row).ok()?, *op)))
+            .collect();
+        for crate::resolver::Moved { row, was } in moved {
+            let (Some(Target::Item(shard, old)), Ok(Target::Item(at, now))) =
+                (was, names.verdict(row))
+            else {
+                continue;
+            };
+            let Some(held) = generation
+                .shard(shard)
+                .filter(|_| at == shard && now != old)
+            else {
+                continue;
+            };
+            let numbers =
+                crate::edited::numbers_of(held, &[old, now]).map_err(|e| ExecError::Store {
+                    detail: e.to_string(),
+                })?;
+            if numbers[0] == numbers[1] && held.overlay.is_deleted(old) {
+                changes.push((Target::Item(shard, old), ops[row]));
+            }
+        }
+        Ok((changes, refused))
     }
 
     /// Add one entry deleting every artifact that depends on one this window deletes. Only
@@ -127,6 +167,7 @@ impl Executor {
                 .map(|target| (target, ChangeOp::Delete))
                 .collect(),
             reply: None,
+            refused: Vec::new(),
         });
     }
 
@@ -197,7 +238,7 @@ impl Executor {
         // A death partway leaves some waiters unacked; each gets a 500, not a 503, since durable.
         for entry in entries {
             if let Some(reply) = entry.reply {
-                reply.ack(());
+                reply.ack(entry.refused);
             }
         }
         // After the acknowledgement and on the figures' own thread: the next request finds the

@@ -1,16 +1,16 @@
 //! Rows that address items: a change's `match`, and the member tables of a publication or a
 //! growth. Each row names an item by a `mosaica_id` column and a column for each unique field,
-//! and every row of a request is resolved in one call, by the identity rule
-//! ([`mosaica_engine::Engine::name_items`]). A row naming no item, or naming two, is refused:
-//! listed in the answer with its reason while the rest apply, or, in a strict request, refusing
-//! the request whole. A column that is neither `mosaica_id` nor a unique field names nothing and
-//! is ignored, as a build ignores it, and the answer names it.
+//! and every row of a request is resolved by the engine as one table, by the identity rule, where
+//! the write applies ([`mosaica_engine::Engine::names`]). A row naming no item, or naming two, is
+//! refused: listed in the answer with its reason while the rest apply, or, in a strict request,
+//! refusing the request whole. A column that is neither `mosaica_id` nor a unique field names
+//! nothing and is ignored, as a build ignores it, and the answer names it.
 
 use std::collections::BTreeMap;
 
-use mosaica_engine::{AddressTable, AddressValue, NamedTarget, Stamp};
+use mosaica_engine::{AddressTable, AddressValue};
 use mosaica_lifecycle::resolve::Reason;
-use mosaica_types::{ItemAt, MosaicaId};
+use mosaica_types::MosaicaId;
 
 use crate::error::{map_engine_error, ApiError};
 use crate::state::AppState;
@@ -131,14 +131,6 @@ impl<'de> serde::Deserialize<'de> for Cell {
     }
 }
 
-/// What a request's rows named: one answer per row, table by table; the columns ignored; and the
-/// generation the rows were resolved against, which the write naming them carries.
-pub(crate) struct Names<T> {
-    pub(crate) tables: Vec<Vec<T>>,
-    pub(crate) ignored: Vec<String>,
-    pub(crate) at: Stamp,
-}
-
 /// Every table of one request as the one table the engine resolves, and each table's rows.
 pub(crate) struct Merged {
     table: AddressTable,
@@ -184,49 +176,39 @@ impl Merged {
         Ok(Merged { table, widths })
     }
 
-    /// Resolve every row to the item it names.
-    pub(crate) fn name(&self, state: &AppState) -> Result<Names<Result<ItemAt, Reason>>, ApiError> {
-        let named = state
-            .engine
-            .name_items(&self.table)
-            .map_err(map_engine_error)?;
-        let verdicts = named
-            .verdicts
-            .into_iter()
-            .map(|verdict| verdict.map_err(|refusal| refusal.kind()));
-        Ok(Names {
-            tables: self.per_table(verdicts),
-            ignored: named.ignored,
-            at: named.at,
-        })
-    }
-
-    /// Resolve every row to the item, the artifact or the layer it names.
-    pub(crate) fn name_targets(
-        &self,
+    /// Every row resolved for a write against the generation served now; a row may name an
+    /// artifact or a layer where `targets`. The engine brings the names to the generation the
+    /// write applies in. The table moves into the answer; each table's rows stay here.
+    pub(crate) fn names(
+        &mut self,
         state: &AppState,
-    ) -> Result<Names<Result<NamedTarget, Reason>>, ApiError> {
-        let named = state
+        targets: bool,
+    ) -> Result<mosaica_engine::Names, ApiError> {
+        state
             .engine
-            .name_targets(&self.table)
-            .map_err(map_engine_error)?;
-        let verdicts = named
-            .verdicts
-            .into_iter()
-            .map(|verdict| verdict.map_err(|refusal| refusal.kind()));
-        Ok(Names {
-            tables: self.per_table(verdicts),
-            ignored: named.ignored,
-            at: named.at,
-        })
+            .names(
+                std::mem::take(&mut self.table),
+                &mosaica_engine::WriteScope::All,
+                targets,
+            )
+            .map_err(map_engine_error)
     }
 
-    /// `rows`, one per row of the merged table, split back into the request's tables.
-    fn per_table<T>(&self, mut rows: impl Iterator<Item = T>) -> Vec<Vec<T>> {
-        self.widths
-            .iter()
-            .map(|width| rows.by_ref().take(*width).collect())
-            .collect()
+    /// How many rows each of the request's tables holds, in order.
+    pub(crate) fn widths(&self) -> &[usize] {
+        &self.widths
+    }
+
+    /// Row `row` of the merged table as the request wrote it: its table, and its row there.
+    pub(crate) fn locate(&self, row: usize) -> (usize, usize) {
+        let mut start = 0;
+        for (table, width) in self.widths.iter().enumerate() {
+            if row < start + width {
+                return (table, row - start);
+            }
+            start += width;
+        }
+        (self.widths.len(), row - start)
     }
 }
 

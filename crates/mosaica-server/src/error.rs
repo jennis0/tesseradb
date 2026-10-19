@@ -397,8 +397,9 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::VocabularyConflict { detail }) => ApiError::Conflict(detail),
         // The detail names the values and the holders' `mosaica_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
-        // Reached only where the handler's last resolution was stale too.
-        AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(ExecError::NamesRefused { row, reason }) => {
+            crate::address::strict_refusal("the request", row, reason)
+        }
         AcceptError::Exec(e @ ExecError::Store { .. }) => {
             tracing::error!(
                 detail = %e,
@@ -440,10 +441,14 @@ pub fn map_change_batch_error(
     ops: &[mosaica_lifecycle::ChangeOp],
     failure: mosaica_engine::AcceptError,
 ) -> ApiError {
-    // Refused before anything was applied: a deletion of a layer's own identifier.
+    // Refused before anything was applied: a deletion of a layer's own identifier, or a strict
+    // request's row naming nothing.
     if matches!(
         failure,
-        mosaica_engine::AcceptError::Exec(mosaica_lifecycle::ExecError::LayerRefused { .. })
+        mosaica_engine::AcceptError::Exec(
+            mosaica_lifecycle::ExecError::LayerRefused { .. }
+                | mosaica_lifecycle::ExecError::NamesRefused { .. }
+        )
     ) {
         return map_accept_error(failure);
     }

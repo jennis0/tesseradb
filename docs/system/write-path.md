@@ -216,13 +216,16 @@ check them. It checks what can have moved since the handler's generation, from m
 
 - an item a row names that has since been deleted, or added to the view;
 - an item a row edits that has since been deleted, or added to or dropped from a view;
+- an entity a row names that a compaction has since freed and issued to another item;
 - the unique columns, declared or withdrawn since, where the batch creates items;
-- a value a created row sets that has since been given to an item.
+- a value a created or refused row carries that has since been given to an item.
 
 The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
-this check. Where something has moved, nothing is written, and the handler decides the batch once
-more against a newer generation. If that attempt finds it moved again, the batch is refused with
-`409`; sent again, it is decided against what is stored then.
+this check. Where something has moved, the executor resolves and decides the whole batch again
+itself, by the same rule, against everything the open window holds, and writes what that
+decides. The executor is the only thread that moves an item, so nothing moves between that and
+the apply, and a batch is never refused because what it named moved while it waited: it applies
+to the items where they are when it applies.
 
 ### Edits
 
@@ -251,19 +254,18 @@ append:
   own until the compaction that removes it;
 - the unique values, which name the new entity from the acknowledgement.
 
-A change, a growth or a publication resolved before an edit moved an item it names reaches the
-item where it is now. The generation counts the windows that committed an edit, the folds that
-retired entities and the folds that freed ids. A command's names are resolved against one
-generation, and the command carries that generation's counts to the executor. One that finds an
-edit committed since looks up in the edited-items map where each entity it names that the overlay
-deletes has moved. Its names are stale where a fold has since freed ids, one of which may now name
-another item, or has retired entities after an edit, which can drop the entry saying where an item
-went. A publication and a growth with stale names are refused, and resolve their names again up to
-three times. A change is never refused for stale names: it carries the `mosaica_id` of each item it
-names, and the write executor, which is the only thread that moves an item, finds each item again
-by it, so the change reaches the entity the item holds when the change applies, or nothing where the
-item is gone. A deny that reaches the old entity before the edit commits is carried by the check
-above: the edit is decided again.
+A change, a growth or a publication names its items in a table that its handler resolves against
+one generation, and the write executor brings the names to the generation the write applies in.
+The generation counts the folds that retired entities and keeps what the latest of them retired,
+and the write carries the counts and the unique entries' sequence number it was resolved at. The
+executor resolves again, from the table, each row naming an item the overlay has since deleted,
+an edit moving it included, or a fold has since removed, and each row carrying a value an item
+has been given since; every other row stands as it was resolved. Where a fold the write
+predates is no longer kept, every row is resolved again. So a write reaches each item where it is
+when the write applies, a value reaches the item holding it then, and a row whose item is gone
+names nothing and is refused. A change to an item an edit has moved also reaches the entity it
+named, so the log names both. A deny that reaches the old entity before the edit commits is
+carried by the check above: the edit is decided again.
 
 The edited-items map says which entity holds each edited item. It has two directions, number to
 entity and entity to number, each a set of run files like a unique field's: a flush writes one run
@@ -314,7 +316,7 @@ and a retry sent after that is decided as a new batch.
 | Outcome | Meaning | Retry |
 |---|---|---|
 | 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged and refused rows wrote nothing, and `refused` lists the refused ones | Not needed; a refused row after fixing it |
-| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked, or its new items would need a shard past the last or its edits a shard's ids past their end. Nothing in the batch took effect | After fixing the request; the third as it was; the last after deleting and compacting items, or with fewer rows |
+| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or its new items would need a shard past the last or its edits a shard's ids past their end. Nothing in the batch took effect | After fixing the request; the last after deleting and compacting items, or with fewer rows |
 | 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
@@ -381,9 +383,11 @@ unique field names nothing: it is ignored, as a build ignores it, and the answer
 `ignored_columns`.
 
 Every change and member of a request is validated and resolved, in one call, before anything is
-accepted. A request with a malformed item, or one that names no item by any column, is refused
-with `422` and nothing is queued. A change or member naming no item, or two, is refused and listed
-in the answer's `refused` by position and reason, and the others are applied; with `strict=true`
+accepted, and resolved again where the request applies wherever what it named has moved since
+([edits](#edits)). A request with a malformed item, or one that names no item by any column, is
+refused with `422` and nothing is queued. A change or member naming no item, or two, where the
+request applies is refused and listed in the answer's `refused` by position and reason, and the
+others are applied; with `strict=true`
 the request is refused instead, `404` where the row names no item and `409` where it names two.
 Many changes, or members, may name one item. A generating set is refused whole at any member it
 cannot resolve, strict or not, and so is a growth's page joining one, because a viewer must see

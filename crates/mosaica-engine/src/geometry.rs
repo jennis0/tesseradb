@@ -131,9 +131,6 @@ pub(crate) struct PrefixRotation {
     /// publication demonstrably removed, derived from what it carried forward and never from what
     /// the plan predicted.
     pub(crate) retired: Bitmap,
-    /// Whether the fold publishing this frees ids the allocator issues again, which makes a write
-    /// resolved before it stale by [`crate::edited::Stamp`]'s rule.
-    pub(crate) frees: bool,
     /// Each layer space's artifact deletions the fold removed the records of, leaving its overlay
     /// in this swap on [`Self::retired`]'s rule.
     pub(crate) retired_artifacts: std::collections::BTreeMap<mosaica_types::LayerSpace, Bitmap>,

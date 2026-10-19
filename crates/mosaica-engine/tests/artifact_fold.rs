@@ -21,6 +21,7 @@ mod common;
 use common::*;
 use mosaica_engine::Engine;
 use mosaica_lifecycle::membership::IncomingContent;
+use mosaica_lifecycle::resolve::Reason;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{IncomingArtifact, IncomingGrowth};
 use mosaica_types::layer::{ContentDeclaration, LayerDeclaration};
@@ -1014,12 +1015,12 @@ fn the_content_below_a_withdrawn_one_keeps_its_value_across_a_restart() {
     assert_eq!(served(&engine), expected, "across a restart");
 }
 
-/// **A declared member that is deleted refuses the batch; a suppressed one is accepted.** The two
-/// are not near-neighbours: a deletion is irreversible, so the content would be unservable from
-/// birth and the count short for ever, while a suppression is an operator's reversible action that
-/// must not refuse an unrelated publication.
+/// **A declared member that is deleted names nothing, and is refused alone; a suppressed one is
+/// accepted.** The publication takes every other member and lists the deleted one among its
+/// refused rows. A suppression is an operator's reversible action, and a suppressed member is a
+/// live member temporarily outside every mask.
 #[test]
-fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
+fn publication_refuses_a_deleted_member_alone_and_accepts_a_suppressed_one() {
     let fx = fixture();
     let engine = fx.open_unrefreshed();
     engine.register_layer(declaration("clusters/a")).unwrap();
@@ -1033,53 +1034,27 @@ fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
         .accept_change(suppressed, ChangeOp::Suppress)
         .expect("the suppress is accepted");
 
-    let refused = engine.publish_artifacts(
-        "clusters/a".into(),
-        0,
-        vec![IncomingArtifact::from_entities(
-            Some("c0".into()),
-            fx.members(0..300),
-        )],
-    );
-    let detail = match refused {
-        Err(e) => e.to_string(),
-        Ok(_) => panic!(
-            "a membership naming a deleted document is refused rather than published into silence"
-        ),
-    };
-    // The refusal is the caller's 422 body, so it carries a count and a position and never an
-    // entity id (I10): every number in it is one of those two.
-    let numbers: Vec<&str> = detail
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|run| !run.is_empty())
-        .collect();
+    let published = engine
+        .put_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("c0".into()),
+                fx.members(0..300),
+            )],
+        )
+        .expect("the publication is accepted");
+    let reasons: Vec<Reason> = published.refused.iter().map(|(_, r)| *r).collect();
     assert_eq!(
-        numbers,
-        vec!["1", "0"],
-        "one deleted member, in artifact 0, and nothing else numeric: {detail}"
+        reasons,
+        vec![Reason::UnknownMosaicaId],
+        "the deleted member alone is refused"
     );
-    assert!(
-        !detail.contains(&deleted.raw().to_string()),
-        "the deleted entity's id must not appear: {detail}"
-    );
-
-    // The same batch without the deleted member, and still carrying the suppressed one.
-    let accepted = engine.publish_artifacts(
-        "clusters/a".into(),
-        0,
-        vec![IncomingArtifact::from_entities(
-            Some("c0".into()),
-            fx.members((0..300).filter(|s| *s != 7)),
-        )],
-    );
-    assert!(
-        accepted.is_ok(),
-        "the suppressed member is a live member temporarily outside every mask: {accepted:?}"
-    );
+    assert_eq!(published.joined, 299, "every other member joins");
     assert_eq!(
         count(&engine),
         298,
-        "and it is outside this count until the unsuppress — fail-closed, and not a refusal"
+        "and the suppressed one is outside this count until the unsuppress"
     );
 }
 

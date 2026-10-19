@@ -478,7 +478,7 @@ impl Executor {
     /// carried the join.
     pub(super) fn mint_records(
         &mut self,
-        closed: &mut [mosaica_lifecycle::ClosedEntry<Reply<Ingested>>],
+        closed: &mut [mosaica_lifecycle::ClosedEntry<IngestReply>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed)? else {

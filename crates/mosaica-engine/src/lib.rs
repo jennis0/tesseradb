@@ -44,6 +44,7 @@ pub mod projection;
 pub mod records;
 mod refresh;
 pub mod region;
+mod resolver;
 pub mod row_column;
 pub mod row_members;
 pub mod select;
@@ -100,6 +101,7 @@ pub use control::{
     AddressTable, AddressValue, GrownMembership, NamedItems, NamedTargets, PublishedArtifacts,
 };
 pub use edited::{NamedTarget, Stamp};
+pub use resolver::{MemberNames, MemberSet, NamedList, Names, Refused, WriteScope};
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;

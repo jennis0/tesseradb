@@ -717,36 +717,12 @@ impl WritePath {
     /// at the close of the commit window this submission lands in.
     pub(crate) fn accept_ingest(
         &self,
-        planned: crate::ingest::Planned,
-        principal: String,
-        batch_id: String,
-        body_hash: [u8; 32],
-        unique_seq: u64,
+        submission: IngestSubmission,
     ) -> Result<Ingested, AcceptError> {
         let mark = StageMark::now();
-        let crate::ingest::Planned {
-            rows,
-            edits,
-            slots,
-            keys,
-            artifacts,
-            over_bound,
-        } = planned;
-        let submission = command::IngestSubmission {
-            rows,
-            edits,
-            slots,
-            keys,
-            principal,
-            batch_id,
-            body_hash,
-            artifacts,
-            unique_seq,
-            over_bound,
-        };
         let answered = self.submit(|reply| Command::Ingest { submission, reply });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
-        answered
+        answered?
     }
 
     /// Register an annotation layer and wait for its receipt.
@@ -867,13 +843,13 @@ impl WritePath {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
-        stamp: crate::edited::Stamp,
+        names: Box<crate::resolver::MemberNames>,
     ) -> Result<PublishedBatch, AcceptError> {
         self.submit(|reply| Command::PublishArtifacts {
             layer,
             level,
             artifacts,
-            stamp,
+            names,
             reply,
         })
     }
@@ -885,13 +861,13 @@ impl WritePath {
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        stamp: crate::edited::Stamp,
-    ) -> Result<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>), AcceptError> {
+        names: Box<crate::resolver::MemberNames>,
+    ) -> Result<GrownBatch, AcceptError> {
         self.submit(|reply| Command::GrowMemberships {
             layer,
             level,
             joins,
-            stamp,
+            names,
             reply,
         })
     }
@@ -901,8 +877,9 @@ impl WritePath {
     /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
     pub(crate) fn submit_changes(
         &self,
-        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
-        stamp: crate::edited::Stamp,
+        names: Box<crate::resolver::Names>,
+        ops: Vec<ChangeOp>,
+        strict: bool,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
             None,
@@ -910,8 +887,9 @@ impl WritePath {
             self.faults.clone(),
         );
         self.handle()?.enqueue(Command::Changes {
-            changes,
-            stamp,
+            names,
+            ops,
+            strict,
             reply,
         })?;
         Ok(PendingChange(pending))
@@ -919,17 +897,16 @@ impl WritePath {
 }
 /// An enqueued `/control/changes` request, awaiting its answer.
 ///
-/// The public face of `Pending<()>`: a change's answer carries no ids, so the only thing a caller
-/// can do with it is learn whether the change took hold, and this type says exactly that in its
-/// `wait` signature.
-pub struct PendingChange(Pending<()>);
+/// The public face of `Pending`: a change's answer carries no ids, so what a caller learns is
+/// whether the change took hold, and which rows named nothing where it applied.
+pub struct PendingChange(Pending<crate::resolver::Refused>);
 
 impl PendingChange {
-    /// Block until the executor answers this request.
+    /// Block until the executor answers this request: the rows refused, with their reasons.
     ///
     /// `Err` does not mean "nothing happened": for `Delete`/`Suppress` see [`ExecError::Wal`],
     /// and for [`SubmitError::ReceiptLost`] see `Pending::wait`.
-    pub fn wait(self) -> Result<(), AcceptError> {
+    pub fn wait(self) -> Result<crate::resolver::Refused, AcceptError> {
         self.0.accept()
     }
 }

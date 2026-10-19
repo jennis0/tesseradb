@@ -409,11 +409,13 @@ impl Executor {
             g.segments_version = segments_version;
             g.bundle = bundle;
             g.dict = dict;
-            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+            if let Some(r) = rotation.as_ref().filter(|r| !r.retired.is_empty()) {
                 g.fold_epoch = previous.fold_epoch + 1;
-            }
-            if rotation.as_ref().is_some_and(|r| r.frees) {
-                g.free_epoch = previous.free_epoch + 1;
+                g.retirements = Arc::new(previous.retirements.with(
+                    g.fold_epoch,
+                    shard_id,
+                    &r.retired,
+                ));
             }
             if let Some(r) = &rotation {
                 g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));

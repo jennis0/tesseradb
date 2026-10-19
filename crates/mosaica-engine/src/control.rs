@@ -1,14 +1,13 @@
 //! The control-plane calls: resolving, writing, declaring and publishing.
 
-use mosaica_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
+use mosaica_lifecycle::resolve;
 use mosaica_lifecycle::wal::ChangeOp;
-use mosaica_store::manifest::DeclaredScalar;
-use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
 use mosaica_types::{EntityId, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId};
 
 use crate::edited::{NamedTarget, Stamp};
 use crate::engine::Engine;
+use crate::resolver::{MemberNames, MemberSet, Names, Refused, Resolver, WriteScope};
 use crate::write::joined::flushed_terms_of;
 use crate::Generation;
 
@@ -22,6 +21,15 @@ impl Engine {
         self.write
             .live()
             .resolve_terms(&self.generation.load().dict, descriptors)
+    }
+
+    /// A resolver of the names a writer of `scope` sends, against `generation`.
+    pub(crate) fn resolver<'a>(
+        &'a self,
+        generation: &'a Generation,
+        scope: &'a WriteScope,
+    ) -> Resolver<'a> {
+        Resolver::new(generation, scope, &self.identity_key, self.write.live())
     }
 
     /// Which item each row of a call that addresses items names, under the identity rule
@@ -47,55 +55,42 @@ impl Engine {
         table: &AddressTable,
     ) -> std::result::Result<NamedTargets, crate::EngineError> {
         let generation = self.generation.load_full();
-        let artifact_rows: Vec<(usize, LayerSpace, EntityId)> = table
-            .mosaica_id
-            .iter()
-            .flatten()
-            .enumerate()
-            .filter_map(|(row, id)| {
-                let (space, entity) = self.identity_key.invert_artifact((*id)?)?;
-                Some((row, space, entity))
-            })
-            .collect();
-        let mut items = table.clone();
-        if let Some(ids) = items.mosaica_id.as_mut() {
-            for (row, ..) in &artifact_rows {
-                ids[*row] = None;
-            }
-        }
-        let named = name_items_in(self, &generation, &items)?;
-        let mut verdicts: Vec<std::result::Result<Target, resolve::Refusal>> = named
+        let resolved = self
+            .resolver(&generation, &WriteScope::All)
+            .targets(table, None)?;
+        let targets: Vec<Target> = resolved
             .verdicts
-            .into_iter()
-            .map(|verdict| verdict.map(ItemAt::target))
-            .collect();
-        for &(row, space, entity) in &artifact_rows {
-            let target = self.artifact_target_in(&generation, space, entity);
-            verdicts[row] = match (&verdicts[row], target) {
-                (Ok(_), _) => Err(resolve::Refusal::NamesTwo {
-                    row,
-                    named: Vec::new(),
-                }),
-                (Err(_), Some(target)) => Ok(target),
-                (Err(_), None) => Err(resolve::Refusal::UnknownMosaicaId { row }),
-            };
-        }
-        let targets: Vec<Target> = verdicts
             .iter()
             .filter_map(|verdict| verdict.as_ref().ok().copied())
             .collect();
         let mut named_targets = NamedTarget::all(&self.identity_key, &generation, &targets)
             .map_err(crate::EngineError::Store)?
             .into_iter();
-        let verdicts = verdicts
+        let verdicts = resolved
+            .verdicts
             .into_iter()
             .map(|verdict| verdict.map(|_| named_targets.next().expect("one per target")))
             .collect();
         Ok(NamedTargets {
             verdicts,
-            ignored: named.ignored,
-            at: named.at,
+            ignored: resolved.ignored,
+            at: Stamp::of(&generation),
         })
+    }
+
+    /// The rows of `table`, resolved for a write by a writer of `scope` against the generation
+    /// served now: what [`Engine::accept_changes_named`], [`Engine::put_artifacts_named`] and
+    /// [`Engine::grow_memberships_named`] take. Each row is resolved again where the write applies
+    /// wherever what it named has moved since. `targets` lets a row name an artifact or a layer
+    /// by its `mosaica_id`, as a change may.
+    pub fn names(
+        &self,
+        table: AddressTable,
+        scope: &WriteScope,
+        targets: bool,
+    ) -> std::result::Result<Names, crate::EngineError> {
+        let generation = self.generation.load_full();
+        Names::resolve(&self.resolver(&generation, scope), table, targets)
     }
 }
 
@@ -145,221 +140,29 @@ pub(crate) fn name_items_in(
     generation: &Generation,
     table: &AddressTable,
 ) -> std::result::Result<NamedItems, crate::EngineError> {
-    let declared = &generation.bundle.manifest.declared_scalars;
-    let mut unique: Vec<(u16, &DeclaredScalar, &[Option<AddressValue>])> = Vec::new();
-    let mut ignored: Vec<String> = Vec::new();
-    for (name, cells) in &table.columns {
-        let found = declared
-            .iter()
-            .enumerate()
-            .find(|(_, d)| d.name == *name)
-            .filter(|_| {
-                generation
-                    .shards()
-                    .any(|shard| shard.unique.get(name).is_some())
-            });
-        match found {
-            Some((at, d)) => unique.push((at as u16, d, cells)),
-            None => ignored.push(name.clone()),
-        }
-    }
-    let at = Stamp::of(generation);
-    if table.rows == 0 {
-        return Ok(NamedItems {
-            verdicts: Vec::new(),
-            ignored,
-            at,
-        });
-    }
-    resolve::require_identifier(table.mosaica_id.is_some(), unique.len()).map_err(|e| {
-        crate::EngineError::AddressMalformed(format!("This request cannot address items: {e}"))
-    })?;
-    let store = crate::EngineError::Store;
-    let no_item = |row| Verdict::Refused(resolve::Refusal::NamesNoItem { row });
-
-    // One column alone, the common case, is decided without a row's identity per row.
-    let verdicts = match (&table.mosaica_id, unique.as_slice()) {
-        (Some(ids), []) => {
-            let present: Vec<(usize, MosaicaId)> = ids
-                .iter()
-                .enumerate()
-                .filter_map(|(at, id)| id.map(|id| (at, id)))
-                .collect();
-            let wanted: Vec<MosaicaId> = present.iter().map(|(_, id)| *id).collect();
-            let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
-            let found = engine.mosaica_ids_in(generation, &wanted).map_err(store)?;
-            for ((at, _), item) in present.iter().zip(found) {
-                verdicts[*at] = match item {
-                    Some(item) => Verdict::Names(item),
-                    None => Verdict::Refused(resolve::Refusal::UnknownMosaicaId { row: *at }),
-                };
-            }
-            verdicts
-        }
-        (None, [(position, d, cells)]) => {
-            let mut keys = Vec::with_capacity(table.rows);
-            let mut from = Vec::with_capacity(table.rows);
-            for (at, cell) in cells.iter().enumerate() {
-                let Some(value) = cell else { continue };
-                if let Some(key) = key_of_value(d, value)? {
-                    keys.push(key);
-                    from.push(at);
-                }
-            }
-            let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
-            let field = resolve::Identifier::Unique(*position);
-            let holders = crate::unique::holders(generation, &d.name, &keys).map_err(store)?;
-            for (at, item) in holders {
-                let row = from[at];
-                verdicts[row] = match &verdicts[row] {
-                    Verdict::Names(held) if *held != item => {
-                        Verdict::Refused(resolve::Refusal::NamesTwo {
-                            row,
-                            named: vec![(field, *held), (field, item)],
-                        })
-                    }
-                    Verdict::Refused(resolve::Refusal::NamesTwo { .. }) => continue,
-                    _ => Verdict::Names(item),
-                };
-            }
-            verdicts
-        }
-        _ => {
-            let mut rows = vec![RowIdentity::default(); table.rows];
-            if let Some(ids) = &table.mosaica_id {
-                for (row, id) in rows.iter_mut().zip(ids) {
-                    row.mosaica_id = *id;
-                }
-            }
-            for (position, d, cells) in &unique {
-                for (row, cell) in rows.iter_mut().zip(cells.iter()) {
-                    let Some(value) = cell else { continue };
-                    if let Some(key) = key_of_value(d, value)? {
-                        row.unique.push((*position, key.widen()));
-                    }
-                }
-            }
-            let holdings = Addressed { engine, generation };
-            resolve::resolve(&rows, &holdings, Batch::Names).map_err(store)?
-        }
-    };
-    let verdicts = verdicts
+    let resolved = engine
+        .resolver(generation, &WriteScope::All)
+        .items(table, None)?;
+    let verdicts = resolved
+        .verdicts
         .into_iter()
-        .map(|verdict| match verdict {
-            Verdict::Names(item) => Ok(item),
-            Verdict::Refused(refusal) => Err(refusal),
-            Verdict::Creates => unreachable!("a call that addresses items creates none"),
+        .map(|verdict| {
+            verdict.map(|target| match target {
+                Target::Item(shard, entity) => ItemAt::new(shard, entity),
+                Target::Artifact(..) => {
+                    unreachable!("a call that addresses items names no artifact")
+                }
+            })
         })
         .collect();
     Ok(NamedItems {
         verdicts,
-        ignored,
-        at,
+        ignored: resolved.ignored,
+        at: Stamp::of(generation),
     })
 }
 
-/// A unique value as a caller wrote it, as its field's index keys it.
-fn key_of_value(
-    declared: &DeclaredScalar,
-    value: &AddressValue,
-) -> std::result::Result<Option<UniqueKey>, crate::EngineError> {
-    let keyword = declared.arrow_type == mosaica_spatial::tiler::ScalarType::Keyword;
-    let integer = match (value, keyword) {
-        (AddressValue::Text(text), true) => return Ok(Some(UniqueKey::keyword(text))),
-        (AddressValue::Integer(n), true) => {
-            return Err(crate::EngineError::AddressMalformed(format!(
-                "{n} is not a value of '{}', which holds keywords. Send it as a string",
-                declared.name
-            )))
-        }
-        (AddressValue::Other(shown), _) => {
-            return Err(crate::EngineError::AddressMalformed(format!(
-                "{shown} is not a value of '{}'. Send {}",
-                declared.name,
-                match keyword {
-                    true => "a string",
-                    false => "a whole number",
-                }
-            )))
-        }
-        (AddressValue::Integer(n), false) => *n,
-        (AddressValue::Text(text), false) => text.parse().map_err(|_| {
-            crate::EngineError::AddressMalformed(format!(
-                "'{text}' is not a value of '{}', which holds integers. Write it in decimal digits",
-                declared.name
-            ))
-        })?,
-    };
-    Ok(mosaica_store::unique::key_of_integer(
-        declared.arrow_type,
-        integer,
-    ))
-}
-
-/// Who holds what for a call that addresses items: the unique indexes and their live entries,
-/// and every `mosaica_id` [`Engine::mosaica_ids_in`] resolves, deleted items left out.
-struct Addressed<'a> {
-    engine: &'a Engine,
-    generation: &'a Generation,
-}
-
-impl resolve::Holdings for Addressed<'_> {
-    type Error = StoreError;
-
-    fn holders(
-        &self,
-        field: u16,
-        keys: &[resolve::Key],
-    ) -> Result<Vec<(usize, ItemAt)>, StoreError> {
-        let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
-        let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
-        let keys: Vec<UniqueKey> = keys
-            .iter()
-            .map(|k| UniqueKey::of_widened(kind, *k))
-            .collect();
-        crate::unique::holders(self.generation, &declared.name, &keys)
-    }
-
-    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, StoreError> {
-        self.engine.mosaica_ids_in(self.generation, ids)
-    }
-}
-
 impl Engine {
-    /// The item each of `ids` names in `generation`: `None` per position for an identifier that
-    /// names no item, an artifact's and a layer's among them. An identifier names a number in its
-    /// shard, and the number names the entity the shard's edited-items map holds for it, or the
-    /// number itself where it has none ([`crate::edited`]). An item is named while its shard holds
-    /// it ([`holds_item`]) below the shard's high water and has not deleted it: a fold that
-    /// removes a deleted item also drops its deletion, so the overlay alone no longer says it is
-    /// gone.
-    pub(crate) fn mosaica_ids_in(
-        &self,
-        generation: &Generation,
-        ids: &[MosaicaId],
-    ) -> std::result::Result<Vec<Option<ItemAt>>, StoreError> {
-        let by_shard = mosaica_types::by_shard(ids.iter().enumerate().filter_map(|(at, id)| {
-            let (shard, number) = crate::edited::number_named(&self.identity_key, generation, *id)?;
-            Some((shard.id(), (at, shard, number)))
-        }));
-        let mut out = vec![None; ids.len()];
-        let live = self.write.live();
-        for (id, named) in by_shard {
-            let shard = named[0].1;
-            let high_water = live.shard(id).map_or(0, |shard| shard.high_water());
-            let numbers: Vec<EntityId> = named.iter().map(|(_, _, number)| *number).collect();
-            let held = crate::edited::entities_of_numbers(shard, &numbers, |entity| {
-                entity.raw() < high_water
-                    && holds_item(shard, entity)
-                    && !shard.overlay.is_deleted(entity)
-            })?;
-            for ((at, ..), entity) in named.iter().zip(held) {
-                out[*at] = entity.map(|entity| ItemAt::new(id, entity));
-            }
-        }
-        Ok(out)
-    }
-
     /// Resolve `mosaica_id`s of items, artifacts and layers to what each names: `None` per
     /// position for an identifier that names nothing.
     pub fn resolve_targets(
@@ -367,7 +170,8 @@ impl Engine {
         ids: &[MosaicaId],
     ) -> std::result::Result<Vec<Option<Target>>, StoreError> {
         let generation = self.generation.load_full();
-        let items = self.mosaica_ids_in(&generation, ids)?;
+        let resolver = self.resolver(&generation, &WriteScope::All);
+        let items = resolver.mosaica_items(ids)?;
         Ok(ids
             .iter()
             .zip(items)
@@ -375,23 +179,10 @@ impl Engine {
                 Some(item) => Some(item.target()),
                 None => {
                     let (space, entity) = self.identity_key.invert_artifact(*id)?;
-                    self.artifact_target_in(&generation, space, entity)
+                    resolver.artifact(space, entity)
                 }
             })
             .collect())
-    }
-
-    /// The layer itself, where `entity` is `space`'s own, or an artifact its level holds that
-    /// `generation` has not deleted.
-    fn artifact_target_in(
-        &self,
-        generation: &Generation,
-        space: LayerSpace,
-        entity: EntityId,
-    ) -> Option<Target> {
-        let deleted = generation.space_overlay(space).is_deleted(entity);
-        (self.write.live().artifact_held(space, entity) && !deleted)
-            .then_some(Target::Artifact(space, entity))
     }
 
     /// Does `view` hold a row for `item`, flushed or buffered?
@@ -453,12 +244,6 @@ impl Engine {
         self.write.wake();
     }
 
-    /// The stamp of the generation served now: what a write naming entities taken from it, rather
-    /// than from [`Engine::name_items`], carries.
-    fn stamp_now(&self) -> Stamp {
-        Stamp::of(&self.generation.load())
-    }
-
     /// [`Engine::accept_changes`] for one change to the item `entity` of a bundle of one shard.
     /// Over several shards an entity names no item alone, so this answers
     /// [`crate::write::AcceptError::Contract`] and changes nothing.
@@ -490,7 +275,7 @@ impl Engine {
         &self,
         changes: Vec<(Target, ChangeOp)>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.submit_changes(changes)?.wait()
+        self.submit_changes(changes)?.wait().map(drop)
     }
 
     /// Apply one `/control/changes` request whose entities were resolved at `at`, and wait for its
@@ -502,7 +287,7 @@ impl Engine {
         changes: Vec<(NamedTarget, ChangeOp)>,
         at: Stamp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.submit_changes_at(changes, at)?.wait()
+        self.submit_changes_at(changes, at)?.wait().map(drop)
     }
 
     /// [`Engine::submit_changes_at`] for targets as the generation served now holds them.
@@ -520,27 +305,53 @@ impl Engine {
         self.submit_changes_at(named.into_iter().zip(ops).collect(), Stamp::of(&generation))
     }
 
-    /// Enqueue one `/control/changes` request whose entities were resolved at `at`, without
-    /// waiting, so requests from several callers reach the deny lane together and share one
-    /// fsync. A change to an item reaches the item where it is when the change applies, however
-    /// edits and folds have moved it since `at`, and none where the item is gone. Read
-    /// `PendingChange::wait` before treating either half's `Err` as "nothing happened".
-    ///
-    /// A deletion of a layer's own entity is refused, and the request with it, before anything
-    /// is applied: a layer is removed by dropping it.
+    /// [`Engine::submit_changes_named`] for changes to targets resolved at `at`, each item
+    /// addressed by the `mosaica_id` it was named by.
     pub fn submit_changes_at(
         &self,
         changes: Vec<(NamedTarget, ChangeOp)>,
         at: Stamp,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        let layer_deleted = changes
-            .iter()
-            .find_map(|(named, op)| match (named.target(), op) {
-                (Target::Artifact(space, entity), ChangeOp::Delete) => {
-                    self.write.live().layer_of_own_entity(space, entity)
-                }
-                _ => None,
-            });
+        let (targets, ops): (Vec<NamedTarget>, Vec<ChangeOp>) = changes.into_iter().unzip();
+        self.submit_changes_named(Names::of_targets(at, WriteScope::All, &targets), ops, false)
+    }
+
+    /// Apply one `/control/changes` request, row `i` of `names` taking `ops[i]`, and wait for its
+    /// receipt: the rows refused where the request applies, with their reasons. See
+    /// [`Engine::submit_changes_named`].
+    pub fn accept_changes_named(
+        &self,
+        names: Names,
+        ops: Vec<ChangeOp>,
+        strict: bool,
+    ) -> std::result::Result<Refused, crate::write::AcceptError> {
+        self.submit_changes_named(names, ops, strict)?.wait()
+    }
+
+    /// Enqueue one `/control/changes` request without waiting, so requests from several callers
+    /// reach the deny lane together and share one fsync. Each row's names are brought to the
+    /// generation the request applies in, so a change reaches the item it names where the item is
+    /// then, however edits and folds have moved it, and none where the item is gone, which refuses
+    /// the row. Where `strict`, a refused row refuses the request, and nothing is applied. Read
+    /// `PendingChange::wait` before treating either half's `Err` as "nothing happened".
+    ///
+    /// A deletion of a layer's own entity is refused, and the request with it, before anything
+    /// is applied: a layer is removed by dropping it.
+    pub fn submit_changes_named(
+        &self,
+        names: Names,
+        ops: Vec<ChangeOp>,
+        strict: bool,
+    ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
+        let layer_deleted =
+            ops.iter()
+                .enumerate()
+                .find_map(|(row, op)| match (names.verdict(row), op) {
+                    (Ok(Target::Artifact(space, entity)), ChangeOp::Delete) => {
+                        self.write.live().layer_of_own_entity(space, entity)
+                    }
+                    _ => None,
+                });
         if let Some(name) = layer_deleted {
             return Err(crate::write::AcceptError::Exec(
                 mosaica_lifecycle::ExecError::LayerRefused {
@@ -551,7 +362,9 @@ impl Engine {
                 },
             ));
         }
-        self.write.submit_changes(changes, at)
+        #[cfg(feature = "fault-injection")]
+        self.switches.hold_write_check_if_wanted();
+        self.write.submit_changes(Box::new(names), ops, strict)
     }
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
@@ -704,29 +517,51 @@ impl Engine {
         self.write.drop_view(group, key)
     }
 
-    /// [`Engine::put_artifacts_at`] for members as the generation served now holds them.
+    /// [`Engine::put_artifacts_named`] for members as the generation served now holds them, each
+    /// addressed by its `mosaica_id`.
     pub fn put_artifacts(
         &self,
         layer: String,
         level: u32,
         artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
-        self.put_artifacts_at(layer, level, artifacts, self.stamp_now())
+        let generation = self.generation.load_full();
+        let lists = artifacts.iter().enumerate().flat_map(|(at, artifact)| {
+            let members = std::iter::once((at, MemberSet::Members, false, &artifact.members));
+            let excluding = artifact
+                .excluding
+                .iter()
+                .map(move |set| (at, MemberSet::Excluding, false, set));
+            let sets = artifact
+                .contents
+                .iter()
+                .enumerate()
+                .map(move |(k, c)| (at, MemberSet::GeneratedFrom(k), true, &c.generated_from));
+            members.chain(excluding).chain(sets)
+        });
+        let names =
+            MemberNames::of_sets(&self.identity_key, &generation, lists).map_err(store_refusal)?;
+        self.put_artifacts_named(layer, level, artifacts, names)
     }
 
-    /// Put a batch of artifacts into one level of a layer, returning a `mosaica_id` per artifact
-    /// and the batch's counts. A held key is filled; an unheld key is published. The members were
-    /// resolved at `at`, and are followed and stale on
-    /// [`Engine::submit_changes_at`]'s rule. A deleted member refuses the batch; a suppressed one
-    /// is accepted.
-    pub fn put_artifacts_at(
+    /// Put a batch of artifacts into one level of a layer, returning a `mosaica_id` per artifact,
+    /// the batch's counts and the member rows refused. A held key is filled; an unheld key is
+    /// published. Each artifact's sets are the items `names`' lists name where the batch applies:
+    /// a member deleted since it was named names nothing, and is refused alone, or refuses the
+    /// batch where its list is whole. A suppressed member is accepted.
+    pub fn put_artifacts_named(
         &self,
         layer: String,
         level: u32,
-        artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
-        at: Stamp,
+        mut artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
+        names: MemberNames,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
-        let batch = self.write.publish_artifacts(layer, level, artifacts, at)?;
+        names.fill_artifacts(&mut artifacts, None);
+        #[cfg(feature = "fault-injection")]
+        self.switches.hold_write_check_if_wanted();
+        let batch = self
+            .write
+            .publish_artifacts(layer, level, artifacts, Box::new(names))?;
         let mosaica_ids = batch
             .entities
             .into_iter()
@@ -738,6 +573,7 @@ impl Engine {
             without_content: batch.without_content,
             filled: batch.filled,
             joined: batch.joined,
+            refused: batch.refused,
         })
     }
 
@@ -753,34 +589,50 @@ impl Engine {
             .map(|published| published.mosaica_ids)
     }
 
-    /// [`Engine::grow_memberships_at`] for members as the generation served now holds them.
+    /// [`Engine::grow_memberships_named`] for members as the generation served now holds them,
+    /// each addressed by its `mosaica_id`, answering one [`GrownMembership`] per join.
     pub fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
-        self.grow_memberships_at(layer, level, joins, self.stamp_now())
+        let generation = self.generation.load_full();
+        let lists = joins.iter().enumerate().flat_map(|(at, join)| {
+            [
+                (at, MemberSet::Members, join.rank.is_some(), &join.joining),
+                (at, MemberSet::Leaving, false, &join.leaving),
+            ]
+        });
+        let names =
+            MemberNames::of_sets(&self.identity_key, &generation, lists).map_err(store_refusal)?;
+        self.grow_memberships_named(layer, level, joins, names)
+            .map(|(grown, _)| grown)
     }
 
     /// Add points to the memberships of artifacts that already exist, each named by its published
     /// key. A suppressed artifact grows like any other and stays suppressed: the key resolves
-    /// against the store, not what is served. The members were resolved at `at`, and the member
-    /// checks are [`Engine::put_artifacts_at`]'s. A point may also name its artifacts via
+    /// against the store, not what is served. The members are `names`' lists, on
+    /// [`Engine::put_artifacts_named`]'s rule. A point may also name its artifacts via
     /// `/control/ingest`'s column; this entry point is for correcting points that already exist,
     /// and an unknown key is refused here regardless.
     ///
-    /// One [`GrownMembership`] per join. Neither an ordinal nor a membership size crosses the
-    /// boundary.
-    pub fn grow_memberships_at(
+    /// One [`GrownMembership`] per join, and the member rows refused. Neither an ordinal nor a
+    /// membership size crosses the boundary.
+    pub fn grow_memberships_named(
         &self,
         layer: String,
         level: u32,
-        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        at: Stamp,
-    ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
-        let (space, grown) = self.write.grow_memberships(layer, level, joins, at)?;
-        grown
+        mut joins: Vec<mosaica_lifecycle::IncomingGrowth>,
+        names: MemberNames,
+    ) -> std::result::Result<(Vec<GrownMembership>, Refused), crate::write::AcceptError> {
+        names.fill_growth(&mut joins, None);
+        #[cfg(feature = "fault-injection")]
+        self.switches.hold_write_check_if_wanted();
+        let (space, grown, refused) =
+            self.write
+                .grow_memberships(layer, level, joins, Box::new(names))?;
+        let grown = grown
             .into_iter()
             .map(|receipt| {
                 Ok(GrownMembership {
@@ -791,7 +643,8 @@ impl Engine {
                     withdrawn: receipt.withdrawn,
                 })
             })
-            .collect()
+            .collect::<std::result::Result<Vec<_>, crate::write::AcceptError>>()?;
+        Ok((grown, refused))
     }
 
     /// Where an artifact target sits, and what was published there; `None` for an item. Addressing
@@ -852,6 +705,8 @@ pub struct PublishedArtifacts {
     /// How many memberships the batch added: every member of a created artifact, and every member
     /// a held artifact did not already hold.
     pub joined: u64,
+    /// The member rows that named nothing where the batch applied.
+    pub refused: Refused,
 }
 
 /// Where an artifact sits, as [`Engine::locate_artifact`] answers it. The ordinal is here because
@@ -869,4 +724,102 @@ pub struct PublishedArtifactAddress {
 /// deleted item removes all three.
 pub(crate) fn holds_item(shard: &crate::Shard, entity: EntityId) -> bool {
     crate::edited::holds(shard, entity) || flushed_terms_of(shard, entity).is_some()
+}
+
+/// A store failure while a write's names were read, as the write's refusal.
+fn store_refusal(e: StoreError) -> crate::write::AcceptError {
+    crate::write::AcceptError::Exec(mosaica_lifecycle::ExecError::Store {
+        detail: e.to_string(),
+    })
+}
+
+/// A layer declaration's views as `meta` holds them, as a build takes them: a view group named
+/// stands for every view the group holds now ([`mosaica_types::layer::expand_views`]), a layer
+/// scoped to a group names only views holding its keys, and a shape layer's views share one
+/// space. The refusal says what to name instead.
+pub(crate) fn declared_views(
+    meta: &crate::viewport::EngineMeta,
+    declaration: &mut mosaica_types::layer::LayerDeclaration,
+) -> std::result::Result<(), String> {
+    let name = declaration.name.clone();
+    let declared_views = std::mem::take(&mut declaration.views);
+    declaration.views = mosaica_types::layer::expand_views(
+        &declared_views,
+        |view| {
+            meta.groups
+                .iter()
+                .find(|g| g.name == view)
+                .map(|g| g.views.clone())
+        },
+        |view| meta.resolve_view(view).is_some(),
+    )
+    .map_err(|view| {
+        format!(
+            "layer '{name}' declares view '{view}', which is neither a view nor a view group of \
+             this deployment; name one of: {}",
+            meta.views
+                .iter()
+                .map(|v| v.id.as_str())
+                .chain(meta.groups.iter().map(|g| g.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    if let Some(group) = declaration.scope.group() {
+        mosaica_types::layer::check_scoped_views(
+            &declared_views,
+            group,
+            meta.groups
+                .iter()
+                .map(|g| (g.name.as_str(), g.members_of.as_deref())),
+            |view| {
+                meta.resolve_view(view)
+                    .and_then(|v| v.roster.as_ref())
+                    .map(|roster| roster.group.clone())
+            },
+        )
+        .map_err(|outside| {
+            format!(
+                "layer '{name}' is scoped to group '{group}' and names view '{}', which holds no \
+                 key of it; name {} or a view of {}, or drop the scope",
+                outside.view,
+                outside.sharing.join(" or "),
+                if outside.sharing.len() == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
+            )
+        })?;
+    }
+    // A shape layer over both projected and unprojected views is refused at the declaration
+    // rather than at its first artifact.
+    if declaration.membership == mosaica_types::layer::MembershipSource::Spatial {
+        if declaration.views.is_empty() {
+            return Err(format!(
+                "layer '{name}' declares no view to publish a shape into; name one"
+            ));
+        }
+        let frames: Vec<crate::shapes::ViewFrame> = declaration
+            .views
+            .iter()
+            .filter_map(|view| meta.resolve_view(view))
+            .map(|view| {
+                let q = view.quantisation;
+                crate::shapes::ViewFrame::new(
+                    &view.id,
+                    view.projection,
+                    crate::shapes::Bounds {
+                        x_min: q.x_min,
+                        x_max: q.x_max,
+                        y_min: q.y_min,
+                        y_max: q.y_max,
+                    },
+                )
+            })
+            .collect();
+        crate::shapes::check_shape_span(&frames, crate::shapes::ShapeSpace::Wgs84)
+            .map_err(|e| format!("layer '{name}': {e}"))?;
+    }
+    Ok(())
 }

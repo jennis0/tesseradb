@@ -107,6 +107,17 @@ impl<T> Pending<T> {
     }
 }
 
+/// Where an ingest batch is answered: what its rows became, or why the batch was refused where
+/// the executor resolved it again.
+pub(crate) type IngestReply = Reply<Result<Ingested, AcceptError>>;
+
+/// What a growth answers: the layer's space, one receipt per join, and the member rows refused.
+pub(crate) type GrownBatch = (
+    mosaica_types::LayerSpace,
+    Vec<MembershipGrown>,
+    crate::resolver::Refused,
+);
+
 /// What one accepted ingest batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ingested {
@@ -165,8 +176,11 @@ pub struct ViewDropped {
 /// acknowledged onto one name. Items and members are addressed by entity, which the handler
 /// resolves at the boundary, because a `mosaica_id` means nothing without its key. Large payloads
 /// are boxed so one variant does not set the size of every command in the queue.
-/// One `/control/ingest` batch as its handler resolved it.
+/// One `/control/ingest` batch as its handler resolved it, and the request itself, which the
+/// executor resolves again where what the batch named has moved since.
 pub(crate) struct IngestSubmission {
+    pub(crate) request: Arc<crate::ingest::IngestRequest>,
+    pub(crate) scope: crate::resolver::WriteScope,
     /// The rows the batch writes: items it creates, and items it adds to its view in place.
     pub(crate) rows: Vec<UnallocatedRow>,
     /// The items the batch moves to new entities.
@@ -175,10 +189,9 @@ pub(crate) struct IngestSubmission {
     pub(crate) slots: Vec<mosaica_lifecycle::Slot>,
     /// The unique values the created rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
-    /// The caller that sent the batch, which a retry is matched by beside `batch_id`.
-    pub(crate) principal: String,
-    pub(crate) batch_id: String,
-    pub(crate) body_hash: [u8; 32],
+    /// The unique values the refused rows carry, which name an item where one has been given a
+    /// holder since.
+    pub(crate) refused_keys: Vec<(u16, u128)>,
     /// The artifacts the written rows name in a column named for a layer. Resolved and grown
     /// when the window closes, in the same commit as the rows.
     pub(crate) artifacts: BatchArtifacts,
@@ -190,8 +203,41 @@ pub(crate) struct IngestSubmission {
     pub(crate) over_bound: Vec<u32>,
 }
 
-/// One item an ingest batch edits, and what the handler read of it: the executor refuses the
-/// edit as stale where the item's rows have moved since.
+impl IngestSubmission {
+    /// `planned`, resolved from `request` by a writer of `scope` when the live unique entries'
+    /// sequence number was `unique_seq`.
+    pub(crate) fn of(
+        planned: crate::ingest::Planned,
+        request: Arc<crate::ingest::IngestRequest>,
+        scope: crate::resolver::WriteScope,
+        unique_seq: u64,
+    ) -> IngestSubmission {
+        let crate::ingest::Planned {
+            rows,
+            edits,
+            slots,
+            keys,
+            refused_keys,
+            artifacts,
+            over_bound,
+        } = planned;
+        IngestSubmission {
+            request,
+            scope,
+            rows,
+            edits,
+            slots,
+            keys,
+            refused_keys,
+            artifacts,
+            unique_seq,
+            over_bound,
+        }
+    }
+}
+
+/// One item an ingest batch edits, and what the handler read of it: the executor resolves the
+/// batch again where the item's rows have moved since.
 pub(crate) struct SubmittedEdit {
     pub(crate) edit: UnallocatedEdit,
     /// Every view the old entity held a row in, as the handler read it.
@@ -203,14 +249,17 @@ pub(crate) enum Command {
     /// `body_hash` are the idempotency key. The answer is what each row of the request became.
     Ingest {
         submission: IngestSubmission,
-        reply: Reply<Ingested>,
+        reply: IngestReply,
     },
-    /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
-    /// ([`Command::is_never_shed`]).
+    /// One accepted `/control/changes` request, applied whole: row `i` of `names` takes `ops[i]`.
+    /// The only command on the deny lane ([`Command::is_never_shed`]). The answer is the rows
+    /// refused where it applies.
     Changes {
-        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
-        stamp: crate::edited::Stamp,
-        reply: Reply<()>,
+        names: Box<crate::resolver::Names>,
+        ops: Vec<ChangeOp>,
+        /// A refused row refuses the request.
+        strict: bool,
+        reply: Reply<crate::resolver::Refused>,
     },
     /// Register an annotation layer. The answer is the layer's space, whose own entity the handler
     /// turns into the `mosaica_id` a caller later suppresses the layer by.
@@ -274,7 +323,8 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
-        stamp: crate::edited::Stamp,
+        /// The members' names, which the executor brings to the generation the batch applies in.
+        names: Box<crate::resolver::MemberNames>,
         reply: Reply<PublishedBatch>,
     },
     /// Add entities to the memberships of artifacts that exist, each named by its key. The whole
@@ -284,8 +334,9 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         joins: Vec<IncomingGrowth>,
-        stamp: crate::edited::Stamp,
-        reply: Reply<(mosaica_types::LayerSpace, Vec<MembershipGrown>)>,
+        /// The members' names, as on [`Command::PublishArtifacts`].
+        names: Box<crate::resolver::MemberNames>,
+        reply: Reply<GrownBatch>,
     },
 }
 
@@ -326,18 +377,21 @@ mod tests {
                 #[cfg(feature = "fault-injection")]
                 None,
             );
+            let named = crate::edited::NamedTarget {
+                target: mosaica_types::Target::Item(
+                    mosaica_types::ShardId::ZERO,
+                    mosaica_types::EntityId::new(1),
+                ),
+                item: None,
+            };
             let cmd = Command::Changes {
-                changes: vec![(
-                    crate::edited::NamedTarget {
-                        target: mosaica_types::Target::Item(
-                            mosaica_types::ShardId::ZERO,
-                            mosaica_types::EntityId::new(1),
-                        ),
-                        item: None,
-                    },
-                    op,
-                )],
-                stamp: Default::default(),
+                names: Box::new(crate::resolver::Names::of_targets(
+                    Default::default(),
+                    crate::resolver::WriteScope::All,
+                    &[named],
+                )),
+                ops: vec![op],
+                strict: false,
                 reply,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
@@ -349,13 +403,22 @@ mod tests {
             );
         let ingest = Command::Ingest {
             submission: IngestSubmission {
+                request: Arc::new(crate::ingest::IngestRequest {
+                    principal: String::new(),
+                    batch_id: "b".into(),
+                    body_hash: [0u8; 32],
+                    view: None,
+                    rows: Vec::new(),
+                    artifacts: Default::default(),
+                    strict: false,
+                    mosaica_id_column: false,
+                }),
+                scope: crate::resolver::WriteScope::All,
                 rows: Vec::new(),
                 edits: Vec::new(),
                 slots: Vec::new(),
                 keys: Vec::new(),
-                principal: String::new(),
-                batch_id: "b".into(),
-                body_hash: [0u8; 32],
+                refused_keys: Vec::new(),
                 artifacts: Default::default(),
                 unique_seq: 0,
                 over_bound: Vec::new(),

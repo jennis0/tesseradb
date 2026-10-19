@@ -217,77 +217,8 @@ pub(crate) struct PublishedBatch {
     pub(crate) without_content: u64,
     pub(crate) filled: u64,
     pub(crate) joined: u64,
-}
-
-/// How many members of `sets` their own shards of `generation` have deleted.
-fn deleted_members(generation: &Generation, sets: &mosaica_lifecycle::ShardSets) -> u64 {
-    sets.iter()
-        .filter_map(|(id, set)| {
-            let shard = generation.shard(id)?;
-            Some(set.and_cardinality(shard.overlay.deleted_set()))
-        })
-        .sum()
-}
-
-/// The refusal of a publication naming a deleted member or content source, where it names one.
-/// A suppressed one is accepted, being a live member temporarily outside every mask. The detail is
-/// the caller's 422 body, so it gives a count and an artifact's position, never an entity id.
-fn deleted_in_publication(
-    generation: &Generation,
-    artifacts: &[IncomingArtifact],
-) -> Option<ExecError> {
-    let (count, first_artifact) =
-        first_deleted(artifacts.iter().enumerate().map(|(index, artifact)| {
-            let in_contents: u64 = artifact
-                .contents
-                .iter()
-                .map(|content| deleted_members(generation, &content.generated_from))
-                .sum();
-            (
-                index,
-                deleted_members(generation, &artifact.members) + in_contents,
-            )
-        }))?;
-    Some(ExecError::LayerRefused {
-        detail: format!(
-            "{count} member(s) or content source(s) of this batch are deleted, the first in \
-             artifact {first_artifact}; remove the deleted members and send the batch again"
-        ),
-    })
-}
-
-/// The refusal of a growth whose joining members include a deleted one, on
-/// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
-fn deleted_in_growth(
-    generation: &Generation,
-    joins: &[mosaica_lifecycle::IncomingGrowth],
-) -> Option<ExecError> {
-    let (count, first_key) = first_deleted(joins.iter().map(|join| {
-        (
-            join.key.as_str(),
-            deleted_members(generation, &join.joining),
-        )
-    }))?;
-    Some(ExecError::LayerRefused {
-        detail: format!(
-            "{count} joining member(s) are deleted, the first joining '{first_key}'; remove the \
-             deleted members and send the batch again"
-        ),
-    })
-}
-
-/// The sum of the deleted counts, and the first entry whose count is not zero; `None` where every
-/// count is zero.
-fn first_deleted<K>(counts: impl IntoIterator<Item = (K, u64)>) -> Option<(u64, K)> {
-    let mut total = 0u64;
-    let mut first = None;
-    for (key, count) in counts {
-        if count > 0 {
-            total += count;
-            first.get_or_insert(key);
-        }
-    }
-    Some((total, first?))
+    /// The member rows that named nothing where the batch applied.
+    pub(crate) refused: crate::resolver::Refused,
 }
 
 impl Executor {
@@ -308,32 +239,44 @@ impl Executor {
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
             Command::Changes {
-                changes,
-                stamp,
+                mut names,
+                ops,
+                strict,
                 reply,
             } => {
-                let changes = match self.changes_now(changes, stamp) {
-                    Ok(changes) if changes.is_empty() => return reply.ack(()),
-                    Ok(changes) => changes,
+                let (changes, refused) = match self.changes_now(&mut names, &ops, strict) {
+                    Ok((changes, refused)) if changes.is_empty() => return reply.ack(refused),
+                    Ok(answer) => answer,
                     Err(e) => return reply.fail(e),
                 };
                 let mut entries = vec![DenyEntry {
                     changes,
                     reply: Some(reply),
+                    refused,
                 }];
                 // The cascade rides this path too: a deletion admitted here that skipped it would
                 // strand every artifact depending on the one deleted.
                 self.cascade_dependents(&mut entries);
                 self.commit_denies(entries)
             }
-            Command::RegisterLayer { declaration, reply } => self.commit_registry(
-                |registry| registry.prepare_create(*declaration),
-                |record| match record {
-                    WalRecord::LayerCreate { space, .. } => *space,
-                    _ => unreachable!("prepare_create returns a LayerCreate"),
-                },
+            Command::RegisterLayer {
+                mut declaration,
                 reply,
-            ),
+            } => {
+                // Named as the generation the declaration applies in holds its views.
+                let meta = crate::viewport::meta_of(&self.generation.load_full());
+                if let Err(detail) = crate::control::declared_views(&meta, &mut declaration) {
+                    return reply.fail(ExecError::LayerRefused { detail });
+                }
+                self.commit_registry(
+                    |registry| registry.prepare_create(*declaration),
+                    |record| match record {
+                        WalRecord::LayerCreate { space, .. } => *space,
+                        _ => unreachable!("prepare_create returns a LayerCreate"),
+                    },
+                    reply,
+                )
+            }
             Command::DropLayer { name, reply } => {
                 self.commit_registry(|registry| registry.prepare_drop(&name), |_| (), reply)
             }
@@ -367,42 +310,52 @@ impl Executor {
                 layer,
                 level,
                 mut artifacts,
-                stamp,
+                mut names,
                 reply,
-            } => {
-                let generation = self.generation.load_full();
-                if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_artifacts(generation, &mut artifacts)
-                }) {
-                    reply.fail(ExecError::Stale);
-                    return;
+            } => match self.members_now(&mut names) {
+                Ok(moved) => {
+                    names.fill_artifacts(&mut artifacts, Some(&moved));
+                    self.commit_artifacts(layer, level, artifacts, names.names().refused(), reply)
                 }
-                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
-                    reply.fail(refusal);
-                    return;
-                }
-                self.commit_artifacts(layer, level, artifacts, reply)
-            }
+                Err(e) => reply.fail(e),
+            },
             Command::GrowMemberships {
                 layer,
                 level,
                 mut joins,
-                stamp,
+                mut names,
                 reply,
-            } => {
-                let generation = self.generation.load_full();
-                if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_growth(generation, &mut joins)
-                }) {
-                    reply.fail(ExecError::Stale);
-                    return;
+            } => match self.members_now(&mut names) {
+                Ok(moved) => {
+                    names.fill_growth(&mut joins, Some(&moved));
+                    self.commit_growth(layer, level, joins, names.names().refused(), reply)
                 }
-                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
-                    reply.fail(refusal);
-                    return;
-                }
-                self.commit_growth(layer, level, joins, reply)
-            }
+                Err(e) => reply.fail(e),
+            },
+        }
+    }
+
+    /// A batch's member names brought to the generation served now ([`crate::Names::now`]): the
+    /// rows resolved again, or the refusal of a batch whose whole list names a row that names
+    /// nothing.
+    fn members_now(
+        &self,
+        names: &mut crate::resolver::MemberNames,
+    ) -> std::result::Result<Vec<crate::resolver::Moved>, ExecError> {
+        let generation = self.generation.load_full();
+        let scope = names.names().scope().clone();
+        let resolver = crate::resolver::Resolver::new(
+            &generation,
+            &scope,
+            &self.deps.identity_key,
+            &self.live,
+        );
+        let moved = names.now(&resolver).map_err(|e| ExecError::Store {
+            detail: e.to_string(),
+        })?;
+        match names.refusing() {
+            Some((row, reason)) => Err(ExecError::NamesRefused { row, reason }),
+            None => Ok(moved),
         }
     }
 
@@ -420,6 +373,7 @@ impl Executor {
         layer: String,
         level: u32,
         mut incoming: Vec<IncomingArtifact>,
+        refused: crate::resolver::Refused,
         reply: Reply<PublishedBatch>,
     ) {
         // Read before the record is applied, because it is what says a held row form is the form
@@ -471,6 +425,7 @@ impl Executor {
                 without_content: 0,
                 filled: 0,
                 joined: 0,
+                refused,
             });
             return;
         }
@@ -492,6 +447,7 @@ impl Executor {
             without_content: prepared.without_content,
             filled: prepared.fills.len() as u64,
             joined: prepared.joined,
+            refused,
         });
     }
 
@@ -627,7 +583,8 @@ impl Executor {
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        reply: Reply<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>)>,
+        refused: crate::resolver::Refused,
+        reply: Reply<crate::write::GrownBatch>,
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
@@ -657,7 +614,7 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack((prepared.space, grown));
+            reply.ack((prepared.space, grown, refused));
             return;
         }
 
@@ -670,7 +627,7 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack((prepared.space, grown));
+        reply.ack((prepared.space, grown, refused));
     }
 
     /// Validate, append, sync, apply: in that order, which is the whole of the registry's

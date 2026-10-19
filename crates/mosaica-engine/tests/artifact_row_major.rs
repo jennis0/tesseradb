@@ -479,9 +479,7 @@ fn the_two_layouts_answer_identically() {
                 .publish_artifacts(
                     FLAT.into(),
                     0,
-                    // **Not the deleted member.** A batch naming a deleted entity is refused — a
-                    // deleted member contributes to no count and would be published into silence —
-                    // so the growth is over what is left.
+                    // Over what is left: a deleted member names nothing and would be refused.
                     vec![labelled(
                         fx,
                         "grown",

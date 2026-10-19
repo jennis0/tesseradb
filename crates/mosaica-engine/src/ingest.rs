@@ -18,11 +18,11 @@
 //!   number and so its `mosaica_id`.
 //!
 //! The rows that create, add or edit are submitted with the unique entries' sequence number the
-//! handler read at, and each edit with the views its item held. The executor re-checks, from
-//! memory, what can have moved since: a named item deleted, edited or added to a view, a value
-//! given a holder. Where something has, nothing is written and the executor answers
-//! [`ExecError::Stale`]; the handler resolves the batch once more against a newer generation, and
-//! a second stale answer refuses the batch.
+//! handler read at, and each edit with the views its item held. The executor checks, from memory,
+//! what can have moved since: a named item deleted, edited or added to a view, a value given a
+//! holder. Where something has, it resolves and decides the batch again itself, against what the
+//! items hold then, by the same rule ([`Resolver::plan_ingest`]), and the batch applies to the
+//! items where they are.
 
 use std::collections::BTreeMap;
 
@@ -32,13 +32,14 @@ use mosaica_lifecycle::{
     UnallocatedRow, WalScalar,
 };
 use mosaica_store::manifest::DeclaredScalar;
-use mosaica_store::unique::{key_of, value_text, KeyKind, UniqueKey};
+use mosaica_store::unique::{key_of, value_text};
 use mosaica_types::{EntityId, ItemAt, MosaicaId, TermId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::engine::Engine;
+use crate::resolver::{Resolver, WriteScope};
 use crate::write::joined::{self, BlobRow};
-use crate::write::{AcceptError, SubmittedEdit};
+use crate::write::{AcceptError, IngestSubmission, SubmittedEdit};
 use crate::Generation;
 
 /// An ingest batch as the caller sent it.
@@ -130,6 +131,9 @@ impl IngestReceipt {
     }
 }
 
+/// The edits an earlier resolution of a batch made, by request row and the item edited.
+pub(crate) type Prepared = FxHashMap<(usize, ItemAt), SubmittedEdit>;
+
 /// A batch resolved against one generation: the rows it writes, and what every request row
 /// became.
 pub(crate) struct Planned {
@@ -138,6 +142,8 @@ pub(crate) struct Planned {
     pub(crate) slots: Vec<Slot>,
     /// The unique values the created and edited rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
+    /// The unique values the refused rows carry.
+    pub(crate) refused_keys: Vec<(u16, u128)>,
     pub(crate) artifacts: BatchArtifacts,
     /// The request rows creating or editing an item indexed under more keys than
     /// [`mosaica_authz::MAX_KEYS_PER_ITEM`].
@@ -185,49 +191,36 @@ impl Engine {
                 batch_id: request.batch_id,
             }));
         }
-        for attempt in 0..2 {
-            let generation = self.generation();
-            let unique_seq = generation.unique_live.seq();
-            let submitted = self.plan_ingest(&generation, &request).and_then(|planned| {
-                #[cfg(feature = "fault-injection")]
-                self.switches.hold_write_check_if_wanted();
-                self.write.accept_ingest(
-                    planned,
-                    request.principal.clone(),
-                    request.batch_id.clone(),
-                    request.body_hash,
-                    unique_seq,
-                )
-            });
-            match submitted {
-                Ok(ingested) => {
-                    return Ok(IngestReceipt::of(
-                        &ingested.receipt,
-                        ingested.minted,
-                        ingested.joined,
-                        ingested.replayed,
-                    ))
-                }
-                Err(AcceptError::Exec(ExecError::Stale)) if attempt == 0 => continue,
-                Err(AcceptError::Exec(ExecError::Stale)) => {
-                    return Err(AcceptError::Conflict(
-                        "the items this batch names changed twice while it was checked; sent \
-                         again, it is decided against what they hold then"
-                            .to_string(),
-                    ))
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!("the second attempt answers")
+        let generation = self.generation();
+        let unique_seq = generation.unique_live.seq();
+        let scope = WriteScope::All;
+        let planned = self
+            .resolver(&generation, &scope)
+            .plan_ingest(&request, Prepared::default())?;
+        drop(generation);
+        #[cfg(feature = "fault-injection")]
+        self.switches.hold_write_check_if_wanted();
+        let submission =
+            IngestSubmission::of(planned, std::sync::Arc::new(request), scope, unique_seq);
+        let ingested = self.write.accept_ingest(submission)?;
+        Ok(IngestReceipt::of(
+            &ingested.receipt,
+            ingested.minted,
+            ingested.joined,
+            ingested.replayed,
+        ))
     }
+}
 
-    /// Resolve and decide every row of `request` against `generation`.
+impl Resolver<'_> {
+    /// Resolve and decide every row of `request` against the resolver's generation. `prepared`
+    /// holds the edits an earlier resolution of the batch made, by request row and item.
     pub(crate) fn plan_ingest(
         &self,
-        generation: &Generation,
         request: &IngestRequest,
+        mut prepared: Prepared,
     ) -> Result<Planned, AcceptError> {
+        let generation = self.generation;
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
         let meta = crate::viewport::meta_of(generation);
@@ -272,11 +265,6 @@ impl Engine {
             });
         }
 
-        let holdings = Held {
-            engine: self,
-            generation,
-            declared,
-        };
         // A row carrying no position cannot create an item, so a batch without one creates nothing
         // and refuses a row naming no item, as a build refuses an attribute file's. Where some rows
         // carry positions, a row without one that would create is refused, and the batch is
@@ -305,7 +293,8 @@ impl Engine {
                 ))
             })?;
         }
-        let mut verdicts = resolve::resolve(&identities, &holdings, batch)?;
+        let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
+        let mut verdicts = resolve::resolve(&identities, self, batch).map_err(unreadable)?;
         let unplaced: Vec<usize> = (0..request.rows.len())
             .filter(|at| {
                 request.rows[*at].position.is_none() && verdicts[*at] == resolve::Verdict::Creates
@@ -316,7 +305,7 @@ impl Engine {
             for at in &unplaced {
                 without[*at].unique.clear();
             }
-            verdicts = resolve::resolve(&without, &holdings, batch)?;
+            verdicts = resolve::resolve(&without, self, batch).map_err(unreadable)?;
             for at in unplaced {
                 verdicts[at] = resolve::Verdict::Refused(Refusal::NamesNoItem { row: at });
             }
@@ -349,6 +338,7 @@ impl Engine {
         let mut edits: Vec<SubmittedEdit> = Vec::new();
         let mut slots = Vec::with_capacity(request.rows.len());
         let mut keys = Vec::new();
+        let mut refused_keys = Vec::new();
         // The request row each written row came from, and each edit, for the membership columns.
         let mut written_from: Vec<usize> = Vec::new();
         let mut edited_from: Vec<usize> = Vec::new();
@@ -362,12 +352,30 @@ impl Engine {
             .filter_map(|(at, item)| item.map(|e| (e, at)))
             .collect();
         order.sort_unstable();
+        // An edit an earlier resolution made of the item a row still names stands while the
+        // item's rows are in the views they were in: it was read from that entity, whose values
+        // and positions only an edit changes.
+        let mut kept: FxHashMap<usize, SubmittedEdit> = FxHashMap::default();
+        for &(item, at) in &order {
+            if let Some(edit) = prepared.remove(&(at, item)) {
+                let shard = generation.shard_of(item.shard);
+                if joined::views_holding(shard, item.entity) == edit.held_views {
+                    kept.insert(at, edit);
+                }
+            }
+        }
+        let fresh: Vec<(ItemAt, usize)> = order
+            .iter()
+            .copied()
+            .filter(|(_, at)| !kept.contains_key(at))
+            .collect();
         let mut stored = Stored {
-            blobs: Self::read_blobs(generation, request, &order, false)?,
+            blobs: Self::read_blobs(generation, request, &fresh, false)?,
             not_members: self.memberships_not_held(request, &named),
         };
-        let mut decided: FxHashMap<usize, Decided> = FxHashMap::default();
-        for &(item, at) in &order {
+        let mut decided: FxHashMap<usize, Decided> =
+            kept.keys().map(|at| (*at, Decided::Edited)).collect();
+        for &(item, at) in &fresh {
             let decision = self.decide(
                 generation,
                 request,
@@ -382,7 +390,7 @@ impl Engine {
         }
 
         // An edit carries every value the item holds, so the items edited are read whole.
-        let edited: Vec<(ItemAt, usize)> = order
+        let edited: Vec<(ItemAt, usize)> = fresh
             .iter()
             .copied()
             .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited)))
@@ -405,7 +413,6 @@ impl Engine {
         }
         // Each named item's number in its shard, which its `mosaica_id` is taken from and an edit
         // keeps.
-        let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
         let mut held: FxHashMap<ItemAt, (EntityId, u64)> = FxHashMap::default();
         for (shard, items) in
             mosaica_types::by_shard(order.iter().map(|(item, _)| (item.shard, *item)))
@@ -413,8 +420,8 @@ impl Engine {
             let shard = generation.shard_of(shard);
             let entities: Vec<EntityId> = items.iter().map(|item| item.entity).collect();
             let numbers = crate::edited::numbers_of(shard, &entities).map_err(unreadable)?;
-            let ids = crate::edited::ids_of_numbers(&self.identity_key, shard, &numbers)
-                .map_err(unreadable)?;
+            let ids =
+                crate::edited::ids_of_numbers(self.key, shard, &numbers).map_err(unreadable)?;
             held.extend(
                 items
                     .into_iter()
@@ -424,6 +431,7 @@ impl Engine {
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
             if let Some(reason) = refused[at] {
+                refused_keys.extend(identities[at].unique.iter().copied());
                 slots.push(Slot::Refused(reason));
                 continue;
             }
@@ -479,8 +487,12 @@ impl Engine {
                                 Some(blobs) => BlobRow::of(blobs.get(item).cloned()),
                                 None => BlobRow::default(),
                             };
-                            let edit = self
-                                .carry(generation, &meta, request, at, *item, number, view, blob)?;
+                            let edit = match kept.remove(&at) {
+                                Some(edit) => edit,
+                                None => self.carry(
+                                    generation, &meta, request, at, *item, number, view, blob,
+                                )?,
+                            };
                             keys.extend(identities[at].unique.iter().copied());
                             slots.push(Slot::Edited {
                                 edit: edits.len() as u32,
@@ -496,7 +508,7 @@ impl Engine {
 
         let bound = mosaica_authz::MAX_KEYS_PER_ITEM;
         let mut over_bound = Vec::new();
-        let live = self.write.live();
+        let live = self.live;
         for (row, at) in rows.iter_mut().zip(&written_from) {
             if row.join.is_none() {
                 row.terms = live.resolve_terms(&generation.dict, &row.descriptors);
@@ -519,6 +531,7 @@ impl Engine {
             edits,
             slots,
             keys,
+            refused_keys,
             artifacts,
             over_bound,
         })
@@ -718,7 +731,7 @@ impl Engine {
         let novel = if novel.is_empty() {
             FxHashMap::default()
         } else {
-            self.write.live().descriptors_of(&novel)
+            self.live.descriptors_of(&novel)
         };
         terms
             .iter()
@@ -820,10 +833,7 @@ impl Engine {
         if let Some(labels) = &row.labels {
             let descriptors = index_keys(at, labels)?;
             // A novel descriptor is on no stored label.
-            let supplied = self
-                .write
-                .live()
-                .lookup_terms(&generation.dict, &descriptors);
+            let supplied = self.live.lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
                 Some(buffered) => Some(buffered.terms.clone()),
                 None => joined::flushed_terms_of(shard, item.entity),
@@ -934,7 +944,7 @@ impl Engine {
         if request.artifacts.memberships.is_empty() {
             return FxHashMap::default();
         }
-        let live = self.write.live();
+        let live = self.live;
         live.with_artifacts(|store| {
             let mut out = FxHashMap::default();
             for membership in &request.artifacts.memberships {
@@ -1107,7 +1117,7 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |item: ItemAt| crate::unique::mosaica_id_text(self, generation, item);
+        let tid = |item: ItemAt| crate::unique::mosaica_id_text(self.key, generation, item);
         let value = |row: usize, field: Identifier| match field {
             Identifier::MosaicaId => "its mosaica_id".to_string(),
             Identifier::Unique(at) => {
@@ -1245,33 +1255,4 @@ fn scoped_against_held(
         }
     }
     Ok(Some(repeated))
-}
-
-/// Who holds what in one generation: the unique indexes and their live entries, and the
-/// `mosaica_id`s issued, deleted items left out of each.
-struct Held<'a> {
-    engine: &'a Engine,
-    generation: &'a Generation,
-    declared: &'a [DeclaredScalar],
-}
-
-impl resolve::Holdings for Held<'_> {
-    type Error = AcceptError;
-
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, AcceptError> {
-        let d = &self.declared[usize::from(field)];
-        let kind = KeyKind::of(d.arrow_type).expect("a unique column's type takes a key");
-        let keys: Vec<UniqueKey> = keys
-            .iter()
-            .map(|k| UniqueKey::of_widened(kind, *k))
-            .collect();
-        crate::unique::holders(self.generation, &d.name, &keys)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))
-    }
-
-    fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, AcceptError> {
-        self.engine
-            .mosaica_ids_in(self.generation, ids)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))
-    }
 }

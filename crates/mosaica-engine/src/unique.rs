@@ -301,6 +301,29 @@ impl UniqueLive {
         self.added_after(attribute, keys, after, true)
     }
 
+    /// The keys of `attribute`'s entries added after `after`, the live ones and the kept ones a
+    /// flush has moved into runs, ascending.
+    pub(crate) fn keys_added_since(&self, attribute: &str, after: u64) -> Vec<UniqueKey> {
+        let live = self
+            .columns
+            .get(attribute)
+            .into_iter()
+            .flat_map(|c| c.runs.iter());
+        let kept = self
+            .retired
+            .iter()
+            .filter_map(|(moved, _)| moved.get(attribute));
+        let mut keys: Vec<UniqueKey> = live
+            .chain(kept)
+            .flat_map(|run| run.iter())
+            .filter(|e| e.seq > after)
+            .map(|e| e.key)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
     fn added_after(
         &self,
         attribute: &str,
@@ -430,13 +453,18 @@ pub(crate) fn deleted_in(generation: &Generation, item: ItemAt) -> bool {
 
 /// An item's `mosaica_id` as a refusal names it.
 pub(crate) fn mosaica_id_text(
-    engine: &crate::Engine,
+    key: &mosaica_types::IdentityKey,
     generation: &Generation,
     item: ItemAt,
 ) -> String {
     generation
         .shard(item.shard)
-        .and_then(|shard| engine.mosaica_id_in(shard, item.entity).ok())
+        .and_then(|shard| {
+            let numbers = crate::edited::numbers_of(shard, &[item.entity]).ok()?;
+            crate::edited::ids_of_numbers(key, shard, &numbers)
+                .ok()?
+                .pop()
+        })
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }

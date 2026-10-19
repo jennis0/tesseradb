@@ -1065,8 +1065,8 @@ fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
 
 /// **An edit resolved to an entity before it was freed does not reach the item that took it.**
 /// The edit is held after its handler resolved the item to its entity; the item moves on, a fold
-/// frees the entity, and a new item in the same views takes it. Released, the edit is decided
-/// again against the item where it now is, and the new item is untouched.
+/// frees the entity, and a new item in the same views takes it. Released, the edit is accepted and
+/// decided again against the item where it now is, and the new item is untouched.
 #[test]
 fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1110,11 +1110,9 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
     publish_buffered(&engine);
 
     engine.release_write_check_for_test();
-    let answered = held.join().unwrap();
-    assert!(
-        matches!(answered, Ok(_) | Err(AcceptError::Conflict(_))),
-        "the late edit is decided again or refused: {answered:?}"
-    );
+    held.join()
+        .unwrap()
+        .expect("the late edit is decided again where its item is");
     publish_buffered(&engine);
     let subset = engine.authorise(&subset_credential()).unwrap();
     let full = engine.authorise(&full_coverage_credential()).unwrap();
@@ -1127,11 +1125,10 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
         .iter()
         .find(|f| f.name == "score")
         .map(|f| f.value.clone());
-    let expected = if answered.is_ok() { 777 } else { 502 };
     assert_eq!(
         score,
-        Some(ScalarOut::I32(expected)),
-        "x holds its own score"
+        Some(ScalarOut::I32(777)),
+        "x holds the late edit's score"
     );
 }
 
