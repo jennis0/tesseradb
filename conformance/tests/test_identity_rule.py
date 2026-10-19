@@ -55,6 +55,9 @@ N_ITEMS = 120
 EXTENT = 1024
 GROUPS = "groups"
 TOPICS = "topics"
+COUNTED = "counted"
+#: How many of a `COUNTED` artifact's members a viewer must see for it to be served.
+COUNTED_REQUIRES = 2
 
 UNIQUE = {"code": KEYWORD, "num": INTEGER}
 
@@ -102,6 +105,15 @@ hierarchy                 = {{ kind = "flat" }}
   name                      = "topic"
   type                      = "text"
   require_member_visibility = "all"
+
+[[layer]]
+name                      = "{COUNTED}"
+views                     = ["{VIEW}"]
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = {{ count = {COUNTED_REQUIRES} }}
+hierarchy                 = {{ kind = "flat" }}
 """
 
 
@@ -1147,3 +1159,49 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     assert resp.status_code == 201, resp.text
     assert resp.json()["refused"] == expected_refused(dep.holdings, [(0, "members", members)])
     assert dep.members(GROUPS, resp.json()["artifacts"][0]["mosaica_id"]) == set(made)
+
+
+def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_served_it(deployment):
+    """An artifact of a layer requiring visible members is inside a scoped writer's terms where as
+    many of its members are inside them: a growth naming one outside is answered as one naming a
+    key nobody holds, and a publication under its key is refused as the key taken. A writer holding
+    `write-all` names every one."""
+    dep = deployment
+    rng = random.Random(57)
+    held = sorted(dep.holdings.items)
+    artifacts = {f"c{i}": set(rng.sample(held, rng.randrange(1, 6))) for i in range(16)}
+    resp = requests.put(
+        f"{dep.server.control_base}/control/layers/{COUNTED}/artifacts",
+        headers={"Authorization": f"Bearer {dep.server.operator_credential}"},
+        json={
+            "artifacts": [
+                {"key": key, "members": member_table([{"mosaica_id": str(t)} for t in sorted(m)])}
+                for key, m in artifacts.items()
+            ]
+        },
+        timeout=60,
+    )
+    assert resp.status_code == 201, resp.text
+    joining = min(dep.holdings.writable())
+
+    def grow(key: str) -> dict:
+        members = member_table([{"mosaica_id": str(joining)}])
+        return {"artifacts": [{"key": key, "members": members}]}
+
+    absent = dep.artifacts("PATCH", COUNTED, grow("nokey-zz"))
+    assert absent.status_code == 422, absent.text
+    inside = {
+        key: naming.artifact_inside(dep.holdings, members, COUNTED_REQUIRES)
+        for key, members in artifacts.items()
+    }
+    assert any(inside.values()) and (dep.holdings.terms is None or not all(inside.values()))
+    for key, members in artifacts.items():
+        resp = dep.artifacts("PATCH", COUNTED, grow(key))
+        if inside[key]:
+            assert resp.status_code == 200, (key, resp.text)
+            assert resp.json()["artifacts"][0]["joined"] == int(joining not in members), key
+        else:
+            assert resp.status_code == absent.status_code, (key, resp.text)
+            assert resp.json() == json.loads(absent.text.replace("nokey-zz", key)), key
+        resp = dep.artifacts("PUT", COUNTED, {"artifacts": [{"key": key, "members": {}}]})
+        assert resp.status_code == (200 if inside[key] else 409), (key, resp.text)

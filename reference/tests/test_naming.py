@@ -25,6 +25,7 @@ from oracle.naming import (
     Refused,
     apply_changes,
     apply_ingest,
+    artifact_inside,
     first_refusal,
     ignored_columns,
     malformed_addressing,
@@ -342,3 +343,14 @@ def test_a_writer_holding_write_all_names_every_item():
         Names(2),
         Refused(ONE_ITEM_TWICE),
     ]
+
+
+def test_an_artifact_is_inside_the_writers_terms_where_a_reader_of_them_would_be_served_it():
+    holdings = scoped()
+    assert artifact_inside(holdings, [1, 2], 1)
+    assert not artifact_inside(holdings, [2], 1), "its one member is outside"
+    assert not artifact_inside(holdings, [1, 2, 9], 2), "an item not held is no member"
+    assert artifact_inside(holdings, [2], None), "a layer requiring no visible member"
+    assert not artifact_inside(holdings, [1], None, ["secret"]), "its own label"
+    holdings.terms = None
+    assert artifact_inside(holdings, [2], 1) and artifact_inside(holdings, [], 1, ["secret"])

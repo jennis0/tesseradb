@@ -519,7 +519,7 @@ impl Engine {
     }
 }
 
-fn fragment_error(e: FragmentCacheError) -> EngineError {
+pub(crate) fn fragment_error(e: FragmentCacheError) -> EngineError {
     match e {
         FragmentCacheError::Building => EngineError::FragmentBuilding,
         FragmentCacheError::Cancelled => EngineError::Cancelled,

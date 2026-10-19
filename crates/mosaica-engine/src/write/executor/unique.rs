@@ -37,7 +37,7 @@ pub(crate) struct CompletedRound {
 /// The declarations made and not yet answered.
 pub(in crate::write) struct UniqueDeclarations {
     pub(super) rounds: Background<CompletedRound>,
-    waiting: VecDeque<(String, Reply<bool>)>,
+    waiting: VecDeque<(String, Option<crate::unique::Inside>, Reply<bool>)>,
     current: Option<Pending>,
 }
 
@@ -54,6 +54,9 @@ struct Run {
 struct Pending {
     attribute: String,
     at: usize,
+    /// The items the declaring writer may name, where its terms bound its writes: a refusal
+    /// names only values every holder of which is one.
+    inside: Option<crate::unique::Inside>,
     reply: Reply<bool>,
     runs: Vec<Run>,
     /// The rounds still to run: each shard, and the flushed entities of it to read, or `None` for
@@ -136,12 +139,29 @@ impl Pending {
 impl Executor {
     /// `PUT /control/attributes` on a column that exists, differing in `unique` alone. A removal
     /// commits at once; a declaration is queued and answered when its index is built.
-    pub(super) fn begin_unique_declare(&mut self, name: String, unique: bool, reply: Reply<bool>) {
+    pub(super) fn begin_unique_declare(
+        &mut self,
+        name: String,
+        unique: bool,
+        scope: WriteScope,
+        reply: Reply<bool>,
+    ) {
         if !unique {
             self.commit_unique_removal(name, reply);
             return;
         }
-        self.unique_declarations.waiting.push_back((name, reply));
+        let inside: Option<crate::unique::Inside> = match scope {
+            WriteScope::All => None,
+            WriteScope::Terms(_) => {
+                let live = Arc::clone(&self.live);
+                Some(Arc::new(move |generation: &Generation, item: ItemAt| {
+                    scope.admits_item(generation, &live, item)
+                }))
+            }
+        };
+        self.unique_declarations
+            .waiting
+            .push_back((name, inside, reply));
         self.advance_unique_declarations();
     }
 
@@ -150,7 +170,7 @@ impl Executor {
         if self.unique_declarations.current.is_some() || self.fold.outstanding() {
             return;
         }
-        let Some((attribute, reply)) = self.unique_declarations.waiting.pop_front() else {
+        let Some((attribute, inside, reply)) = self.unique_declarations.waiting.pop_front() else {
             return;
         };
         let generation = self.generation.load_full();
@@ -169,6 +189,7 @@ impl Executor {
         self.unique_declarations.current = Some(Pending {
             attribute,
             at,
+            inside,
             reply,
             runs: Vec::new(),
             queue: generation
@@ -229,6 +250,7 @@ impl Executor {
             prefix_dir,
             stem: format!("declared-{stamp}-{}", pending.rounds),
             memory_budget: ROUND_MEMORY,
+            inside: pending.inside.clone(),
             generation,
         };
         let attempt = pending.attempt;
@@ -314,7 +336,7 @@ impl Executor {
             }));
         pending.checked = output.checked;
         if output.duplicates > 0 {
-            self.refuse_unique_declare(output.duplicates, &output.examples);
+            self.refuse_unique_declare(output.shown, &output.examples);
             return;
         }
         let generation = self.generation.load_full();
@@ -389,14 +411,10 @@ impl Executor {
         if arrived.is_empty() {
             return Ok(None);
         }
-        let mut examples: Vec<String> = Vec::new();
-        let mut keys_found: Vec<UniqueKey> = Vec::new();
+        let mut keys_found: Vec<(UniqueKey, String)> = Vec::new();
         let mut note = |key: UniqueKey, value: &WalScalar| {
-            if !keys_found.contains(&key) {
-                keys_found.push(key);
-                if examples.len() < mosaica_store::unique::DUPLICATE_EXAMPLES {
-                    examples.push(mosaica_store::unique::value_text(value));
-                }
+            if !keys_found.iter().any(|(found, _)| *found == key) {
+                keys_found.push((key, mosaica_store::unique::value_text(value)));
             }
         };
         let mut held: FxHashMap<UniqueKey, ItemAt> = pending
@@ -432,8 +450,42 @@ impl Executor {
                 note(arrived[i].1, &arrived[i].2);
             }
         }
-        let count = keys_found.len() as u64;
-        Ok((count > 0).then_some((count, examples)))
+        if keys_found.is_empty() {
+            return Ok(None);
+        }
+        let shown: Vec<UniqueKey> = match &pending.inside {
+            None => keys_found.iter().map(|(key, _)| *key).collect(),
+            Some(inside) => {
+                let buffered: Vec<(ItemAt, UniqueKey)> = pending
+                    .checked
+                    .iter()
+                    .map(|(item, key)| (*item, *key))
+                    .chain(arrived.iter().map(|(item, key, _)| (*item, *key)))
+                    .filter(|(item, _)| !deleted(item))
+                    .collect();
+                let keys: Vec<UniqueKey> = keys_found.iter().map(|(key, _)| *key).collect();
+                let lookup = |runs: &[(ShardId, String)], keys: &[UniqueKey]| {
+                    crate::unique::run_holders(
+                        generation,
+                        &pending.attribute,
+                        kind,
+                        &prefix_dir,
+                        runs,
+                        keys,
+                    )
+                };
+                crate::unique::held_within(&runs, &buffered, &keys, &lookup, |item| {
+                    inside(generation, item)
+                })?
+            }
+        };
+        let examples = keys_found
+            .iter()
+            .filter(|(key, _)| shown.contains(key))
+            .take(mosaica_store::unique::DUPLICATE_EXAMPLES)
+            .map(|(_, text)| text.clone())
+            .collect();
+        Ok(Some((shown.len() as u64, examples)))
     }
 
     fn refuse_unique_declare(&mut self, count: u64, examples: &[String]) {
@@ -443,9 +495,11 @@ impl Executor {
             .take()
             .expect("a declaration is building");
         pending.discard();
-        pending.reply.fail(ExecError::UniqueTaken {
-            detail: mosaica_store::unique::duplicates_message(&pending.attribute, count, examples),
-        });
+        let detail = match count {
+            0 => mosaica_store::unique::held_twice_message(&pending.attribute),
+            _ => mosaica_store::unique::duplicates_message(&pending.attribute, count, examples),
+        };
+        pending.reply.fail(ExecError::UniqueTaken { detail });
     }
 
     /// Make the built index durable and in force: the log record, a side-manifest naming each

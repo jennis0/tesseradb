@@ -373,6 +373,17 @@ impl LiveState {
     }
 
     /// Read the artifact store: the request path's route to a membership.
+    /// The registry and the artifact store, read together under the order
+    /// [`Self::with_publication_state`] takes them in.
+    pub(crate) fn with_layers_and_artifacts<R>(
+        &self,
+        f: impl FnOnce(&LayerRegistry, &ArtifactStore) -> R,
+    ) -> R {
+        let registry = lock_recover(&self.registry);
+        let artifacts = lock_recover(&self.artifacts);
+        f(&registry, &artifacts)
+    }
+
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
         f(&lock_recover(&self.artifacts))
     }

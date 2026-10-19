@@ -238,7 +238,8 @@ impl WritePath {
                     }
                 }
                 WalRecord::ViewGroupCreate { declaration } => {
-                    match crate::view_declarations::resolve_group(declaration, seed.manifest) {
+                    match crate::view_declarations::resolve_group(declaration, seed.manifest, None)
+                    {
                         Ok(crate::view_declarations::Resolution::New(group)) => {
                             if !view_declarations.holds_group(&group.name) {
                                 view_declarations.push_group(*group);
@@ -254,7 +255,8 @@ impl WritePath {
                     }
                 }
                 WalRecord::PlainViewCreate { declaration } => {
-                    match crate::view_declarations::resolve_plain(declaration, seed.manifest) {
+                    match crate::view_declarations::resolve_plain(declaration, seed.manifest, None)
+                    {
                         Ok(crate::view_declarations::Resolution::New(view)) => {
                             if !view_declarations.holds_plain(&view.id) {
                                 view_declarations.push_plain(*view);

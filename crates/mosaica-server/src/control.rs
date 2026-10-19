@@ -423,10 +423,11 @@ fn run_ingest(
     caller: &crate::auth::Caller,
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
+    let scope = caller.write_scope(&state.engine);
 
     // One manifest snapshot for the decode, so the view, projection and declared columns all come
-    // from one generation.
-    let meta = state.engine.meta();
+    // from one generation, as the writer reaches them.
+    let meta = state.engine.meta_as(&scope);
     // The view the batch names: the header's, or the deployment's only view. A deployment with
     // several and no header gives the batch no view, and its rows carry no coordinates.
     let view: Option<&MetaView> = match view {
@@ -468,7 +469,12 @@ fn run_ingest(
         &meta.declared_scalars,
         &scoped,
         &meta.vocabularies,
-        &|name| state.engine.registered_layer(name).map(|l| l.declaration),
+        &|name| {
+            state
+                .engine
+                .reached_layer(name, &scope)
+                .map(|l| l.declaration)
+        },
         &|group| {
             view_id
                 .as_deref()
@@ -550,13 +556,10 @@ fn run_ingest(
         strict,
         mosaica_id_column,
     };
-    let receipt = state
-        .engine
-        .ingest_as(request, caller.write_scope(&state.engine))
-        .map_err(|e| {
-            tracing::debug!(detail = %e, "an ingest batch was refused");
-            map_accept_error(e)
-        })?;
+    let receipt = state.engine.ingest_as(request, scope).map_err(|e| {
+        tracing::debug!(detail = %e, "an ingest batch was refused");
+        map_accept_error(e)
+    })?;
 
     // An over-bound row is counted and kept, never refused.
     let over_bound_rows: Vec<u64> = receipt
@@ -936,13 +939,17 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn register_layer(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<mosaica_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let declaration = body.0;
     let name = declaration.name.clone();
     // The shared blocking pool, not the deny lane: a declaration is not a deny.
     let id = state
-        .write(move |state| state.engine.register_layer(declaration))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.register_layer_as(declaration, scope)
+        })
         .await?;
     let body = serde_json::json!({ "name": name, "mosaica_id": id.raw().to_string() });
     acknowledge(&state, &wait, StatusCode::CREATED, body).await
@@ -954,9 +961,13 @@ async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     state
-        .write(move |state| state.engine.drop_layer(name))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.drop_layer_as(name, scope)
+        })
         .await?;
     // 200 with a body rather than 204, so it carries the publication number like every write.
     acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
@@ -998,6 +1009,7 @@ struct AttributeBody {
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1014,7 +1026,10 @@ async fn declare_attribute(
         unique: body.unique,
     };
     let existing = state
-        .write(move |state| state.engine.declare_attribute(request))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.declare_attribute_as(request, scope)
+        })
         .await?;
     let body = serde_json::json!({ "name": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1103,6 +1118,7 @@ async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1122,16 +1138,23 @@ async fn declare_vocabulary(
             .collect(),
         reserved: body.reserved,
     };
-    let (existing, added, titles) = state
-        .write(move |state| state.engine.declare_vocabulary(request))
+    let declared_now = state
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.declare_vocabulary(request, scope)
+        })
         .await?;
-    let body = serde_json::json!({
+    let page = &declared_now.values;
+    let mut body = serde_json::json!({
         "name": name,
-        "existing": existing,
-        "added": added,
-        "titles": titles
+        "existing": declared_now.existing,
+        "bound": page.bound(),
     });
-    acknowledge(&state, &wait, declared(existing), body).await
+    if !page.withheld {
+        body["added"] = serde_json::json!(page.added);
+        body["titles"] = serde_json::json!(page.titles);
+    }
+    acknowledge(&state, &wait, declared(declared_now.existing), body).await
 }
 
 /// `PATCH /control/vocabularies/{name}/values`: adds a page of values and never removes one. A
@@ -1141,6 +1164,7 @@ async fn mint_vocabulary_values(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<VocabularyValuesBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<mosaica_engine::DeclaredValue> = body
@@ -1153,15 +1177,22 @@ async fn mint_vocabulary_values(
         })
         .collect();
     let vocabulary = name.clone();
-    let (added, existing, titles) = state
-        .write(move |state| state.engine.mint_vocabulary_values(vocabulary, values))
+    let page = state
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state
+                .engine
+                .mint_vocabulary_values(vocabulary, values, scope)
+        })
         .await?;
-    let body = serde_json::json!({
-        "name": name,
-        "added": added,
-        "existing": existing,
-        "titles": titles
-    });
+    // A writer whose terms bound its writes is told of a derived vocabulary only how many of the
+    // page's keys are bound.
+    let mut body = serde_json::json!({ "name": name, "bound": page.bound() });
+    if !page.withheld {
+        body["added"] = serde_json::json!(page.added);
+        body["existing"] = serde_json::json!(page.existing);
+        body["titles"] = serde_json::json!(page.titles);
+    }
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
@@ -1255,6 +1286,7 @@ async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1279,7 +1311,10 @@ async fn create_view_group(
             .collect(),
     };
     let existing = state
-        .write(move |state| state.engine.create_view_group(declaration))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.create_view_group_as(declaration, scope)
+        })
         .await?;
     let body = serde_json::json!({ "group": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1291,6 +1326,7 @@ async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1305,7 +1341,10 @@ async fn create_plain_view(
         point_default: body.point_visibility.and_then(|p| p.default),
     };
     let existing = state
-        .write(move |state| state.engine.create_plain_view(declaration))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.create_plain_view_as(declaration, scope)
+        })
         .await?;
     let body = serde_json::json!({ "view": name, "existing": existing });
     acknowledge(&state, &wait, declared(existing), body).await
@@ -1363,6 +1402,7 @@ async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: ApiJson<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
@@ -1376,9 +1416,10 @@ async fn create_view(
     let (group_name, view_key) = (group.clone(), key.clone());
     state
         .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
             state
                 .engine
-                .create_view(group_name, view_key, visibility, metadata)
+                .create_view_as(group_name, view_key, visibility, metadata, scope)
         })
         .await?;
     let body = serde_json::json!({
@@ -1396,9 +1437,13 @@ async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let dropped = state
-        .write(move |state| state.engine.drop_view(group, key))
+        .write(move |state| {
+            let scope = caller.write_scope(&state.engine);
+            state.engine.drop_view_as(group, key, scope)
+        })
         .await?;
     let body = serde_json::json!({
         "deleted": dropped.deleted,
@@ -1763,9 +1808,9 @@ fn member_names(
     merged: &mut crate::address::Merged,
     lists: &[MemberList],
     strict: bool,
-    caller: &crate::auth::Caller,
+    scope: &mosaica_engine::WriteScope,
 ) -> Result<mosaica_engine::MemberNames, ApiError> {
-    let names = merged.names(state, &caller.write_scope(&state.engine), false)?;
+    let names = merged.names(state, scope, false)?;
     let mut start = 0;
     let named = lists
         .iter()
@@ -1787,7 +1832,7 @@ fn member_names(
             }
         })
         .collect();
-    Ok(mosaica_engine::MemberNames::new(names, named))
+    Ok(mosaica_engine::MemberNames::new(names, named).strict(strict))
 }
 
 /// Row `row` of `merged`'s names as the request wrote it: its list and its row there.
@@ -1818,6 +1863,17 @@ fn refused_members(
             })
         })
         .collect()
+}
+
+/// The artifacts a write refused for an access label the writer's terms do not satisfy, as
+/// `{artifact, reason}`.
+fn unheld_artifacts(unheld: &[usize]) -> impl Iterator<Item = serde_json::Value> + '_ {
+    unheld.iter().map(|artifact| {
+        serde_json::json!({
+            "artifact": artifact,
+            "reason": mosaica_lifecycle::resolve::Reason::LabelNotHeld.as_str(),
+        })
+    })
 }
 
 /// A member write's failure: a refused row of a whole list as the strict refusal naming its list
@@ -2385,10 +2441,12 @@ async fn publish_artifacts(
             }
 
             // `view` is required on a group-scoped layer and refused on an entity-scoped one. The executor
-            // checks again; this answers before any work. An unknown layer is refused by the engine.
+            // checks again; this answers before any work. An unknown layer, or one the writer does
+            // not reach, is refused by the engine.
+            let scope = caller.write_scope(&state.engine);
             let declaration = state
                 .engine
-                .registered_layer(&name)
+                .reached_layer(&name, &scope)
                 .map(|registered| registered.declaration);
             if let Some(declaration) = &declaration {
                 for (index, artifact) in artifacts.iter().enumerate() {
@@ -2430,7 +2488,7 @@ async fn publish_artifacts(
 
             let keys: Vec<Option<String>> = artifacts.iter().map(|a| a.key.clone()).collect();
             let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict, &caller)?;
+            let names = member_names(state, &mut merged, &lists, strict, &scope)?;
             let ignored = names.names().ignored().to_vec();
             // Each artifact's sets are filled from its member tables by the engine.
             let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
@@ -2470,16 +2528,24 @@ async fn publish_artifacts(
                 .engine
                 .put_artifacts_named(name.clone(), level, incoming, names)
                 .map_err(|e| member_refusal(&merged, &lists, e))?;
-            let refused = refused_members(&merged, &lists, &batch.refused);
+            let mut refused = refused_members(&merged, &lists, &batch.refused);
+            refused.extend(unheld_artifacts(&batch.unheld));
             Ok((batch, keys, shape_reports, refused, ignored))
         })
         .await?;
 
-    let published: Vec<serde_json::Value> = batch
-        .mosaica_ids
-        .iter()
-        .zip(keys)
-        .map(|(id, key)| serde_json::json!({ "key": key, "mosaica_id": id.raw().to_string() }))
+    // An artifact refused for its label wrote nothing and has no `mosaica_id`.
+    let mut ids = batch.mosaica_ids.iter();
+    let published: Vec<serde_json::Value> = keys
+        .into_iter()
+        .enumerate()
+        .map(|(at, key)| {
+            let id = match batch.unheld.contains(&at) {
+                true => None,
+                false => ids.next().map(|id| id.raw().to_string()),
+            };
+            serde_json::json!({ "key": key, "mosaica_id": id })
+        })
         .collect();
     // `shapes` is the build's shape report, present only when a shape was canonicalised.
     // `joined` counts memberships added to created and held artifacts alike. The status is 201
@@ -2593,7 +2659,7 @@ async fn grow_memberships(
     let encoding = body_encoding(&headers)?;
     // The body is decoded, checked and resolved on the blocking pool with the write.
     let strict = query.strict;
-    let (grown, keys, shape_reports, refused, ignored) = state
+    let (grown, unheld, keys, shape_reports, refused, ignored) = state
         .blocking(move |state| {
             let (
                 GrowBody {
@@ -2651,9 +2717,10 @@ async fn grow_memberships(
 
             // Shapes go through the publication's reader, so a filled shape is stored byte for
             // byte as a publication would store it.
+            let scope = caller.write_scope(&state.engine);
             let declaration = state
                 .engine
-                .registered_layer(&name)
+                .reached_layer(&name, &scope)
                 .map(|registered| registered.declaration);
             let (shapes, shape_reports) = canonical_batch_shapes(
                 state,
@@ -2664,7 +2731,7 @@ async fn grow_memberships(
 
             let keys: Vec<String> = artifacts.iter().map(|a| a.key.clone()).collect();
             let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict, &caller)?;
+            let names = member_names(state, &mut merged, &lists, strict, &scope)?;
             let ignored = names.names().ignored().to_vec();
             // Each join's sets are filled from its member tables by the engine.
             let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts
@@ -2700,19 +2767,31 @@ async fn grow_memberships(
                     }
                 })
                 .collect();
-            let (grown, refused) = state
+            let (grown, refused, unheld) = state
                 .engine
                 .grow_memberships_named(name.clone(), level, joins, names)
                 .map_err(|e| member_refusal(&merged, &lists, e))?;
-            let refused = refused_members(&merged, &lists, &refused);
-            Ok((grown, keys, shape_reports, refused, ignored))
+            let mut refused = refused_members(&merged, &lists, &refused);
+            refused.extend(unheld_artifacts(&unheld));
+            Ok((grown, unheld, keys, shape_reports, refused, ignored))
         })
         .await?;
 
-    let artifacts: Vec<serde_json::Value> = grown
-        .iter()
-        .zip(keys)
-        .map(|(receipt, key)| {
+    // A row refused for its label wrote nothing and answers no `mosaica_id`.
+    let mut receipts = grown.iter();
+    let artifacts: Vec<serde_json::Value> = keys
+        .into_iter()
+        .enumerate()
+        .map(|(at, key)| {
+            let receipt = match unheld.contains(&at) {
+                true => None,
+                false => receipts.next(),
+            };
+            let Some(receipt) = receipt else {
+                return serde_json::json!({
+                    "key": key, "mosaica_id": null, "joined": 0, "filled": 0, "left": 0,
+                });
+            };
             let mut row = serde_json::json!({
                 "key": key,
                 "mosaica_id": receipt.mosaica_id.raw().to_string(),

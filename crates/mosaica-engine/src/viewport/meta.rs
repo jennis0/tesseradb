@@ -383,6 +383,23 @@ impl EngineMeta {
     }
 }
 
+impl EngineMeta {
+    /// These facts as a writer reaching `views` holds them: the views it reaches, and the groups
+    /// it reaches, each listing the views of it reached. `None` reaches every one.
+    pub(crate) fn within(mut self, views: Option<&crate::gate::VisibleViews>) -> EngineMeta {
+        let Some(views) = views else {
+            return self;
+        };
+        self.views.retain(|view| views.contains_view(&view.id));
+        self.groups
+            .retain(|group| views.contains_group(&group.name));
+        for group in &mut self.groups {
+            group.views.retain(|id| views.contains_view(id));
+        }
+        self
+    }
+}
+
 impl Engine {
     /// `GET /v1/meta`: read-only bundle facts, no session or authorisation involved. Loads the
     /// generation once, like every other request path.

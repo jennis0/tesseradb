@@ -109,7 +109,14 @@ pub(super) fn growth_receipt(
         .enumerate()
         .map(|(index, (join, filled))| {
             let ordinal = registry
-                .resolve_growth_key(layer, level, join.view.as_deref(), &join.key, store)
+                .resolve_growth_key(
+                    layer,
+                    level,
+                    join.view.as_deref(),
+                    &join.key,
+                    store,
+                    &mosaica_lifecycle::Everything,
+                )
                 .expect("prepare_grow resolved every key before the receipt was read");
             let record = store
                 .get(layer, level, ordinal)
@@ -187,7 +194,8 @@ pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
         // complement it asks for is a different set from the one the artifact holds.
         mosaica_lifecycle::RegistryError::PartConflict { .. }
-        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
+        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. }
+        | mosaica_lifecycle::RegistryError::KeyHeld { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         mosaica_lifecycle::RegistryError::SpacesExhausted
@@ -219,6 +227,9 @@ pub(crate) struct PublishedBatch {
     pub(crate) joined: u64,
     /// The member rows that named nothing where the batch applied.
     pub(crate) refused: crate::resolver::Refused,
+    /// The artifacts, by position in the batch, refused for an access label the writer's terms
+    /// do not satisfy. `entities` holds one per other artifact.
+    pub(crate) unheld: Vec<usize>,
 }
 
 impl Executor {
@@ -261,15 +272,20 @@ impl Executor {
             }
             Command::RegisterLayer {
                 mut declaration,
+                scope,
                 reply,
             } => {
-                // Named as the generation the declaration applies in holds its views.
-                let meta = crate::viewport::meta_of(&self.generation.load_full());
+                // Named as the generation the declaration applies in holds its views, and as the
+                // writer reaches them.
+                let generation = self.generation.load_full();
+                let meta = crate::viewport::meta_of(&generation)
+                    .within(scope.views(&generation.bundle.manifest).as_ref());
                 if let Err(detail) = crate::control::declared_views(&meta, &mut declaration) {
                     return reply.fail(ExecError::LayerRefused { detail });
                 }
+                let reach = self.layer_reach(&scope);
                 self.commit_registry(
-                    |registry| registry.prepare_create(*declaration),
+                    |registry| registry.prepare_create(*declaration, &reach),
                     |record| match record {
                         WalRecord::LayerCreate { space, .. } => *space,
                         _ => unreachable!("prepare_create returns a LayerCreate"),
@@ -277,35 +293,61 @@ impl Executor {
                     reply,
                 )
             }
-            Command::DropLayer { name, reply } => {
-                self.commit_registry(|registry| registry.prepare_drop(&name), |_| (), reply)
+            Command::DropLayer { name, scope, reply } => {
+                let reach = self.layer_reach(&scope);
+                self.commit_registry(
+                    |registry| registry.prepare_drop(&name, &reach),
+                    |_| (),
+                    reply,
+                )
             }
             Command::CreateView {
                 group,
                 key,
                 visibility,
                 metadata,
+                scope,
                 reply,
-            } => self.commit_view_create(group, key, visibility, metadata, reply),
-            Command::DropView { group, key, reply } => self.commit_view_drop(group, key, reply),
-            Command::DeclareAttribute { request, reply } => {
-                self.commit_attribute_declare(*request, reply)
-            }
+            } => self.commit_view_create(group, key, visibility, metadata, &scope, reply),
+            Command::DropView {
+                group,
+                key,
+                scope,
+                reply,
+            } => self.commit_view_drop(group, key, &scope, reply),
+            Command::DeclareAttribute {
+                request,
+                scope,
+                reply,
+            } => self.commit_attribute_declare(*request, scope, reply),
             Command::DeclareShards { size, reply } => self.commit_shards_declare(size, reply),
-            Command::DeclareVocabulary { request, reply } => {
-                self.commit_vocabulary_declare(*request, reply)
-            }
+            Command::DeclareVocabulary {
+                request,
+                scope,
+                reply,
+            } => self.commit_vocabulary_declare(*request, &scope, reply),
             Command::MintVocabularyValues {
                 vocabulary,
                 values,
+                scope,
                 reply,
-            } => self.commit_vocabulary_values(vocabulary, values, reply),
-            Command::CreateViewGroup { declaration, reply } => {
-                self.commit_view_group_create(*declaration, reply)
-            }
-            Command::CreatePlainView { declaration, reply } => {
-                self.commit_plain_view_create(*declaration, reply)
-            }
+            } => self.commit_vocabulary_page(
+                vocabulary,
+                values,
+                &scope,
+                reply,
+                std::convert::identity,
+            ),
+            Command::CreateViewGroup {
+                declaration,
+                scope,
+                reply,
+            } => self.commit_view_group_create(*declaration, &scope, reply),
+            Command::CreatePlainView {
+                declaration,
+                scope,
+                reply,
+            } => self.commit_plain_view_create(*declaration, &scope, reply),
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -328,11 +370,46 @@ impl Executor {
             } => match self.members_now(&mut names) {
                 Ok(moved) => {
                     names.fill_growth(&mut joins, Some(&moved));
-                    self.commit_growth(layer, level, joins, names.names().refused(), reply)
+                    self.commit_growth(layer, level, joins, &names, reply)
                 }
                 Err(e) => reply.fail(e),
             },
         }
+    }
+
+    /// The layers `scope`'s writer reaches, as the registry holds them now.
+    fn layer_reach(&self, scope: &WriteScope) -> crate::resolver::LayerReach {
+        self.live.with_layers_and_artifacts(|registry, _| {
+            crate::resolver::LayerReach::new(scope, registry)
+        })
+    }
+
+    /// The positions of `labels`, each artifact's access labels where its record states some, that
+    /// the writer of `scope` does not satisfy on `layer`'s label gate. A layer it does not reach
+    /// refuses the write later, in the registry's words.
+    fn labels_not_held<'l>(
+        &self,
+        scope: &WriteScope,
+        layer: &str,
+        labels: impl Iterator<Item = Option<&'l [Vec<u8>]>>,
+    ) -> Vec<usize> {
+        let Some(registered) = self
+            .live
+            .registered_layer(layer)
+            .filter(|_| matches!(scope, WriteScope::Terms(_)))
+            .filter(|held| scope.reaches_layer(&held.declaration))
+        else {
+            return Vec::new();
+        };
+        labels
+            .enumerate()
+            .filter(|(_, labels)| {
+                labels.is_some_and(|labels| {
+                    !scope.admits_artifact_label(&registered.declaration, labels)
+                })
+            })
+            .map(|(at, _)| at)
+            .collect()
     }
 
     /// A batch's member names brought to the generation served now ([`crate::Names::now`]): the
@@ -377,6 +454,22 @@ impl Executor {
         reply: Reply<PublishedBatch>,
     ) {
         let refused = names.names().refused();
+        let scope = names.names().scope();
+        // An artifact setting a label the writer's terms do not satisfy is refused alone, or
+        // refuses a strict batch.
+        let unheld = self.labels_not_held(
+            scope,
+            &layer,
+            incoming.iter().map(|artifact| artifact.access.as_deref()),
+        );
+        if let (Some(&artifact), true) = (unheld.first(), names.strict) {
+            return reply.fail(ExecError::LabelNotHeld { artifact });
+        }
+        let mut at = 0;
+        incoming.retain(|_| {
+            at += 1;
+            !unheld.contains(&(at - 1))
+        });
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows: see [`Self::bring_artifacts_forward`].
         // Partitioned before any ordinal is claimed: a key the level holds is compared under the
@@ -399,9 +492,14 @@ impl Executor {
             return;
         }
         let served = self.generation.load_full();
-        let views = crate::write::ServedViews(&served.bundle.manifest);
+        let reached = scope.views(&served.bundle.manifest);
+        let views = crate::write::ServedViews(&served.bundle.manifest, reached.as_ref());
+        let resolver =
+            crate::resolver::Resolver::new(&served, scope, &self.deps.identity_key, &self.live);
         let prepared = self.live.with_publication_state(|registry, store| {
-            registry.prepare_put(&layer, level, &incoming, store, &views)
+            let reach =
+                crate::resolver::ArtifactReach::new(&resolver, registry, store, &names.masks);
+            registry.prepare_put(&layer, level, &incoming, store, &views, &reach)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -427,6 +525,7 @@ impl Executor {
                 filled: 0,
                 joined: 0,
                 refused,
+                unheld,
             });
             return;
         }
@@ -449,6 +548,7 @@ impl Executor {
             filled: prepared.fills.len() as u64,
             joined: prepared.joined,
             refused,
+            unheld,
         });
     }
 
@@ -593,17 +693,41 @@ impl Executor {
         &mut self,
         layer: String,
         level: u32,
-        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        refused: crate::resolver::Refused,
+        mut joins: Vec<mosaica_lifecycle::IncomingGrowth>,
+        names: &crate::resolver::MemberNames,
         reply: Reply<crate::write::GrownBatch>,
     ) {
+        let refused = names.names().refused();
+        let scope = names.names().scope();
+        // A row filling a label the writer's terms do not satisfy is refused alone, or refuses a
+        // strict batch.
+        let unheld = self.labels_not_held(
+            scope,
+            &layer,
+            joins
+                .iter()
+                .map(|join| Some(join.parts.access.as_slice()).filter(|labels| !labels.is_empty())),
+        );
+        if let (Some(&artifact), true) = (unheld.first(), names.strict) {
+            return reply.fail(ExecError::LabelNotHeld { artifact });
+        }
+        let mut at = 0;
+        joins.retain(|_| {
+            at += 1;
+            !unheld.contains(&(at - 1))
+        });
+        let served = self.generation.load_full();
+        let resolver =
+            crate::resolver::Resolver::new(&served, scope, &self.deps.identity_key, &self.live);
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
         // The receipt is read beside the preparation, under the same lock and before the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
         let prepared = self.live.with_publication_state(|registry, store| {
-            let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
+            let reach =
+                crate::resolver::ArtifactReach::new(&resolver, registry, store, &names.masks);
+            let prepared = registry.prepare_grow(&layer, level, &joins, store, &reach)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
             Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
         });
@@ -625,7 +749,7 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack((prepared.space, grown, refused));
+            reply.ack((prepared.space, grown, refused, unheld));
             return;
         }
 
@@ -638,7 +762,7 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack((prepared.space, grown, refused));
+        reply.ack((prepared.space, grown, refused, unheld));
     }
 
     /// Validate, append, sync, apply: in that order, which is the whole of the registry's
@@ -722,16 +846,23 @@ impl Executor {
         key: String,
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
+        scope: &WriteScope,
         reply: Reply<()>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
+        let reached = scope.views(&generation.bundle.manifest);
         let Some(descriptor) = generation
             .bundle
             .manifest
             .groups
             .iter()
             .find(|g| g.name == group)
+            .filter(|g| {
+                reached
+                    .as_ref()
+                    .is_none_or(|views| views.contains_group(&g.name))
+            })
         else {
             // The same 404 an unknown view id is, and for the same reason: a group nobody declared
             // and a key no view holds must be one answer, or the difference between them is an
@@ -791,13 +922,18 @@ impl Executor {
     pub(super) fn commit_attribute_declare(
         &mut self,
         request: mosaica_lifecycle::AttributeRequest,
+        scope: WriteScope,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let resolved = crate::attributes::resolve(&request, &generation.bundle.manifest, |name| {
-            self.live.registered_layer(name).is_some()
-        });
+        let manifest = &generation.bundle.manifest;
+        let resolved = crate::attributes::resolve(
+            &request,
+            manifest,
+            scope.views(manifest).as_ref(),
+            |name| self.live.registered_layer(name).is_some(),
+        );
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 reply.ack(true);
@@ -805,7 +941,7 @@ impl Executor {
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
             Ok(crate::attributes::Resolution::Unique { name, unique }) => {
-                self.begin_unique_declare(name, unique, reply);
+                self.begin_unique_declare(name, unique, scope, reply);
                 return;
             }
             Err(e) => {
@@ -953,13 +1089,16 @@ impl Executor {
     pub(super) fn commit_view_group_create(
         &mut self,
         declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
+        scope: &WriteScope,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
+        let manifest = &generation.bundle.manifest;
         let compiled = match crate::view_declarations::resolve_group(
             &declaration,
-            &generation.bundle.manifest,
+            manifest,
+            scope.views(manifest).as_ref(),
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 reply.ack(true);
@@ -1001,13 +1140,16 @@ impl Executor {
     pub(super) fn commit_plain_view_create(
         &mut self,
         declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
+        scope: &WriteScope,
         reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
+        let manifest = &generation.bundle.manifest;
         let compiled = match crate::view_declarations::resolve_plain(
             &declaration,
-            &generation.bundle.manifest,
+            manifest,
+            scope.views(manifest).as_ref(),
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 reply.ack(true);
@@ -1075,6 +1217,7 @@ impl Executor {
     pub(super) fn commit_vocabulary_declare(
         &mut self,
         request: mosaica_lifecycle::VocabularyRequest,
+        scope: &WriteScope,
         reply: Reply<VocabularyDeclared>,
     ) {
         let started = std::time::Instant::now();
@@ -1082,11 +1225,10 @@ impl Executor {
         let compiled = match crate::vocabularies::resolve(&request, &generation.bundle.manifest) {
             Ok(crate::vocabularies::Resolution::Existing) => {
                 // A redeclaration is the same vocabulary, and its values are a page against it.
-                self.commit_vocabulary_page(request.name, request.values, reply, |page| {
+                self.commit_vocabulary_page(request.name, request.values, scope, reply, |values| {
                     VocabularyDeclared {
                         existing: true,
-                        added: page.added,
-                        titles: page.titles,
+                        values,
                     }
                 });
                 return;
@@ -1156,22 +1298,15 @@ impl Executor {
         self.side_manifests.behind_live = true;
         reply.ack(VocabularyDeclared {
             existing: false,
-            added,
-            // A new vocabulary holds no value whose title could be replaced: every title it
-            // carries arrived with the value that drew its code.
-            titles: 0,
+            values: VocabularyValues {
+                added,
+                existing: 0,
+                // A new vocabulary holds no value whose title could be replaced: every title it
+                // carries arrived with the value that drew its code.
+                titles: 0,
+                withheld: false,
+            },
         });
-    }
-
-    /// `PATCH /control/vocabularies/{name}/values`: a page of values for a vocabulary that
-    /// exists.
-    pub(super) fn commit_vocabulary_values(
-        &mut self,
-        vocabulary: String,
-        values: Vec<mosaica_lifecycle::DeclaredValue>,
-        reply: Reply<VocabularyValues>,
-    ) {
-        self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity);
     }
 
     /// One page of values, whether it arrived on the values route or as the inline values of a
@@ -1190,10 +1325,14 @@ impl Executor {
     /// A title supplied for a held key replaces the held title and is counted into the
     /// acknowledgement. The key-to-code binding does not move, so a row already carrying the code
     /// means what it meant; what changes is the name a client draws.
+    ///
+    /// A writer whose terms bound its writes is told of a `derived` vocabulary only how many of the
+    /// page's keys are bound ([`VocabularyValues::withheld`]).
     pub(super) fn commit_vocabulary_page<T>(
         &mut self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
+        scope: &WriteScope,
         reply: Reply<T>,
         answer: impl Fn(VocabularyValues) -> T,
     ) {
@@ -1218,6 +1357,8 @@ impl Executor {
                 return;
             }
         };
+        let withheld = matches!(scope, WriteScope::Terms(_))
+            && held.visibility() == mosaica_types::vocabulary::Visibility::Derived;
         let mut minter = held.clone();
         let mut codes = Vec::with_capacity(values.len());
         let mut added = 0u64;
@@ -1252,6 +1393,7 @@ impl Executor {
                 added,
                 existing,
                 titles: 0,
+                withheld,
             }));
             return;
         }
@@ -1294,6 +1436,7 @@ impl Executor {
             added,
             existing,
             titles,
+            withheld,
         }));
     }
 
@@ -1310,6 +1453,7 @@ impl Executor {
         &mut self,
         group: String,
         key: String,
+        scope: &WriteScope,
         reply: Reply<ViewDropped>,
     ) {
         let started = std::time::Instant::now();
@@ -1317,6 +1461,16 @@ impl Executor {
         // The owner's key, whatever group the request named: a key belongs to the group that owns
         // the views, and dropping the key takes the view out of every group sharing them.
         let owner = generation.bundle.manifest.owner_of_group(&group);
+        // A view the writer does not reach is one nothing holds.
+        let id = format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR);
+        if let Some(views) = scope.views(&generation.bundle.manifest) {
+            if !views.contains_view(&id) {
+                return reply.fail(roster_error(mosaica_lifecycle::RosterError::Unknown {
+                    group: owner,
+                    key,
+                }));
+            }
+        }
         // Every id the key resolves to, which is what a drop takes away: the owner's view and
         // every sharing group's. Built from the owner rather than from the group the request
         // named, and used by the probe and the buffer prune alike. A prune over the requested

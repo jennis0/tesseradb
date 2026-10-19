@@ -28,6 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::control::{AddressTable, AddressValue};
 use crate::edited::{NamedTarget, Stamp};
+use crate::gate::VisibleViews;
 use crate::write::LiveState;
 use crate::{EngineError, Generation};
 
@@ -40,6 +41,95 @@ pub enum WriteScope {
     #[default]
     All,
     Terms(Arc<TermsScope>),
+}
+
+impl WriteScope {
+    /// Whether the writer holds `term`: every term, for [`WriteScope::All`].
+    pub(crate) fn holds(&self, term: &str) -> bool {
+        match self {
+            WriteScope::All => true,
+            WriteScope::Terms(scope) => scope.holds(term),
+        }
+    }
+
+    /// Whether the writer satisfies one of the stored access labels `labels`: always, for
+    /// [`WriteScope::All`], which a label that does not parse does not stop.
+    pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
+        match self {
+            WriteScope::All => true,
+            WriteScope::Terms(_) => mosaica_access::admits(labels, &|term| self.holds(term)),
+        }
+    }
+
+    /// Whether the writer may name `item` in `generation` ([`Resolver::admits`]).
+    pub(crate) fn admits_item(
+        &self,
+        generation: &Generation,
+        live: &LiveState,
+        item: ItemAt,
+    ) -> bool {
+        let WriteScope::Terms(scope) = self else {
+            return true;
+        };
+        let Some(shard) = generation.shard(item.shard) else {
+            return false;
+        };
+        match shard.buffer.get(item.entity) {
+            Some(buffered) => scope.admits_keys(&buffered.terms, generation, live),
+            None => crate::write::joined::flushed_terms_of(shard, item.entity)
+                .is_some_and(|keys| scope.admits_keys(&keys, generation, live)),
+        }
+    }
+
+    /// Whether the writer may know a layer of `declaration` exists: where its `visibility`, as a
+    /// session's layer gate reads it, admits the writer's terms.
+    pub(crate) fn reaches_layer(
+        &self,
+        declaration: &mosaica_types::layer::LayerDeclaration,
+    ) -> bool {
+        declaration
+            .visibility
+            .as_ref()
+            .is_none_or(|label| self.admits(&[label]))
+    }
+
+    /// The views and groups of `manifest` the writer reaches, as a session holding its terms is
+    /// gated ([`crate::gate::resolve`]); `None` for [`WriteScope::All`], which reaches all.
+    pub(crate) fn views(
+        &self,
+        manifest: &mosaica_store::manifest::Manifest,
+    ) -> Option<VisibleViews> {
+        match self {
+            WriteScope::All => None,
+            WriteScope::Terms(_) => Some(crate::gate::resolve(manifest, &|term| self.holds(term))),
+        }
+    }
+
+    /// Whether an artifact of a layer of `declaration` carrying the stored labels `access` admits
+    /// the writer, on a session's label gate: one with none by the layer's
+    /// `artifact_visibility.default`.
+    pub(crate) fn admits_artifact_label(
+        &self,
+        declaration: &mosaica_types::layer::LayerDeclaration,
+        access: &[Vec<u8>],
+    ) -> bool {
+        use mosaica_types::layer::MemberDefault;
+        if matches!(self, WriteScope::All) {
+            return true;
+        }
+        if access.is_empty() {
+            return !declaration.artifact_visibility.carries_own_labels()
+                || match &declaration.artifact_visibility.default {
+                    MemberDefault::Inherited => true,
+                    MemberDefault::Label(label) => self.admits(&[label]),
+                };
+        }
+        let labels: Vec<std::borrow::Cow<'_, str>> = access
+            .iter()
+            .map(|label| String::from_utf8_lossy(label))
+            .collect();
+        self.admits(&labels)
+    }
 }
 
 /// What a set of terms satisfies, as a writer's scope holds it: the index keys of the dictionary it
@@ -210,6 +300,171 @@ pub(crate) struct Resolver<'a> {
     pub(crate) scope: &'a WriteScope,
     pub(crate) key: &'a IdentityKey,
     pub(crate) live: &'a LiveState,
+    /// What an artifact's members are masked by where its existence criterion is tested.
+    masks: &'a ScopeMasks,
+}
+
+/// No shard's fragment: every member is tested alone.
+static NO_MASKS: ScopeMasks = ScopeMasks(Vec::new());
+
+/// What a writer may name among layers alone, for a registry operation that names no artifact:
+/// the layers it reaches, and no artifact unless it reaches every one.
+pub(crate) struct LayerReach(Option<FxHashSet<String>>);
+
+impl LayerReach {
+    pub(crate) fn new(
+        scope: &WriteScope,
+        registry: &mosaica_lifecycle::LayerRegistry,
+    ) -> LayerReach {
+        LayerReach(match scope {
+            WriteScope::All => None,
+            WriteScope::Terms(_) => Some(
+                registry
+                    .iter()
+                    .filter(|(_, held)| scope.reaches_layer(&held.declaration))
+                    .map(|(name, _)| name.to_string())
+                    .collect(),
+            ),
+        })
+    }
+}
+
+impl mosaica_lifecycle::Reach for LayerReach {
+    fn layer(&self, layer: &str) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|reached| reached.contains(layer))
+    }
+
+    fn artifact(&self, _: &str, _: u32, _: u32) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// What a writer may name among the layers and artifacts a registry and its store hold, as the
+/// registry resolves a write's keys ([`mosaica_lifecycle::Reach`]). An artifact is inside the
+/// writer's scope where a session holding its terms would be served it, suppression aside: its
+/// layer and its view reached, its own label admitting the terms, and as many of its members
+/// within the scope as the layer's `require_member_visibility` asks.
+pub(crate) struct ArtifactReach<'r> {
+    resolver: &'r Resolver<'r>,
+    /// The declarations of the layers the writer reaches, by name; empty for
+    /// [`WriteScope::All`], which reaches every one.
+    layers: FxHashMap<String, mosaica_types::layer::LayerDeclaration>,
+    store: &'r mosaica_lifecycle::ArtifactStore,
+    masks: &'r ScopeMasks,
+    views: Option<VisibleViews>,
+}
+
+impl<'r> ArtifactReach<'r> {
+    /// The reach of `resolver`'s writer over `registry`'s layers, as they stand now, and `store`.
+    pub(crate) fn new(
+        resolver: &'r Resolver<'r>,
+        registry: &mosaica_lifecycle::LayerRegistry,
+        store: &'r mosaica_lifecycle::ArtifactStore,
+        masks: &'r ScopeMasks,
+    ) -> ArtifactReach<'r> {
+        let layers = match resolver.scope {
+            WriteScope::All => FxHashMap::default(),
+            WriteScope::Terms(_) => registry
+                .iter()
+                .filter(|(_, held)| resolver.scope.reaches_layer(&held.declaration))
+                .map(|(name, held)| (name.to_string(), held.declaration.clone()))
+                .collect(),
+        };
+        ArtifactReach {
+            resolver,
+            layers,
+            store,
+            masks,
+            views: resolver.scope.views(&resolver.generation.bundle.manifest),
+        }
+    }
+
+    /// How many of the artifact's members, deleted ones aside, are inside the scope.
+    fn members_within(&self, layer: &str, level: u32, ordinal: u32) -> u64 {
+        self.store
+            .shards()
+            .map(|shard| {
+                let Some(slice) = self.store.slice(shard) else {
+                    return 0;
+                };
+                let Some(record) = slice.get(layer, level, ordinal) else {
+                    return 0;
+                };
+                let mut members = slice.members_of(record).whole().into_owned();
+                if let Some(held) = self.resolver.generation.shard(shard) {
+                    members.andnot_inplace(held.overlay.deleted_set());
+                }
+                self.resolver.mask(shard, &mut members, self.masks);
+                members.cardinality()
+            })
+            .sum()
+    }
+
+    /// Whether the writer may name the artifact `entity` of `space`, or the layer itself where
+    /// `entity` is the layer's own.
+    pub(crate) fn target(
+        &self,
+        registry: &mosaica_lifecycle::LayerRegistry,
+        space: LayerSpace,
+        entity: EntityId,
+    ) -> bool {
+        use mosaica_lifecycle::Reach;
+        let Some((name, _)) = registry.in_space(space) else {
+            return false;
+        };
+        if entity == mosaica_types::layer::LAYER_ENTITY {
+            return self.layer(name);
+        }
+        registry
+            .locate_in(space, entity)
+            .is_some_and(|(name, level, ordinal)| self.artifact(name, level, ordinal))
+    }
+}
+
+impl mosaica_lifecycle::Reach for ArtifactReach<'_> {
+    fn layer(&self, layer: &str) -> bool {
+        matches!(self.resolver.scope, WriteScope::All) || self.layers.contains_key(layer)
+    }
+
+    fn artifact(&self, layer: &str, level: u32, ordinal: u32) -> bool {
+        use mosaica_types::layer::ExistenceCriterion;
+        if matches!(self.resolver.scope, WriteScope::All) {
+            return true;
+        }
+        let (Some(declaration), Some(record)) = (
+            self.layers.get(layer),
+            self.store.get(layer, level, ordinal),
+        ) else {
+            return false;
+        };
+        if !self
+            .resolver
+            .scope
+            .admits_artifact_label(declaration, &record.access)
+        {
+            return false;
+        }
+        if let (Some(views), Some(key)) = (&self.views, record.view.as_deref()) {
+            let reached = declaration
+                .views
+                .iter()
+                .any(|view| crate::artifacts::view_key(view) == key && views.contains_view(view));
+            if !reached {
+                return false;
+            }
+        }
+        match declaration.require_member_visibility {
+            None | Some(ExistenceCriterion::Count(0)) => true,
+            Some(ExistenceCriterion::Count(n)) => self.members_within(layer, level, ordinal) >= n,
+            Some(ExistenceCriterion::Fraction(p)) => {
+                let declared = self.store.declared_size(layer, level, ordinal);
+                declared > 0
+                    && (self.members_within(layer, level, ordinal) as f64) >= p * (declared as f64)
+            }
+        }
+    }
 }
 
 /// The rows a write refused where it applied, by row of its names, with their reasons.
@@ -237,24 +492,21 @@ impl<'a> Resolver<'a> {
             scope,
             key,
             live,
+            masks: &NO_MASKS,
         }
+    }
+
+    /// This resolver, masking an artifact's members by `masks` where it tests one.
+    pub(crate) fn with_masks(mut self, masks: &'a ScopeMasks) -> Resolver<'a> {
+        self.masks = masks;
+        self
     }
 
     /// Whether the writer may name `item`: always for [`WriteScope::All`], and otherwise where one
     /// of the item's index keys, buffered or flushed, is one its terms satisfy. An item whose keys
     /// cannot be read is outside.
     pub(crate) fn admits(&self, item: ItemAt) -> bool {
-        let WriteScope::Terms(scope) = self.scope else {
-            return true;
-        };
-        let Some(shard) = self.generation.shard(item.shard) else {
-            return false;
-        };
-        match shard.buffer.get(item.entity) {
-            Some(buffered) => scope.admits_keys(&buffered.terms, self.generation, self.live),
-            None => crate::write::joined::flushed_terms_of(shard, item.entity)
-                .is_some_and(|keys| scope.admits_keys(&keys, self.generation, self.live)),
-        }
+        self.scope.admits_item(self.generation, self.live, item)
     }
 
     /// `set`, entities of `shard`, less those outside the writer's scope: the flushed ones by the
@@ -322,10 +574,16 @@ impl<'a> Resolver<'a> {
     }
 
     /// The layer itself, where `entity` is `space`'s own, or an artifact its level holds that the
-    /// generation has not deleted.
+    /// generation has not deleted, where the writer may name it ([`ArtifactReach`]).
     pub(crate) fn artifact(&self, space: LayerSpace, entity: EntityId) -> Option<Target> {
         let deleted = self.generation.space_overlay(space).is_deleted(entity);
-        (self.live.artifact_held(space, entity) && !deleted)
+        let reached = || {
+            self.live.with_layers_and_artifacts(|registry, store| {
+                ArtifactReach::new(self, registry, store, self.masks)
+                    .target(registry, space, entity)
+            })
+        };
+        (self.live.artifact_held(space, entity) && !deleted && reached())
             .then_some(Target::Artifact(space, entity))
     }
 
@@ -926,8 +1184,11 @@ pub struct NamedList {
 pub struct MemberNames {
     pub(crate) names: Names,
     pub(crate) lists: Vec<NamedList>,
-    /// What a set spelled by exclusion is complemented within, for a scoped writer.
+    /// What a set spelled by exclusion is complemented within, and an artifact's members are
+    /// counted within, for a scoped writer.
     pub(crate) masks: ScopeMasks,
+    /// A refused artifact refuses the write.
+    pub(crate) strict: bool,
 }
 
 impl MemberNames {
@@ -936,7 +1197,14 @@ impl MemberNames {
             names,
             lists,
             masks: ScopeMasks::default(),
+            strict: false,
         }
+    }
+
+    /// These names for a write in which a refused artifact refuses the write, where `strict`.
+    pub fn strict(mut self, strict: bool) -> MemberNames {
+        self.strict = strict;
+        self
     }
 
     pub fn names(&self) -> &Names {
@@ -1084,6 +1352,7 @@ impl MemberNames {
             names: Names::of_targets(Stamp::of(generation), WriteScope::All, &resolved),
             lists: named,
             masks: ScopeMasks::default(),
+            strict: false,
         })
     }
 }

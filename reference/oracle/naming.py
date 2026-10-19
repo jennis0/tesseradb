@@ -54,7 +54,7 @@ server's resolver, so that the two agreeing on a request is evidence about both.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from . import access
 from .tenancy import HolderCount
@@ -181,6 +181,26 @@ class Holdings:
     def writable(self) -> dict[int, dict[str, object]]:
         """The held items the writer may name, with their values."""
         return {t: v for t, v in self.items.items() if self.inside(t)}
+
+
+def artifact_inside(
+    holdings: Holdings,
+    members: Iterable[int],
+    required: int | None,
+    labels: Sequence[str] | None = None,
+) -> bool:
+    """Whether the writer may name an artifact holding `members`, on a layer its terms reach that
+    requires `required` of them visible, `None` for no requirement: where a viewer holding its
+    terms would be served it, suppression aside. Its own `labels`, where it has any, admit the
+    terms, and that many of its members are held and inside them. A writer holding `write-all`
+    names every artifact."""
+    if holdings.terms is None:
+        return True
+    if labels and not holdings.holds(labels):
+        return False
+    if required is None:
+        return True
+    return sum(1 for t in set(members) if t in holdings.items and holdings.inside(t)) >= required
 
 
 def carried(holdings: Holdings, row: Mapping[str, object]) -> set[tuple[str, object]]:

@@ -209,8 +209,18 @@ impl Engine {
         drop(generation);
         #[cfg(feature = "fault-injection")]
         self.switches.hold_write_check_if_wanted();
-        let submission =
-            IngestSubmission::of(planned, std::sync::Arc::new(request), scope, unique_seq);
+        // The artifacts a scoped writer's layer columns name are judged by its grant's fragments.
+        let masks = match &scope {
+            WriteScope::Terms(terms) if !request.artifacts.is_empty() => self.scope_masks(terms)?,
+            _ => Default::default(),
+        };
+        let submission = IngestSubmission::of(
+            planned,
+            std::sync::Arc::new(request),
+            scope,
+            masks,
+            unique_seq,
+        );
         let ingested = self.write.accept_ingest(submission)?;
         Ok(IngestReceipt::of(
             &ingested.receipt,

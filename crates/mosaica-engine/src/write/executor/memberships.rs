@@ -323,11 +323,13 @@ pub(super) fn parent_of_each_child(
 }
 
 impl Executor {
-    /// Resolve one batch's membership keys, and decide the edges its adjacency declared. `Err`
-    /// refuses the whole batch without effect.
+    /// Resolve one batch's membership keys, and decide the edges its adjacency declared, as the
+    /// writer of `scope` may name them. `Err` refuses the whole batch without effect.
     pub(super) fn resolve_memberships(
         &self,
         artifacts: &mosaica_lifecycle::BatchArtifacts,
+        scope: &WriteScope,
+        masks: &crate::resolver::ScopeMasks,
     ) -> Result<
         (
             Vec<mosaica_lifecycle::ResolvedMembership>,
@@ -338,7 +340,11 @@ impl Executor {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
+        let generation = self.generation.load_full();
+        let resolver =
+            crate::resolver::Resolver::new(&generation, scope, &self.deps.identity_key, &self.live);
         self.live.with_publication_state(|registry, store| {
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store, masks);
             let memberships: Vec<mosaica_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
@@ -350,6 +356,7 @@ impl Executor {
                             join.view.as_deref(),
                             &join.key,
                             store,
+                            &reach,
                         )
                         .map(|ordinal| mosaica_lifecycle::ResolvedMembership {
                             layer: join.layer.clone(),
@@ -388,6 +395,7 @@ impl Executor {
                     store,
                     minting.contains(&(layer, edge.level, view, edge.child.as_str())),
                     &|key| anywhere.contains(&(layer, view, key)),
+                    &reach,
                 ) {
                     Ok(mosaica_lifecycle::EdgeCheck::Agrees) => {}
                     // Carried to the close: on the publication that creates the child, or as a
@@ -511,7 +519,7 @@ impl Executor {
     ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
         let served = self.generation.load_full();
-        let views = crate::write::ServedViews(&served.bundle.manifest);
+        let views = crate::write::ServedViews(&served.bundle.manifest, None);
         self.live.with_publication_state(|registry, store| {
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
@@ -571,6 +579,7 @@ impl Executor {
                         store,
                         &pending,
                         &views,
+                        &mosaica_lifecycle::Everything,
                     )
                     .map_err(|e| e.to_string())?;
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
@@ -636,6 +645,7 @@ impl Executor {
                         store,
                         &pending,
                         window_edges.entry(edge.layer.as_str()).or_default(),
+                        &mosaica_lifecycle::Everything,
                     )
                     .map_err(|e| e.to_string())?
                 {

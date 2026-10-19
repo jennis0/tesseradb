@@ -177,6 +177,16 @@ creating an item with a view default they do not satisfy, is refused as `label_n
 nothing, so it claims neither an item nor a value. The build, and a writer holding `write-all`,
 name every item.
 
+The batch's view and its layer columns are bounded alike: a view or a layer the writer does not
+reach is answered as one not declared. The executor resolves a layer column's keys at admission
+within the writer's reach, the one rule the registry applies to every write naming an artifact
+(`registry.rs`, `Reach`; `resolver.rs`, `ArtifactReach`): an artifact is inside where a session
+holding the writer's terms would be served it, suppression aside. A key an artifact outside holds is
+the unknown key on a `closed` layer, and on an `open` one is refused as held, naming no artifact;
+either refuses the batch, as any key the layer refuses does. **Not built yet:** a key given to an
+artifact out of the writer's reach between the batch's admission and the close of its window takes
+the batch's members.
+
 | What the row's values name | What the handler decides |
 |---|---|
 | No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |

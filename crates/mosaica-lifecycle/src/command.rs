@@ -528,6 +528,9 @@ pub enum ExecError {
         row: usize,
         reason: crate::resolve::Reason,
     },
+    /// Artifact `artifact` of a strict write sets an access label the writer's terms do not
+    /// satisfy → HTTP **409**, no effect.
+    LabelNotHeld { artifact: usize },
     /// A store file the command needs could not be written or opened → HTTP 500, no effect. The
     /// detail names the files, so it is logged and not sent.
     Store { detail: String },
@@ -560,6 +563,11 @@ impl std::fmt::Display for ExecError {
                 f,
                 "row {row} of this request is refused where it applies: {}",
                 reason.as_str()
+            ),
+            ExecError::LabelNotHeld { artifact } => write!(
+                f,
+                "artifact {artifact} of this request sets an access label this credential's \
+                 terms do not satisfy; send a label they satisfy"
             ),
             ExecError::Store { detail } => write!(f, "store failure: {detail}"),
         }

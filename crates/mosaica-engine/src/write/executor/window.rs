@@ -685,6 +685,7 @@ impl Executor {
         let IngestSubmission {
             request,
             scope,
+            masks,
             slots,
             edits,
             ..
@@ -713,6 +714,7 @@ impl Executor {
             planned,
             request,
             scope,
+            masks,
             generation.unique_live.seq(),
         ))
     }
@@ -726,6 +728,8 @@ impl Executor {
     ) -> Option<WindowEntry<IngestReply>> {
         let IngestSubmission {
             request,
+            scope,
+            masks,
             rows,
             edits,
             slots,
@@ -733,7 +737,7 @@ impl Executor {
             over_bound,
             ..
         } = submission;
-        let (memberships, edges) = match self.resolve_memberships(&artifacts) {
+        let (memberships, edges) = match self.resolve_memberships(&artifacts, &scope, &masks) {
             Ok(resolved) => resolved,
             Err(detail) => {
                 reply.fail(ExecError::LayerRefused { detail });

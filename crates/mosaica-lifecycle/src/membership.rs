@@ -2089,15 +2089,16 @@ impl ArtifactStore {
         }
     }
 
-    /// The views, other than `view`, whose set of this level holds `key` — what a cross-view edge
-    /// is reported with (`views.md` §3.5). Empty on an entity-scoped layer and wherever the key
-    /// is held nowhere else.
+    /// The views, other than `view`, whose set of this level holds `key` at an ordinal `named`
+    /// admits — what a cross-view edge is reported with (`views.md` §3.5). Empty on an
+    /// entity-scoped layer and wherever the key is held nowhere else.
     pub fn views_holding_key(
         &self,
         layer: &str,
         level: u32,
         view: Option<&str>,
         key: &str,
+        named: impl Fn(u32) -> bool,
     ) -> Vec<String> {
         let Some(by_view) = self.keys.get(layer).and_then(|held| held.get(&level)) else {
             return Vec::new();
@@ -2105,7 +2106,7 @@ impl ArtifactStore {
         by_view
             .iter()
             .filter(|(held, _)| held.as_deref() != view)
-            .filter(|(_, keys)| keys.contains_key(key))
+            .filter(|(_, keys)| keys.get(key).is_some_and(|ordinal| named(*ordinal)))
             .map(|(held, _)| {
                 held.as_deref()
                     .unwrap_or("(the layer's one set)")

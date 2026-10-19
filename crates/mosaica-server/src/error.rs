@@ -400,6 +400,7 @@ pub fn map_accept_error(e: mosaica_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::NamesRefused { row, reason }) => {
             crate::address::strict_refusal("the request", row, reason)
         }
+        AcceptError::Exec(e @ ExecError::LabelNotHeld { .. }) => ApiError::Conflict(e.to_string()),
         AcceptError::Exec(e @ ExecError::Store { .. }) => {
             tracing::error!(
                 detail = %e,

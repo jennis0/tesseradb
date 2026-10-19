@@ -189,8 +189,8 @@ pub use mosaica_store::utf8;
 pub use bundle_lock::BundleLockError;
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, FoldRefusal,
-    PendingChange, PublishGeometryError, WalGauge, WriteStage,
-    DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
+    PendingChange, PublishGeometryError, VocabularyDeclared, VocabularyValues, WalGauge,
+    WriteStage, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
 };
 // The flush's own laps, beside `WriteStage`'s and read by the same status block.
 pub use flush::FlushStage;

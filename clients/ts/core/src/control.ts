@@ -80,9 +80,11 @@ export type RowAnswer = Answer<IngestResponse> & {
  * values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
  * batch names the same item. `one_value_twice`: an earlier row of the batch sets the same unique
  * value. `value_held`: the row would create an item, or set a value on the item it names, with a
- * unique value an item outside the writer's terms holds. `label_not_held`: the row sets an access
- * label the writer's terms do not satisfy. The last four are given by `ingest` only. A writer
- * without `write-all` names only the items its terms reach: an item outside them is absent to it.
+ * unique value an item outside the writer's terms holds. `label_not_held`: the row, or an artifact
+ * of `publish` or `grow`, sets an access label the writer's terms do not satisfy. `one_item_twice`,
+ * `one_value_twice` and `value_held` are given by `ingest` only. A writer without `write-all` names
+ * only the items, layers, views, groups and artifacts its terms reach: one outside them is absent
+ * to it.
  *
  * @category Control plane
  */
@@ -108,7 +110,8 @@ export type RefusedRow = {
 };
 
 /**
- * A member the identity rule refused, which the artifact was published or grown without.
+ * A member the identity rule refused, which the artifact was published or grown without; or, with
+ * no `list` and `row`, an artifact refused whole as `label_not_held`, which wrote nothing.
  *
  * @category Control plane
  */
@@ -116,9 +119,9 @@ export type RefusedMember = {
   /** The artifact's position in the request, from 0. */
   artifact: number;
   /** The member table the member was in. */
-  list: 'members' | 'excluding' | 'leaving';
+  list?: 'members' | 'excluding' | 'leaving';
   /** The member's row in that table, from 0. */
-  row: number;
+  row?: number;
   /** Why it was refused. */
   reason: RefusalReason;
 };
@@ -379,8 +382,8 @@ export type ShapeReport = {
  * @category Control plane
  */
 export type ArtifactsPublished = PublicationAck & {
-  /** One per artifact in the order sent, with the held artifact's own `mosaica_id` where the key was held. */
-  artifacts: {key: string | null; mosaica_id: string}[];
+  /** One per artifact in the order sent, with the held artifact's own `mosaica_id` where the key was held, and `null` for one refused as `label_not_held`. */
+  artifacts: {key: string | null; mosaica_id: string | null}[];
   /** Artifacts the request created. */
   created: number;
   /** Of those, the ones with no content on a layer that declares some. */
@@ -389,7 +392,7 @@ export type ArtifactsPublished = PublicationAck & {
   filled: number;
   /** Memberships added, to created and held artifacts alike. */
   joined: number;
-  /** The members the identity rule refused, which the artifacts were published without. Empty with `strict`. */
+  /** The members the identity rule refused, which the artifacts were published without, and the artifacts refused as `label_not_held`. Empty with `strict`. */
   refused: RefusedMember[];
   /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
@@ -403,9 +406,9 @@ export type ArtifactsPublished = PublicationAck & {
  * @category Control plane
  */
 export type MembershipsGrown = PublicationAck & {
-  /** One per artifact in the order sent. `withdrawn` is the rank of the content the row withdrew by emptying its generating set. */
-  artifacts: {key: string; mosaica_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
-  /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
+  /** One per artifact in the order sent. `withdrawn` is the rank of the content the row withdrew by emptying its generating set. `mosaica_id` is `null`, and every count 0, for a row refused as `label_not_held`. */
+  artifacts: {key: string; mosaica_id: string | null; joined: number; filled: number; left: number; withdrawn?: number}[];
+  /** The members the identity rule refused, which the artifacts were grown without, and the rows refused as `label_not_held`. Empty with `strict`. */
   refused: RefusedMember[];
   /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
@@ -922,7 +925,9 @@ export class Control {
   /**
    * `PATCH /control/vocabularies/{name}/values`: adds one page of `{key, title?}` values to a
    * vocabulary. No value is removed, and a title given for a held key replaces its title. An
-   * unknown vocabulary is refused with `404`.
+   * unknown vocabulary is refused with `404`. The answer's `bound` counts the page's keys the
+   * vocabulary holds; a writer without `write-all` is told of a `derived` vocabulary that count
+   * alone, without `added`, `existing` and `titles`.
    */
   vocabularyValues(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PATCH', withQuery(`/control/vocabularies/${segment(name)}/values`, waiting(options)), body, options);
@@ -954,7 +959,9 @@ export class Control {
    * names two. An artifact's or a layer's `mosaica_id` names no item. A `generated_from` member
    * naming no item, or two, refuses the request, strict or not. A batch creating more artifacts
    * than the level's layer space has ids left for is refused with `409`. Every other refusal
-   * applies nothing.
+   * applies nothing. To a writer without `write-all`, a layer, parent or attachment target outside
+   * its terms is one not declared, a key an artifact outside holds is `409`, and an artifact
+   * setting a label its terms do not satisfy is refused alone as `label_not_held`.
    */
   publish(layer: string, body: PublishRequest, options: StrictOptions = {}): Promise<Answer<ArtifactsPublished>> {
     const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, naming(options));

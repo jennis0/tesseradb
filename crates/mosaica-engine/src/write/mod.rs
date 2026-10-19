@@ -26,7 +26,7 @@ mod opening;
 mod reconstruct;
 mod schema;
 
-pub use command::ViewDropped;
+pub use command::{ViewDropped, VocabularyDeclared, VocabularyValues};
 pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
@@ -57,6 +57,7 @@ use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
+use crate::resolver::WriteScope;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
 use mosaica_store::merge::MergePolicy;
@@ -264,7 +265,19 @@ impl From<SubmitError> for AcceptError {
 }
 
 /// A generation's groups and their views, as a publication sees them.
-pub(crate) struct ServedViews<'a>(pub(crate) &'a mosaica_store::manifest::Manifest);
+pub(crate) struct ServedViews<'a>(
+    pub(crate) &'a mosaica_store::manifest::Manifest,
+    /// The views the writer reaches, `None` for every view.
+    pub(crate) Option<&'a crate::gate::VisibleViews>,
+);
+
+impl ServedViews<'_> {
+    fn reaches(&self, group: &str, key: &str) -> bool {
+        self.1.is_none_or(|views| {
+            views.contains_view(&format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR))
+        })
+    }
+}
 
 impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
     fn incarnation_of(
@@ -272,7 +285,9 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
         group: &str,
         key: &str,
     ) -> Option<mosaica_types::view::ViewIncarnation> {
-        self.0.incarnation_of_key(group, key)
+        self.0
+            .incarnation_of_key(group, key)
+            .filter(|_| self.reaches(group, key))
     }
     fn keys_of(&self, group: &str) -> Vec<String> {
         self.0
@@ -280,6 +295,7 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
             .iter()
             .filter(|held| held.name == group)
             .flat_map(|held| held.views.iter().map(|view| view.key.clone()))
+            .filter(|key| self.reaches(group, key))
             .collect()
     }
 }
@@ -734,16 +750,18 @@ impl WritePath {
     pub(crate) fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
+        scope: WriteScope,
     ) -> Result<LayerSpace, AcceptError> {
         self.submit(|reply| Command::RegisterLayer {
             declaration: Box::new(declaration),
+            scope,
             reply,
         })
     }
 
     /// Drop a layer. Its name may be registered again, as a new layer in a new space.
-    pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
-        self.submit(|reply| Command::DropLayer { name, reply })
+    pub(crate) fn drop_layer(&self, name: String, scope: WriteScope) -> Result<(), AcceptError> {
+        self.submit(|reply| Command::DropLayer { name, scope, reply })
     }
 
     /// Create a view of a view group while the service runs.
@@ -753,12 +771,14 @@ impl WritePath {
         key: String,
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
+        scope: WriteScope,
     ) -> Result<(), AcceptError> {
         self.submit(|reply| Command::CreateView {
             group,
             key,
             visibility,
             metadata,
+            scope,
             reply,
         })
     }
@@ -768,9 +788,11 @@ impl WritePath {
     pub(crate) fn declare_attribute(
         &self,
         request: mosaica_lifecycle::AttributeRequest,
+        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::DeclareAttribute {
             request: Box::new(request),
+            scope,
             reply,
         })
     }
@@ -781,41 +803,44 @@ impl WritePath {
         self.submit(|reply| Command::DeclareShards { size, reply })
     }
 
-    /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
-    /// name already carried this identity, how many of the request's values were novel, and how
-    /// many held values it gave a new title.
+    /// Declare a vocabulary. Answers whether a vocabulary of that name already carried this
+    /// identity, and what the request's values did.
     pub(crate) fn declare_vocabulary(
         &self,
         request: mosaica_lifecycle::VocabularyRequest,
-    ) -> Result<(bool, u64, u64), AcceptError> {
-        let declared = self.submit(|reply| Command::DeclareVocabulary {
+        scope: WriteScope,
+    ) -> Result<VocabularyDeclared, AcceptError> {
+        self.submit(|reply| Command::DeclareVocabulary {
             request: Box::new(request),
+            scope,
             reply,
-        })?;
-        Ok((declared.existing, declared.added, declared.titles))
+        })
     }
 
-    /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
+    /// A page of values for a vocabulary that exists.
     pub(crate) fn mint_vocabulary_values(
         &self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
-    ) -> Result<(u64, u64, u64), AcceptError> {
-        let minted = self.submit(|reply| Command::MintVocabularyValues {
+        scope: WriteScope,
+    ) -> Result<VocabularyValues, AcceptError> {
+        self.submit(|reply| Command::MintVocabularyValues {
             vocabulary,
             values,
+            scope,
             reply,
-        })?;
-        Ok((minted.added, minted.existing, minted.titles))
+        })
     }
 
     /// Declare a view group. Answers whether a group of that name already carried this identity.
     pub(crate) fn create_view_group(
         &self,
         declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
+        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreateViewGroup {
             declaration: Box::new(declaration),
+            scope,
             reply,
         })
     }
@@ -824,16 +849,28 @@ impl WritePath {
     pub(crate) fn create_plain_view(
         &self,
         declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
+        scope: WriteScope,
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::CreatePlainView {
             declaration: Box::new(declaration),
+            scope,
             reply,
         })
     }
 
     /// Drop a view, freeing its key and killing its incarnation.
-    pub(crate) fn drop_view(&self, group: String, key: String) -> Result<ViewDropped, AcceptError> {
-        self.submit(|reply| Command::DropView { group, key, reply })
+    pub(crate) fn drop_view(
+        &self,
+        group: String,
+        key: String,
+        scope: WriteScope,
+    ) -> Result<ViewDropped, AcceptError> {
+        self.submit(|reply| Command::DropView {
+            group,
+            key,
+            scope,
+            reply,
+        })
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order and

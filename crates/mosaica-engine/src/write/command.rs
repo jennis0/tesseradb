@@ -111,11 +111,13 @@ impl<T> Pending<T> {
 /// the executor resolved it again.
 pub(crate) type IngestReply = Reply<Result<Ingested, AcceptError>>;
 
-/// What a growth answers: the layer's space, one receipt per join, and the member rows refused.
+/// What a growth answers: the layer's space, one receipt per join applied, the member rows
+/// refused, and the joins refused for an access label the writer's terms do not satisfy.
 pub(crate) type GrownBatch = (
     mosaica_types::LayerSpace,
     Vec<MembershipGrown>,
     crate::resolver::Refused,
+    Vec<usize>,
 );
 
 /// What one accepted ingest batch did.
@@ -135,14 +137,12 @@ pub(crate) struct Ingested {
 
 /// What one vocabulary declaration did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VocabularyDeclared {
+pub struct VocabularyDeclared {
     /// Whether a vocabulary of that name already carried this identity, in which case the
     /// declaration's values were applied to it as a page.
-    pub(crate) existing: bool,
-    /// How many of the request's values were novel, the rest having been bound already.
-    pub(crate) added: u64,
-    /// How many held values the request gave a title differing from the one they carried.
-    pub(crate) titles: u64,
+    pub existing: bool,
+    /// What the declaration's values did.
+    pub values: VocabularyValues,
 }
 
 /// What one page of vocabulary values did. All three counts are bounded by the caller's own page.
@@ -151,13 +151,23 @@ pub(crate) struct VocabularyDeclared {
 /// their page changed a name a client draws, where `added` and `existing` say only which keys
 /// were bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VocabularyValues {
+pub struct VocabularyValues {
     /// Values that were novel and drew a code.
-    pub(crate) added: u64,
+    pub added: u64,
     /// Values that were already bound.
-    pub(crate) existing: u64,
+    pub existing: u64,
     /// Held values whose title this page replaced.
-    pub(crate) titles: u64,
+    pub titles: u64,
+    /// Whether the writer is told only [`Self::bound`]: a writer whose terms bound its writes,
+    /// of a `derived` vocabulary, where a key bound before is one some item carried.
+    pub withheld: bool,
+}
+
+impl VocabularyValues {
+    /// How many of the page's keys are bound.
+    pub fn bound(&self) -> u64 {
+        self.added + self.existing
+    }
 }
 
 /// What a view drop did beside dropping the view.
@@ -181,6 +191,9 @@ pub struct ViewDropped {
 pub(crate) struct IngestSubmission {
     pub(crate) request: Arc<crate::ingest::IngestRequest>,
     pub(crate) scope: crate::resolver::WriteScope,
+    /// Each shard's fragment of `scope`'s grant, which the artifacts the batch names are judged
+    /// by where the layer's existence criterion counts their members.
+    pub(crate) masks: crate::resolver::ScopeMasks,
     /// The rows the batch writes: items it creates, and items it adds to its view in place.
     pub(crate) rows: Vec<UnallocatedRow>,
     /// The items the batch moves to new entities.
@@ -204,12 +217,13 @@ pub(crate) struct IngestSubmission {
 }
 
 impl IngestSubmission {
-    /// `planned`, resolved from `request` by a writer of `scope` when the live unique entries'
-    /// sequence number was `unique_seq`.
+    /// `planned`, resolved from `request` by a writer of `scope`, whose grant's fragments are
+    /// `masks`, when the live unique entries' sequence number was `unique_seq`.
     pub(crate) fn of(
         planned: crate::ingest::Planned,
         request: Arc<crate::ingest::IngestRequest>,
         scope: crate::resolver::WriteScope,
+        masks: crate::resolver::ScopeMasks,
         unique_seq: u64,
     ) -> IngestSubmission {
         let crate::ingest::Planned {
@@ -224,6 +238,7 @@ impl IngestSubmission {
         IngestSubmission {
             request,
             scope,
+            masks,
             rows,
             edits,
             slots,
@@ -265,10 +280,17 @@ pub(crate) enum Command {
     /// turns into the `mosaica_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<mosaica_types::layer::LayerDeclaration>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<mosaica_types::LayerSpace>,
     },
     /// Drop an annotation layer. Its name may be registered again, as a new layer.
-    DropLayer { name: String, reply: Reply<()> },
+    DropLayer {
+        name: String,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
+        reply: Reply<()>,
+    },
     /// Create a view of a view group.
     CreateView {
         group: String,
@@ -276,6 +298,8 @@ pub(crate) enum Command {
         /// The gate's labels, each one term; `None` is `public`.
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<()>,
     },
     /// Drop a view of a view group, deleting the items it leaves with a row in no view. The
@@ -283,12 +307,16 @@ pub(crate) enum Command {
     DropView {
         group: String,
         key: String,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<ViewDropped>,
     },
     /// Declare an attribute column. The answer is whether an identical declaration already held the
     /// name.
     DeclareAttribute {
         request: Box<AttributeRequest>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// Declare the point shard's size. The answer is whether the shard already had this size, in
@@ -297,16 +325,22 @@ pub(crate) enum Command {
     /// Declare a vocabulary.
     DeclareVocabulary {
         request: Box<VocabularyRequest>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<VocabularyDeclared>,
     },
     /// Declare a view group. The answer is whether an identical declaration already held the name.
     CreateViewGroup {
         declaration: Box<ViewGroupDeclaration>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// Create a plain view, answered as [`Command::CreateViewGroup`] is.
     CreatePlainView {
         declaration: Box<PlainViewDeclaration>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<bool>,
     },
     /// A page of values for a vocabulary that exists. The caller supplies no codes: the server
@@ -314,6 +348,8 @@ pub(crate) enum Command {
     MintVocabularyValues {
         vocabulary: String,
         values: Vec<DeclaredValue>,
+        /// Whose terms bound what the command may name.
+        scope: crate::resolver::WriteScope,
         reply: Reply<VocabularyValues>,
     },
     /// Publish a batch of artifacts into one level of one layer. The answer carries their entities
@@ -414,6 +450,7 @@ mod tests {
                     mosaica_id_column: false,
                 }),
                 scope: crate::resolver::WriteScope::All,
+                masks: Default::default(),
                 rows: Vec::new(),
                 edits: Vec::new(),
                 slots: Vec::new(),

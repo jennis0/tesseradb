@@ -49,10 +49,14 @@ OIDC access token. Writes, flush and compaction need `write`. Status and the cat
 `admin`. A write by a principal holding `write` and not `write-all` names only the items its terms
 reach, suppressed ones included ([users and access](../users-and-access.md#writes)): an item
 outside them is absent to the write, by `mosaica_id` and by unique value, and a row setting a
-label the terms do not satisfy is refused. The operator holds `write-all`, which lifts the bound.
-**Not built yet:** the same bound on layers, views, artifacts and vocabularies, and on the values a
-`unique` declaration's refusal names. A principal with `write` can still declare, drop and publish
-into ones it cannot reach, and learn from a declaration's answer that one exists.
+label the terms do not satisfy is refused. Layers, views, groups and artifacts are bounded alike:
+one a session holding the writer's terms would not be served, suppression aside, is absent to the
+write, whether it is dropped, published into, grown, named as a parent, an attachment target, a
+layer's view or dependency, a view's group, an ingest batch's view or column, or a change's
+`mosaica_id`, and a refusal listing views lists only those the writer reaches. The operator holds
+`write-all`, which lifts the bound. **Not built yet:** dropping a view the writer reaches deletes
+every item it leaves in no view, outside its terms included, and counts them in the answer;
+dropping a layer deletes every artifact of it.
 
 `admin` can grant any permission to any principal, itself included. A principal holding `admin`
 can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
@@ -304,9 +308,21 @@ row whose values name two items in the scope is refused and listed by its positi
 strict batch the batch is refused with `409`, naming the values and the holders' `mosaica_id`s so
 that the operator can find the item to change. It names the `mosaica_id`, never the entity id. A declaration of `unique` at a running service is refused where
 values are held twice, and the refusal names how many there are and up to ten of the values, and no
-item. A build leaves out each later row naming an item or setting a value an earlier row of its file
+item; to a writer without `write-all` it counts and names only the values every holder of which is
+inside its scope, and where none is it says only that a value is held twice. A build leaves out each later row naming an item or setting a value an earlier row of its file
 named or set. Its report counts the rows it left out and names up to ten of their values, and it
 names no item.
+
+Names have the same exception as values. A declaration of a view or a group under a name one out of
+the writer's reach holds is refused as the name taken, never answered as the declaration held and
+never compared with it, and a publication under a key an artifact outside the writer's terms holds
+is refused as the key taken, naming no artifact. A writer without `write-all` therefore learns, of a
+view, a group or an artifact out of its reach, that its name or key is taken, and nothing more. A
+page of a `derived` vocabulary's values answers such a writer one count, of the page's keys held,
+since whether a key was held before says that some item carried it. As for an item, the lookups
+that found what is out of reach were made, and the time its test takes, which for an artifact of a
+layer requiring visible members includes counting its members within the scope, is the one
+difference from a name nobody holds.
 
 ## An incomplete answer is refused
 

@@ -90,7 +90,26 @@ impl Engine {
         targets: bool,
     ) -> std::result::Result<Names, crate::EngineError> {
         let generation = self.generation.load_full();
-        Names::resolve(&self.resolver(&generation, scope), table, targets)
+        // An artifact a change names is judged by the writer's grant's fragments where its
+        // layer's existence criterion counts its members.
+        let names_an_artifact = targets
+            && table
+                .mosaica_id
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|id| self.identity_key.invert_artifact(*id).is_some());
+        let masks = match scope {
+            WriteScope::Terms(terms) if names_an_artifact => self
+                .fragments_of(terms)
+                .map_err(crate::session::fragment_error)?,
+            _ => Default::default(),
+        };
+        Names::resolve(
+            &self.resolver(&generation, scope).with_masks(&masks),
+            table,
+            targets,
+        )
     }
 }
 
@@ -373,13 +392,41 @@ impl Engine {
         self.write.live().registered_layer(name)
     }
 
+    /// [`Engine::registered_layer`] where a writer of `scope` reaches the layer, and `None` where
+    /// it does not, as for a layer nobody registered.
+    pub fn reached_layer(
+        &self,
+        name: &str,
+        scope: &WriteScope,
+    ) -> Option<mosaica_types::layer::RegisteredLayer> {
+        self.registered_layer(name)
+            .filter(|layer| scope.reaches_layer(&layer.declaration))
+    }
+
+    /// [`Engine::meta`] as a writer of `scope` holds it: the views and groups it reaches.
+    pub fn meta_as(&self, scope: &WriteScope) -> crate::viewport::EngineMeta {
+        let generation = self.generation.load_full();
+        crate::viewport::meta_of(&generation)
+            .within(scope.views(&generation.bundle.manifest).as_ref())
+    }
+
     /// Register an annotation layer, returning its `mosaica_id`, the only address it can later
     /// be suppressed by — entity ids never cross the boundary.
     pub fn register_layer(
         &self,
         declaration: mosaica_types::layer::LayerDeclaration,
     ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
-        let space = self.write.register_layer(declaration)?;
+        self.register_layer_as(declaration, WriteScope::All)
+    }
+
+    /// [`Engine::register_layer`] by a writer of `scope`: the views, groups and layers the
+    /// declaration names are the ones the writer reaches.
+    pub fn register_layer_as(
+        &self,
+        declaration: mosaica_types::layer::LayerDeclaration,
+        scope: WriteScope,
+    ) -> std::result::Result<MosaicaId, crate::write::AcceptError> {
+        let space = self.write.register_layer(declaration, scope)?;
         self.issued_id(space, mosaica_types::layer::LAYER_ENTITY)
     }
 
@@ -400,7 +447,17 @@ impl Engine {
     /// Drop a layer. Its name may be registered again, as a new layer whose identifiers share
     /// nothing with the dropped one's.
     pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.drop_layer(name)
+        self.drop_layer_as(name, WriteScope::All)
+    }
+
+    /// [`Engine::drop_layer`] by a writer of `scope`, to whom a layer it does not reach is
+    /// unknown.
+    pub fn drop_layer_as(
+        &self,
+        name: String,
+        scope: WriteScope,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.write.drop_layer(name, scope)
     }
 
     /// Declare an attribute column while the service runs. `true` where a column of that name
@@ -410,7 +467,18 @@ impl Engine {
         &self,
         request: mosaica_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.write.declare_attribute(request)
+        self.declare_attribute_as(request, WriteScope::All)
+    }
+
+    /// [`Engine::declare_attribute`] by a writer of `scope`: a group it does not reach is unknown,
+    /// and a refusal of `unique` over a value held twice names only values whose holders it
+    /// reaches.
+    pub fn declare_attribute_as(
+        &self,
+        request: mosaica_lifecycle::AttributeRequest,
+        scope: WriteScope,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.write.declare_attribute(request, scope)
     }
 
     /// Declare the point shard's size while the service runs. `true` where the shard already had
@@ -423,23 +491,25 @@ impl Engine {
         self.write.declare_shards(size)
     }
 
-    /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
+    /// Declare a vocabulary while the service runs, by a writer of `scope`.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn declare_vocabulary(
         &self,
         request: mosaica_lifecycle::VocabularyRequest,
-    ) -> std::result::Result<(bool, u64, u64), crate::write::AcceptError> {
-        self.write.declare_vocabulary(request)
+        scope: WriteScope,
+    ) -> std::result::Result<crate::write::VocabularyDeclared, crate::write::AcceptError> {
+        self.write.declare_vocabulary(request, scope)
     }
 
-    /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
+    /// A page of values for a vocabulary that exists, by a writer of `scope`.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn mint_vocabulary_values(
         &self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
-    ) -> std::result::Result<(u64, u64, u64), crate::write::AcceptError> {
-        self.write.mint_vocabulary_values(vocabulary, values)
+        scope: WriteScope,
+    ) -> std::result::Result<crate::write::VocabularyValues, crate::write::AcceptError> {
+        self.write.mint_vocabulary_values(vocabulary, values, scope)
     }
 
     /// Declare a view group while the service runs. The gate's labels are checked here, by the
@@ -447,24 +517,44 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_view_group(
         &self,
+        declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.create_view_group_as(declaration, WriteScope::All)
+    }
+
+    /// [`Engine::create_view_group`] by a writer of `scope`: a name a view or a group it does not
+    /// reach holds is taken, and a group it does not reach is unknown.
+    pub fn create_view_group_as(
+        &self,
         mut declaration: mosaica_lifecycle::wal::ViewGroupDeclaration,
+        scope: WriteScope,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
             self.check_point_default(declaration.point_default.as_deref())?;
-        self.write.create_view_group(declaration)
+        self.write.create_view_group(declaration, scope)
     }
 
     /// Create a plain view while the service runs, on [`Engine::create_view_group`]'s rule.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_plain_view(
         &self,
+        declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.create_plain_view_as(declaration, WriteScope::All)
+    }
+
+    /// [`Engine::create_plain_view`] by a writer of `scope`, on
+    /// [`Engine::create_view_group_as`]'s rule.
+    pub fn create_plain_view_as(
+        &self,
         mut declaration: mosaica_lifecycle::wal::PlainViewDeclaration,
+        scope: WriteScope,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
         declaration.point_default =
             self.check_point_default(declaration.point_default.as_deref())?;
-        self.write.create_plain_view(declaration)
+        self.write.create_plain_view(declaration, scope)
     }
 
     /// [`mosaica_access::point_default`]: the default as stored,
@@ -503,8 +593,22 @@ impl Engine {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.create_view_as(group, key, visibility, metadata, WriteScope::All)
+    }
+
+    /// [`Engine::create_view`] by a writer of `scope`, to whom a group it does not reach is
+    /// unknown.
+    pub fn create_view_as(
+        &self,
+        group: String,
+        key: String,
+        visibility: Option<Vec<String>>,
+        metadata: std::collections::BTreeMap<String, mosaica_types::view::ViewMetadataValue>,
+        scope: WriteScope,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
         let visibility = self.check_visibility(visibility.as_deref())?;
-        self.write.create_view(group, key, visibility, metadata)
+        self.write
+            .create_view(group, key, visibility, metadata, scope)
     }
 
     /// Drop a view, deleting the items it leaves in no view and its artifacts. Its key may be
@@ -514,7 +618,17 @@ impl Engine {
         group: String,
         key: String,
     ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
-        self.write.drop_view(group, key)
+        self.drop_view_as(group, key, WriteScope::All)
+    }
+
+    /// [`Engine::drop_view`] by a writer of `scope`, to whom a view it does not reach is unknown.
+    pub fn drop_view_as(
+        &self,
+        group: String,
+        key: String,
+        scope: WriteScope,
+    ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
+        self.write.drop_view(group, key, scope)
     }
 
     /// [`Engine::put_artifacts_named`] for members as the generation served now holds them, each
@@ -558,12 +672,7 @@ impl Engine {
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
         names.fill_artifacts(&mut artifacts, None);
         if let WriteScope::Terms(scope) = names.names().scope().clone() {
-            if artifacts
-                .iter()
-                .any(|artifact| artifact.excluding.is_some())
-            {
-                names.masks = self.scope_masks(&scope)?;
-            }
+            names.masks = self.scope_masks(&scope)?;
         }
         #[cfg(feature = "fault-injection")]
         self.switches.hold_write_check_if_wanted();
@@ -582,28 +691,33 @@ impl Engine {
             filled: batch.filled,
             joined: batch.joined,
             refused: batch.refused,
+            unheld: batch.unheld,
         })
     }
 
     /// Each shard's fragment of `scope`'s grant, as the generation served now holds it.
-    fn scope_masks(
+    pub(crate) fn scope_masks(
         &self,
         scope: &crate::resolver::TermsScope,
     ) -> std::result::Result<crate::resolver::ScopeMasks, crate::write::AcceptError> {
+        self.fragments_of(scope).map_err(|e| {
+            crate::write::AcceptError::Unreadable(format!(
+                "the items within this credential's terms could not be read: {e}"
+            ))
+        })
+    }
+
+    /// [`Self::scope_masks`], failing as the fragment cache does.
+    fn fragments_of(
+        &self,
+        scope: &crate::resolver::TermsScope,
+    ) -> std::result::Result<crate::resolver::ScopeMasks, mosaica_authz::FragmentCacheError> {
         let generation = self.generation.load_full();
         generation
             .shards()
-            .map(|shard| {
-                let fragment = shard.fragment(&self.fragments, scope.grant())?;
-                Ok((shard.id(), fragment))
-            })
-            .collect::<std::result::Result<Vec<_>, mosaica_authz::FragmentCacheError>>()
+            .map(|shard| Ok((shard.id(), shard.fragment(&self.fragments, scope.grant())?)))
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map(crate::resolver::ScopeMasks::new)
-            .map_err(|e| {
-                crate::write::AcceptError::Unreadable(format!(
-                    "the items within this credential's terms could not be read: {e}"
-                ))
-            })
     }
 
     /// [`Self::put_artifacts`], answering the identifiers alone — the shape every caller that
@@ -636,7 +750,7 @@ impl Engine {
         let names =
             MemberNames::of_sets(&self.identity_key, &generation, lists).map_err(store_refusal)?;
         self.grow_memberships_named(layer, level, joins, names)
-            .map(|(grown, _)| grown)
+            .map(|(grown, ..)| grown)
     }
 
     /// Add points to the memberships of artifacts that already exist, each named by its published
@@ -653,12 +767,16 @@ impl Engine {
         layer: String,
         level: u32,
         mut joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        names: MemberNames,
-    ) -> std::result::Result<(Vec<GrownMembership>, Refused), crate::write::AcceptError> {
+        mut names: MemberNames,
+    ) -> std::result::Result<(Vec<GrownMembership>, Refused, Vec<usize>), crate::write::AcceptError>
+    {
         names.fill_growth(&mut joins, None);
+        if let WriteScope::Terms(scope) = names.names().scope().clone() {
+            names.masks = self.scope_masks(&scope)?;
+        }
         #[cfg(feature = "fault-injection")]
         self.switches.hold_write_check_if_wanted();
-        let (space, grown, refused) =
+        let (space, grown, refused, unheld) =
             self.write
                 .grow_memberships(layer, level, joins, Box::new(names))?;
         let grown = grown
@@ -673,7 +791,7 @@ impl Engine {
                 })
             })
             .collect::<std::result::Result<Vec<_>, crate::write::AcceptError>>()?;
-        Ok((grown, refused))
+        Ok((grown, refused, unheld))
     }
 
     /// Where an artifact target sits, and what was published there; `None` for an item. Addressing
@@ -723,7 +841,8 @@ pub struct GrownMembership {
 /// counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedArtifacts {
-    /// One per artifact in the caller's order: a held artifact's own, or the new one's.
+    /// One per artifact not in `unheld`, in the caller's order: a held artifact's own, or the new
+    /// one's.
     pub mosaica_ids: Vec<MosaicaId>,
     /// How many artifacts the batch created; the rest were held.
     pub created: u64,
@@ -736,6 +855,9 @@ pub struct PublishedArtifacts {
     pub joined: u64,
     /// The member rows that named nothing where the batch applied.
     pub refused: Refused,
+    /// The artifacts, by position in the batch, refused for an access label the writer's terms
+    /// do not satisfy, which wrote nothing.
+    pub unheld: Vec<usize>,
 }
 
 /// Where an artifact sits, as [`Engine::locate_artifact`] answers it. The ordinal is here because

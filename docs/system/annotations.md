@@ -296,6 +296,18 @@ highlight without narrowing at all. In the artifacts of a tile, both flags are t
 artifact's visible members inside that tile, so a cluster can be lit in one tile and dull in the
 next while its count is the same in both.
 
+### What a writer may name
+
+A writer holding `write` and not `write-all` names only the layers and artifacts a viewer holding
+its terms would be served, suppression aside ([users and access](../users-and-access.md#writes)).
+A layer whose label its terms do not satisfy is one never declared to it, and so is an artifact
+whose own label, or the layer's default, they do not satisfy, that belongs to a view they do not
+reach, or that has fewer members inside them than the layer's `require_member_visibility` asks: a
+growth, a parent, an attachment target, an ingest column's key or a change naming one is answered
+as naming nothing. A publication under the key of one out of reach is refused as the key taken,
+naming no artifact, and an artifact setting a label its terms do not satisfy is refused by its
+position as `label_not_held`, the batch's others applied.
+
 ## What an artifact carries
 
 Content is either **derived**, recomputed for each viewer from the members they can see (a count,

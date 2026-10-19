@@ -268,14 +268,14 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(status, 201, "{body}");
     assert_eq!(
         without_publication(body),
-        json!({ "name": "severity", "existing": false, "added": 2, "titles": 0 })
+        json!({ "name": "severity", "existing": false, "bound": 2, "added": 2, "titles": 0 })
     );
 
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 200, "identical: the vocabulary that exists: {body}");
     assert_eq!(
         without_publication(body),
-        json!({ "name": "severity", "existing": true, "added": 0, "titles": 0 }),
+        json!({ "name": "severity", "existing": true, "bound": 2, "added": 0, "titles": 0 }),
         "a repeated value is a no-op"
     );
 

@@ -593,7 +593,7 @@ A term says what the grantee may see, and a permission what it may do. The sessi
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
 | `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
-| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. A write with `write` names only the items, layers, views, groups and artifacts the grantee's terms reach; one with `write-all` names every one. |
 
 ## `mosaica revoke-grant`
 
@@ -609,7 +609,7 @@ Revoke a term or a permission from a principal or a group, on the control plane.
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
 | `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
-| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. A write with `write` names only the items, layers, views, groups and artifacts the grantee's terms reach; one with `write-all` names every one. |
 
 ## `mosaica provider`
 

@@ -811,6 +811,14 @@ pub fn duplicates_message(attribute: &str, count: u64, examples: &[String]) -> S
     )
 }
 
+/// The refusal of a `unique` declaration over values held twice, where none of them may be named.
+pub fn held_twice_message(attribute: &str) -> String {
+    format!(
+        "attribute '{attribute}' is declared unique and a value is held by more than one item; \
+         remove the duplicates or declare it without `unique`"
+    )
+}
+
 /// The declared columns that are unique, with their positions in the declaration.
 pub fn unique_columns(declared: &[DeclaredScalar]) -> impl Iterator<Item = (usize, &DeclaredScalar)> {
     declared.iter().enumerate().filter(|(_, d)| d.unique)

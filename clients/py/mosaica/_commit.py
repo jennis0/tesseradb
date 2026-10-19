@@ -1394,12 +1394,13 @@ def _fold(report, page: Page, answer: Answer) -> None:
         # `existing: true` is the held-part arm of the fill rule: the name is there under this
         # identity and the request applied nothing but its values.
         report.already_present += 1 if body.get("existing") else 0
-        report.values_bound += int(body.get("added", 0))
+        report.values_bound += int(body.get("added", body.get("bound", 0)))
         report.titles_set += int(body.get("titles", 0))
     elif page.kind == "vocabulary_values":
-        # Here `existing` is a count: the keys of this page the value set already bound.
+        # Here `existing` is a count: the keys of this page the value set already bound. A writer
+        # without `write-all` is told of a derived vocabulary only `bound`.
         report.already_present += int(body.get("existing", 0))
-        report.values_bound += int(body.get("added", 0))
+        report.values_bound += int(body.get("added", body.get("bound", 0)))
         report.titles_set += int(body.get("titles", 0))
     elif page.kind == "grow":
         for one in body.get("artifacts", []):
@@ -1460,14 +1461,15 @@ def _waited(report, answer: Answer) -> None:
 
 def refused_members(page: Page, body: dict) -> list[dict]:
     """The members a publication or growth left out, each named by its artifact, its list and the
-    member row as sent."""
+    member row as sent, and the annotations it refused whole, with no list or member."""
     out = []
     for one in body.get("refused", []):
         at = int(one["artifact"])
         level, view, key = page.artifacts[at]
-        member = page.lists[at].get(one["list"], [])[int(one["row"])]
+        listed = one.get("list")
+        member = None if listed is None else page.lists[at].get(listed, [])[int(one["row"])]
         out.append(
-            {"layer": page.name, "level": level, "view": view, "key": key, "list": one["list"],
+            {"layer": page.name, "level": level, "view": view, "key": key, "list": listed,
              "member": member, "reason": one["reason"]}
         )
     return out

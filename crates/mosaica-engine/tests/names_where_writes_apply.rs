@@ -487,7 +487,7 @@ fn a_growths_member_moved_by_an_edit_and_a_fold_reaches_the_item_where_it_is() {
     );
     publish_buffered(&engine);
 
-    let (grown, refused) = engine
+    let (grown, refused, _) = engine
         .grow_memberships_named(
             LAYER.into(),
             0,

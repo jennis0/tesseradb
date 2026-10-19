@@ -188,15 +188,18 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
         (
             "vocabulary",
             engine
-                .declare_vocabulary(VocabularyRequest {
-                    name: "v".into(),
-                    title: None,
-                    kind: mosaica_types::vocabulary::VocabularyKind::Declared,
-                    visibility: mosaica_types::vocabulary::Visibility::Public,
-                    width: "u8".into(),
-                    values: Vec::new(),
-                    reserved: Vec::new(),
-                })
+                .declare_vocabulary(
+                    VocabularyRequest {
+                        name: "v".into(),
+                        title: None,
+                        kind: mosaica_types::vocabulary::VocabularyKind::Declared,
+                        visibility: mosaica_types::vocabulary::Visibility::Public,
+                        width: "u8".into(),
+                        values: Vec::new(),
+                        reserved: Vec::new(),
+                    },
+                    mosaica_engine::WriteScope::All,
+                )
                 .map(drop),
         ),
         (
@@ -208,6 +211,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                         key: "k".into(),
                         title: None,
                     }],
+                    mosaica_engine::WriteScope::All,
                 )
                 .map(drop),
         ),
