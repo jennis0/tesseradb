@@ -203,7 +203,8 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-/// A service principal named `name` holding `write`, and an API key for it.
+/// A service principal named `name` holding `write` and the term `0`, which the batches label
+/// their items with, and an API key for it.
 fn writer(server: &TestServer, name: &str) -> String {
     use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
     let catalogue = &server.state.catalogue;
@@ -213,6 +214,7 @@ fn writer(server: &TestServer, name: &str) -> String {
     catalogue
         .grant_permission(Grantee::Principal(name), Permission::Write)
         .unwrap();
+    catalogue.grant_term(Grantee::Principal(name), "0").unwrap();
     catalogue.create_api_key(name, None, None).unwrap().0.key
 }
 

@@ -14,32 +14,193 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use croaring::Bitmap;
+use mosaica_authz::{FrozenFragment, Grant};
 use mosaica_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
-use mosaica_lifecycle::resolve::{self, Batch, Reason, Refusal, RowIdentity, Verdict};
+use mosaica_lifecycle::resolve::{self, Batch, Holder, Reason, Refusal, RowIdentity, Verdict};
 use mosaica_lifecycle::ShardSets;
 use mosaica_store::manifest::DeclaredScalar;
 use mosaica_store::unique::{KeyKind, UniqueKey};
 use mosaica_store::StoreError;
-use mosaica_types::{EntityId, IdentityKey, ItemAt, LayerSpace, MosaicaId, ShardId, Target};
+use mosaica_types::{
+    EntityId, IdentityKey, ItemAt, LayerSpace, MosaicaId, ShardId, Target, TermId,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::control::{AddressTable, AddressValue};
 use crate::edited::{NamedTarget, Stamp};
 use crate::write::LiveState;
 use crate::{EngineError, Generation};
 
-/// Whose terms bound what a write names. [`WriteScope::All`] names every item, as a build does.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Whose terms bound what a write names. [`WriteScope::All`] names every item, as a build does:
+/// the scope of a writer holding `write-all`. [`WriteScope::Terms`] names the items a session
+/// authorised for the writer's terms may be served, suppressed ones included, so a writer may lift
+/// a suppression it could not see.
+#[derive(Debug, Clone, Default)]
 pub enum WriteScope {
     #[default]
     All,
+    Terms(Arc<TermsScope>),
 }
 
-impl WriteScope {
-    /// Whether a write of this scope may name `item`.
-    fn admits(&self, _item: ItemAt) -> bool {
-        match self {
-            WriteScope::All => true,
+/// What a set of terms satisfies, as a writer's scope holds it: the index keys of the dictionary it
+/// was built against, and the terms, by which a key promoted since is judged.
+pub struct TermsScope {
+    keys: FxHashSet<TermId>,
+    /// `keys` sorted: the grant whose fragment masks a set of items at once.
+    grant: Grant,
+    /// Every term held, and `public`.
+    credentials: FxHashSet<Vec<u8>>,
+    /// The dictionary's length when the scope was built.
+    dict_len: u32,
+}
+
+impl std::fmt::Debug for TermsScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermsScope")
+            .field("keys", &self.keys.len())
+            .field("dict_len", &self.dict_len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TermsScope {
+    pub(crate) fn new(
+        keys: FxHashSet<TermId>,
+        credentials: FxHashSet<Vec<u8>>,
+        dict_len: u32,
+    ) -> TermsScope {
+        let mut sorted: Vec<TermId> = keys.iter().copied().collect();
+        sorted.sort_unstable();
+        TermsScope {
+            keys,
+            grant: Grant::Keys(Arc::new(sorted)),
+            credentials,
+            dict_len,
         }
+    }
+
+    pub(crate) fn grant(&self) -> &Grant {
+        &self.grant
+    }
+
+    fn holds(&self, term: &str) -> bool {
+        self.credentials.contains(term.as_bytes())
+    }
+
+    /// Whether the terms satisfy the index key `descriptor`: a term, `public`, or a conjunction's
+    /// key.
+    pub(crate) fn satisfies_key(&self, descriptor: &[u8]) -> bool {
+        match mosaica_authz::label::label_of_key(descriptor) {
+            Some(text) => mosaica_access::admits(&[text], &|term| self.holds(term)),
+            None => self.credentials.contains(descriptor),
+        }
+    }
+
+    /// Whether the terms satisfy an item indexed under `keys` in `generation`. A key promoted since
+    /// the scope was built is judged by what it indexes.
+    fn admits_keys(&self, keys: &[TermId], generation: &Generation, live: &LiveState) -> bool {
+        let mut novel: FxHashSet<TermId> = FxHashSet::default();
+        let dict = &generation.dict;
+        for &key in keys {
+            if self.keys.contains(&key) {
+                return true;
+            }
+            if key.raw() < self.dict_len {
+                continue;
+            }
+            if key.raw() < dict.len() {
+                let labels = dict.labels();
+                let satisfied = match labels.is_conjunction_key(key) {
+                    true => labels.satisfied(key, &|term| self.holds(term)),
+                    false => dict
+                        .descriptor(key)
+                        .is_some_and(|term| self.credentials.contains(term)),
+                };
+                if satisfied {
+                    return true;
+                }
+            } else {
+                novel.insert(key);
+            }
+        }
+        !novel.is_empty()
+            && live
+                .descriptors_of(&novel)
+                .values()
+                .any(|descriptor| self.satisfies_key(descriptor))
+    }
+
+    /// Whether a key promoted since the scope was built in `generation`'s dictionary is one the
+    /// terms satisfy: the scope then names fewer items than the terms do, and is built again.
+    fn is_stale(&self, generation: &Generation) -> bool {
+        let dict = &generation.dict;
+        let labels = dict.labels();
+        (self.dict_len..dict.len()).map(TermId::new).any(|key| {
+            match labels.is_conjunction_key(key) {
+                true => labels.satisfied(key, &|term| self.holds(term)),
+                false => dict
+                    .descriptor(key)
+                    .is_some_and(|term| self.credentials.contains(term)),
+            }
+        })
+    }
+}
+
+/// Each shard's fragment of a scoped writer's grant, built where the write is admitted, so the write
+/// thread masks a set by it and builds none.
+#[derive(Clone, Default)]
+pub(crate) struct ScopeMasks(Vec<(ShardId, Arc<FrozenFragment>)>);
+
+impl std::fmt::Debug for ScopeMasks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(shard, _)| shard))
+            .finish()
+    }
+}
+
+impl ScopeMasks {
+    pub(crate) fn new(fragments: Vec<(ShardId, Arc<FrozenFragment>)>) -> ScopeMasks {
+        ScopeMasks(fragments)
+    }
+}
+
+/// The scopes built, by the terms they were built for.
+#[derive(Default)]
+pub(crate) struct WriteScopes(std::sync::Mutex<FxHashMap<Vec<String>, Arc<TermsScope>>>);
+
+/// How many scopes are kept. Past it every kept scope is dropped, and each is built again when
+/// next asked for.
+const WRITE_SCOPES_KEPT: usize = 256;
+
+impl WriteScopes {
+    /// The scope of `terms` in `generation`: the one kept, unless a key promoted since is one the
+    /// terms satisfy, and otherwise `build`'s.
+    pub(crate) fn get_or_build(
+        &self,
+        terms: &[String],
+        generation: &Generation,
+        build: impl FnOnce() -> TermsScope,
+    ) -> WriteScope {
+        let kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(terms)
+            .cloned();
+        if let Some(kept) = kept.filter(|kept| !kept.is_stale(generation)) {
+            return WriteScope::Terms(kept);
+        }
+        let built = Arc::new(build());
+        let mut kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.len() >= WRITE_SCOPES_KEPT {
+            kept.clear();
+        }
+        kept.insert(terms.to_vec(), Arc::clone(&built));
+        WriteScope::Terms(built)
     }
 }
 
@@ -79,13 +240,60 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Whether the writer may name `item`: always for [`WriteScope::All`], and otherwise where one
+    /// of the item's index keys, buffered or flushed, is one its terms satisfy. An item whose keys
+    /// cannot be read is outside.
+    pub(crate) fn admits(&self, item: ItemAt) -> bool {
+        let WriteScope::Terms(scope) = self.scope else {
+            return true;
+        };
+        let Some(shard) = self.generation.shard(item.shard) else {
+            return false;
+        };
+        match shard.buffer.get(item.entity) {
+            Some(buffered) => scope.admits_keys(&buffered.terms, self.generation, self.live),
+            None => crate::write::joined::flushed_terms_of(shard, item.entity)
+                .is_some_and(|keys| scope.admits_keys(&keys, self.generation, self.live)),
+        }
+    }
+
+    /// `set`, entities of `shard`, less those outside the writer's scope: the flushed ones by the
+    /// shard's fragment in `masks`, where it holds one built at the shard's identity, and the rest
+    /// one at a time.
+    pub(crate) fn mask(&self, shard: ShardId, set: &mut Bitmap, masks: &ScopeMasks) {
+        if matches!(self.scope, WriteScope::All) {
+            return;
+        }
+        let identity = self.generation.shard(shard).map(|held| held.identity);
+        let fragment = masks
+            .0
+            .iter()
+            .find(|(id, fragment)| *id == shard && Some(fragment.identity) == identity);
+        let (mut kept, alone) = match fragment {
+            // A fragment holds the flushed entities below its watermark; a buffered item's entity
+            // is at or past it.
+            Some((_, fragment)) => {
+                let mut alone = set.clone();
+                alone.remove_range(0..u32::try_from(fragment.watermark).unwrap_or(u32::MAX));
+                (fragment.view().and(set), alone)
+            }
+            None => (Bitmap::new(), set.clone()),
+        };
+        for entity in alone.iter() {
+            if self.admits(ItemAt::new(shard, EntityId::new(u64::from(entity)))) {
+                kept.add(entity);
+            }
+        }
+        *set = kept;
+    }
+
     /// The item each of `ids` names: `None` per position for an identifier that names no item,
     /// an artifact's and a layer's among them. An identifier names a number in its shard, and the
     /// number names the entity the shard's edited-items map holds for it, or the number itself
     /// where it has none ([`crate::edited`]). An item is named while its shard holds it
     /// ([`crate::control::holds_item`]) below the shard's high water and has not deleted it: a fold
     /// that removes a deleted item also drops its deletion, so the overlay alone no longer says it
-    /// is gone.
+    /// is gone. An item outside the writer's scope is named by none.
     pub(crate) fn mosaica_items(
         &self,
         ids: &[MosaicaId],
@@ -107,7 +315,7 @@ impl<'a> Resolver<'a> {
             for ((at, ..), entity) in named.iter().zip(held) {
                 out[*at] = entity
                     .map(|entity| ItemAt::new(id, entity))
-                    .filter(|item| self.scope.admits(*item));
+                    .filter(|item| self.admits(*item));
             }
         }
         Ok(out)
@@ -208,7 +416,11 @@ impl<'a> Resolver<'a> {
                 }
                 let mut verdicts: Vec<Verdict> = (0..picked.len()).map(no_item).collect();
                 let field = resolve::Identifier::Unique(*position);
-                for (at, item) in self.holders_of(d, &keys).map_err(store)? {
+                for (at, holder) in self.holders_of(d, &keys).map_err(store)? {
+                    // A value held outside the scope names nothing here.
+                    let Holder::Inside(item) = holder else {
+                        continue;
+                    };
                     let row = from[at];
                     verdicts[row] = match &verdicts[row] {
                         Verdict::Names(held) if *held != item => {
@@ -295,15 +507,21 @@ impl<'a> Resolver<'a> {
         Ok(resolved)
     }
 
-    /// The items holding each of `keys` in unique column `declared`.
+    /// The items holding each of `keys` in unique column `declared`, each inside or outside the
+    /// writer's scope.
     fn holders_of(
         &self,
         declared: &DeclaredScalar,
         keys: &[UniqueKey],
-    ) -> Result<Vec<(usize, ItemAt)>, StoreError> {
-        let mut held = crate::unique::holders(self.generation, &declared.name, keys)?;
-        held.retain(|(_, item)| self.scope.admits(*item));
-        Ok(held)
+    ) -> Result<Vec<(usize, Holder)>, StoreError> {
+        let held = crate::unique::holders(self.generation, &declared.name, keys)?;
+        Ok(held
+            .into_iter()
+            .map(|(at, item)| match self.admits(item) {
+                true => (at, Holder::Inside(item)),
+                false => (at, Holder::Outside),
+            })
+            .collect())
     }
 }
 
@@ -314,7 +532,7 @@ impl resolve::Holdings for Resolver<'_> {
         &self,
         field: u16,
         keys: &[resolve::Key],
-    ) -> Result<Vec<(usize, ItemAt)>, StoreError> {
+    ) -> Result<Vec<(usize, Holder)>, StoreError> {
         let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
         let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
@@ -335,6 +553,8 @@ fn at_row(refusal: Refusal, row: usize) -> Refusal {
         Refusal::NamesTwo { named, .. } => Refusal::NamesTwo { row, named },
         Refusal::UnknownMosaicaId { .. } => Refusal::UnknownMosaicaId { row },
         Refusal::NamesNoItem { .. } => Refusal::NamesNoItem { row },
+        Refusal::ValueHeld { field, names, .. } => Refusal::ValueHeld { row, field, names },
+        Refusal::LabelNotHeld { .. } => Refusal::LabelNotHeld { row },
         other => other,
     }
 }
@@ -706,11 +926,17 @@ pub struct NamedList {
 pub struct MemberNames {
     pub(crate) names: Names,
     pub(crate) lists: Vec<NamedList>,
+    /// What a set spelled by exclusion is complemented within, for a scoped writer.
+    pub(crate) masks: ScopeMasks,
 }
 
 impl MemberNames {
     pub fn new(names: Names, lists: Vec<NamedList>) -> MemberNames {
-        MemberNames { names, lists }
+        MemberNames {
+            names,
+            lists,
+            masks: ScopeMasks::default(),
+        }
     }
 
     pub fn names(&self) -> &Names {
@@ -857,6 +1083,7 @@ impl MemberNames {
         Ok(MemberNames {
             names: Names::of_targets(Stamp::of(generation), WriteScope::All, &resolved),
             lists: named,
+            masks: ScopeMasks::default(),
         })
     }
 }

@@ -315,7 +315,7 @@ impl Executor {
             } => match self.members_now(&mut names) {
                 Ok(moved) => {
                     names.fill_artifacts(&mut artifacts, Some(&moved));
-                    self.commit_artifacts(layer, level, artifacts, names.names().refused(), reply)
+                    self.commit_artifacts(layer, level, artifacts, &names, reply)
                 }
                 Err(e) => reply.fail(e),
             },
@@ -373,9 +373,10 @@ impl Executor {
         layer: String,
         level: u32,
         mut incoming: Vec<IncomingArtifact>,
-        refused: crate::resolver::Refused,
+        names: &crate::resolver::MemberNames,
         reply: Reply<PublishedBatch>,
     ) {
+        let refused = names.names().refused();
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows: see [`Self::bring_artifacts_forward`].
         // Partitioned before any ordinal is claimed: a key the level holds is compared under the
@@ -393,7 +394,7 @@ impl Executor {
         // ([`RegistryError::ExclusionOnHeldKey`], which `prepare_put` makes below over the same
         // store), and the walk of the view's entities is the most expensive thing this route does,
         // so the refusal spends nothing, as every other refusal on this path does not.
-        if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming) {
+        if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming, names) {
             reply.fail(e);
             return;
         }
@@ -472,6 +473,7 @@ impl Executor {
         layer: &str,
         level: u32,
         incoming: &mut [IncomingArtifact],
+        names: &crate::resolver::MemberNames,
     ) -> Result<(), ExecError> {
         if !incoming.iter().any(|a| a.excluding.is_some()) {
             return Ok(());
@@ -505,6 +507,12 @@ impl Executor {
             ));
         };
         let generation = self.generation.load_full();
+        let resolver = crate::resolver::Resolver::new(
+            &generation,
+            names.names().scope(),
+            &self.deps.identity_key,
+            &self.live,
+        );
         let mut sets: std::collections::HashMap<Option<String>, mosaica_lifecycle::ShardSets> =
             std::collections::HashMap::new();
         for artifact in incoming.iter_mut() {
@@ -527,9 +535,12 @@ impl Executor {
                         .collect(),
                     None => registered.declaration.views.clone(),
                 };
+                // A scoped writer's complement is taken within its scope.
                 let mut entities = mosaica_lifecycle::ShardSets::default();
                 for shard in generation.shards() {
-                    entities.set(shard.id(), view_entities(shard, &views));
+                    let mut set = view_entities(shard, &views);
+                    resolver.mask(shard.id(), &mut set, &names.masks);
+                    entities.set(shard.id(), set);
                 }
                 entities
             });

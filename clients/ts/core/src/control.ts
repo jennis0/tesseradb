@@ -75,15 +75,25 @@ export type RowAnswer = Answer<IngestResponse> & {
 };
 
 /**
- * Why the identity rule refused a row. `names_two_items`: the row's values name more than one
- * item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`:
- * its values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
+ * Why a row was refused. `names_two_items`: the row's values name more than one item.
+ * `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`: its
+ * values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
  * batch names the same item. `one_value_twice`: an earlier row of the batch sets the same unique
- * value. The last two are given by `ingest` only.
+ * value. `value_held`: the row would create an item, or set a value on the item it names, with a
+ * unique value an item outside the writer's terms holds. `label_not_held`: the row sets an access
+ * label the writer's terms do not satisfy. The last four are given by `ingest` only. A writer
+ * without `write-all` names only the items its terms reach: an item outside them is absent to it.
  *
  * @category Control plane
  */
-export type RefusalReason = 'names_two_items' | 'unknown_mosaica_id' | 'names_no_item' | 'one_item_twice' | 'one_value_twice';
+export type RefusalReason =
+  | 'names_two_items'
+  | 'unknown_mosaica_id'
+  | 'names_no_item'
+  | 'one_item_twice'
+  | 'one_value_twice'
+  | 'value_held'
+  | 'label_not_held';
 
 /**
  * A row the identity rule refused.

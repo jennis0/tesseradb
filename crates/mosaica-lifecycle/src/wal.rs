@@ -1119,7 +1119,9 @@ const WAL_MAGIC: [u8; 4] = *b"MWAL";
 // starts with. A log at 38 is refused.
 // **40**: an `IngestBatch` carries the principal that sent it, which a retry is matched by beside
 // its batch id. A log at 39 is refused.
-const WAL_VERSION: u16 = 40;
+// **41**: a receipt's refused row may give `value_held` or `label_not_held` as its reason. A log
+// at 40 is refused.
+const WAL_VERSION: u16 = 41;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

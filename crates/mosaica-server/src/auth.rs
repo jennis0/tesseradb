@@ -53,6 +53,16 @@ impl Caller {
         }
     }
 
+    /// What a write by this caller names items within: every item where it holds `write-all`, as
+    /// the operator does, and otherwise the items its terms reach, whether or not it holds `read`.
+    /// Built once per set of terms and kept by the engine, so call it off the executor.
+    pub fn write_scope(&self, engine: &mosaica_engine::Engine) -> mosaica_engine::WriteScope {
+        match self.holds(Permission::WriteAll) {
+            true => mosaica_engine::WriteScope::All,
+            false => engine.write_scope(self.resolution.terms.iter().map(String::as_str)),
+        }
+    }
+
     /// The local principal's name, where the caller is one.
     pub fn local_name(&self) -> Option<&str> {
         match &self.principal {

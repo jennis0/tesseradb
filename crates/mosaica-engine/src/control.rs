@@ -554,9 +554,17 @@ impl Engine {
         layer: String,
         level: u32,
         mut artifacts: Vec<mosaica_lifecycle::IncomingArtifact>,
-        names: MemberNames,
+        mut names: MemberNames,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
         names.fill_artifacts(&mut artifacts, None);
+        if let WriteScope::Terms(scope) = names.names().scope().clone() {
+            if artifacts
+                .iter()
+                .any(|artifact| artifact.excluding.is_some())
+            {
+                names.masks = self.scope_masks(&scope)?;
+            }
+        }
         #[cfg(feature = "fault-injection")]
         self.switches.hold_write_check_if_wanted();
         let batch = self
@@ -575,6 +583,27 @@ impl Engine {
             joined: batch.joined,
             refused: batch.refused,
         })
+    }
+
+    /// Each shard's fragment of `scope`'s grant, as the generation served now holds it.
+    fn scope_masks(
+        &self,
+        scope: &crate::resolver::TermsScope,
+    ) -> std::result::Result<crate::resolver::ScopeMasks, crate::write::AcceptError> {
+        let generation = self.generation.load_full();
+        generation
+            .shards()
+            .map(|shard| {
+                let fragment = shard.fragment(&self.fragments, scope.grant())?;
+                Ok((shard.id(), fragment))
+            })
+            .collect::<std::result::Result<Vec<_>, mosaica_authz::FragmentCacheError>>()
+            .map(crate::resolver::ScopeMasks::new)
+            .map_err(|e| {
+                crate::write::AcceptError::Unreadable(format!(
+                    "the items within this credential's terms could not be read: {e}"
+                ))
+            })
     }
 
     /// [`Self::put_artifacts`], answering the identifiers alone — the shape every caller that

@@ -176,21 +176,19 @@ impl Merged {
         Ok(Merged { table, widths })
     }
 
-    /// Every row resolved for a write against the generation served now; a row may name an
-    /// artifact or a layer where `targets`. The engine brings the names to the generation the
-    /// write applies in. The table moves into the answer; each table's rows stay here.
+    /// Every row resolved for a write by a writer of `scope` against the generation served now; a
+    /// row may name an artifact or a layer where `targets`. The engine brings the names to the
+    /// generation the write applies in. The table moves into the answer; each table's rows stay
+    /// here.
     pub(crate) fn names(
         &mut self,
         state: &AppState,
+        scope: &mosaica_engine::WriteScope,
         targets: bool,
     ) -> Result<mosaica_engine::Names, ApiError> {
         state
             .engine
-            .names(
-                std::mem::take(&mut self.table),
-                &mosaica_engine::WriteScope::All,
-                targets,
-            )
+            .names(std::mem::take(&mut self.table), scope, targets)
             .map_err(map_engine_error)
     }
 
@@ -242,6 +240,13 @@ pub(crate) fn strict_refusal(what: &str, row: usize, reason: Reason) -> ApiError
         )),
         Reason::OneItemTwice | Reason::OneValueTwice => ApiError::Conflict(format!(
             "row {row} of {what} names an item an earlier row names; send each item once"
+        )),
+        Reason::ValueHeld => ApiError::Conflict(format!(
+            "row {row} of {what} carries a unique value an item holds; send another value"
+        )),
+        Reason::LabelNotHeld => ApiError::Conflict(format!(
+            "row {row} of {what} sets an access label this credential's terms do not satisfy; \
+             send a label they satisfy"
         )),
     }
 }

@@ -166,6 +166,17 @@ member, each naming its item by a `mosaica_id` and unique values ([accepting a
 deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
 `mosaica-lifecycle` (`resolve.rs`).
 
+A writer without `write-all` names only the items in its scope: those a session holding its terms
+is authorised to be served, suppressed ones included (`resolver.rs`, `WriteScope`). The scope is
+built off the executor, once per set of terms, and each item a value or a `mosaica_id` names is
+tested against it by its index keys. An item outside the scope is answered as an absent one: its
+`mosaica_id` names nothing, and a value it holds names nothing, except where the row would create
+an item with that value or set it on the item the row names, which is refused as `value_held` and
+names no holder. Before the rule, a row setting a label the writer's terms do not satisfy, or
+creating an item with a view default they do not satisfy, is refused as `label_not_held` and names
+nothing, so it claims neither an item nor a value. The build, and a writer holding `write-all`,
+name every item.
+
 | What the row's values name | What the handler decides |
 |---|---|
 | No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |
@@ -190,7 +201,8 @@ nothing, so it needs a `mosaica_id` or a unique column to address items by, or i
 
 A refused row writes nothing, and the batch applies its other rows. The answer lists each refused
 row in `refused`, by its position in the batch and its reason (`names_two_items`,
-`unknown_mosaica_id`, `names_no_item`, `one_item_twice` or `one_value_twice`), and answers `null`
+`unknown_mosaica_id`, `names_no_item`, `one_item_twice`, `one_value_twice`, `value_held` or
+`label_not_held`), and answers `null`
 for its `mosaica_id`; it names no entity and no value the caller did not send. A caller that asks
 for `strict=true` has the whole batch refused with `409` at its first refused row instead, naming
 rows by position, values as sent and items by `mosaica_id`, and nothing is written. A build refuses

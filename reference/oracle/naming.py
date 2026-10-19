@@ -30,6 +30,16 @@ Where two reasons apply to one row, the rule's stated order decides which is giv
 naming no item, then values naming two items, then naming no item in a row that cannot create, then
 an item an earlier kept row names, then a value an earlier kept row sets.
 
+A writer without `write-all` names only the items inside its terms: those whose labels the terms
+satisfy, suppressed ones included. An item outside them is absent to its writes: its `mosaica_id`
+is `unknown_mosaica_id`, and a value it holds names nothing. The exception is uniqueness: an ingest
+row that would create an item, or set a value on the one item it names, with a value an item
+outside holds is refused as `value_held`. An ingest row whose `access` labels the writer's terms do
+not satisfy, or that would create an item taking a view default they do not satisfy, is refused as
+`label_not_held` before anything else is decided of it. Where several reasons apply, `value_held`
+comes with `names_two_items`, after a `mosaica_id` naming nothing and before naming no item; a row
+that cannot create, having no position, and names no item is `names_no_item` whatever its values.
+
 A column of a member table, and a key of a change's `match`, that is neither `mosaica_id` nor a
 unique field is ignored and listed in the answer's `ignored_columns`. A `match` left with no key
 names nothing. A request with rows none of which carries `mosaica_id` or a unique column is
@@ -46,6 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from . import access
 from .tenancy import HolderCount
 
 NAMES_TWO_ITEMS = "names_two_items"
@@ -54,7 +65,14 @@ NAMES_NO_ITEM = "names_no_item"
 ONE_ITEM_TWICE = "one_item_twice"
 ONE_VALUE_TWICE = "one_value_twice"
 
+VALUE_HELD = "value_held"
+LABEL_NOT_HELD = "label_not_held"
+
+#: The reasons a writer holding `write-all` is given.
 REASONS = (NAMES_TWO_ITEMS, UNKNOWN_MOSAICA_ID, NAMES_NO_ITEM, ONE_ITEM_TWICE, ONE_VALUE_TWICE)
+
+#: The reasons only a writer whose terms bound its writes is given.
+SCOPED_REASONS = (VALUE_HELD, LABEL_NOT_HELD)
 
 #: The status a strict ingest is refused with, whatever the reason.
 INGEST_STRICT_STATUS = 409
@@ -107,7 +125,8 @@ class Holdings:
     the item holds no value in is absent. A deleted item is not in `items`. `issued` holds every
     `mosaica_id` the model has seen given to an item, deleted or not. `numbers`, where given,
     counts each number's holders, and every identifier issued or answered is checked against it
-    (`oracle.tenancy`).
+    (`oracle.tenancy`). `labels` maps an item to its access labels, `default` where it has none.
+    `terms` are the writer's terms, `None` for a writer holding `write-all`.
     """
 
     unique: dict[str, str]
@@ -115,6 +134,9 @@ class Holdings:
     suppressed: set[int] = field(default_factory=set)
     issued: set[int] = field(default_factory=set)
     numbers: HolderCount | None = None
+    labels: dict[int, list[str]] = field(default_factory=dict)
+    default: str = "public"
+    terms: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         self.issued |= set(self.items)
@@ -145,6 +167,21 @@ class Holdings:
         """The items a viewer holding every label is served: held and not suppressed."""
         return set(self.items) - self.suppressed
 
+    def holds(self, labels: Sequence[str]) -> bool:
+        """Whether the writer's terms satisfy any of `labels`."""
+        if self.terms is None:
+            return True
+        terms = self.terms
+        return access.admits(labels, lambda term: term in terms)
+
+    def inside(self, item: int) -> bool:
+        """Whether the writer may name the held item `item`."""
+        return self.holds(self.labels.get(item, [self.default]))
+
+    def writable(self) -> dict[int, dict[str, object]]:
+        """The held items the writer may name, with their values."""
+        return {t: v for t, v in self.items.items() if self.inside(t)}
+
 
 def carried(holdings: Holdings, row: Mapping[str, object]) -> set[tuple[str, object]]:
     """The non-null unique values a row carries, as `(column, key)`."""
@@ -162,16 +199,40 @@ def named_by(
     held: Mapping[tuple[str, object], set[int]],
     row: Mapping[str, object],
 ) -> set[int] | None:
-    """The items a row's identifiers name, or `None` where its `mosaica_id` names no held item."""
+    """The items inside the writer's terms a row's identifiers name, or `None` where its
+    `mosaica_id` names no such item."""
     items: set[int] = set()
     mosaica_id = row.get(MOSAICA_ID)
     if mosaica_id is not None:
-        if int(mosaica_id) not in holdings.items:
+        if int(mosaica_id) not in holdings.items or not holdings.inside(int(mosaica_id)):
             return None
         items.add(int(mosaica_id))
     for value in carried(holdings, row):
-        items |= held.get(value, set())
+        items |= {t for t in held.get(value, set()) if holdings.inside(t)}
     return items
+
+
+def held_outside(
+    holdings: Holdings,
+    held: Mapping[tuple[str, object], set[int]],
+    row: Mapping[str, object],
+) -> bool:
+    """Whether a value the row carries is held by an item outside the writer's terms."""
+    return any(
+        not holdings.inside(t) for value in carried(holdings, row) for t in held.get(value, set())
+    )
+
+
+def labels_of(holdings: Holdings, row: Mapping[str, object]) -> list[str] | None:
+    """The access labels an ingest row sets, or `None` where it leaves them out. An empty label
+    is the view's default."""
+    labels = row.get("access")
+    if labels is None:
+        return None
+    if isinstance(labels, str):
+        labels = [labels]
+    labels = [label.strip() for label in labels if label.strip()]
+    return labels or [holdings.default]
 
 
 def positioned(row: Mapping[str, object]) -> bool:
@@ -210,16 +271,30 @@ def resolve_ingest(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> 
     kept_values: set[tuple[str, object]] = set()
     verdicts: list[Verdict] = []
     for row in rows:
+        labels = labels_of(holdings, row)
+        if labels is not None and not holdings.holds(labels):
+            verdicts.append(Refused(LABEL_NOT_HELD))
+            continue
         items = named_by(holdings, held, row)
         values = carried(holdings, row)
+        outside = held_outside(holdings, held, row)
         if items is None:
             verdicts.append(Refused(UNKNOWN_MOSAICA_ID))
             continue
         if len(items) > 1:
             verdicts.append(Refused(NAMES_TWO_ITEMS))
             continue
+        if items and outside:
+            verdicts.append(Refused(VALUE_HELD))
+            continue
         if not items and not positioned(row):
             verdicts.append(Refused(NAMES_NO_ITEM))
+            continue
+        if not items and labels is None and not holdings.holds([holdings.default]):
+            verdicts.append(Refused(LABEL_NOT_HELD))
+            continue
+        if not items and outside:
+            verdicts.append(Refused(VALUE_HELD))
             continue
         if items and next(iter(items)) in kept_items:
             verdicts.append(Refused(ONE_ITEM_TWICE))
@@ -290,15 +365,16 @@ def apply_ingest(
     `created` maps each creating row's position to the `mosaica_id` the server issued it, which
     this model cannot know. One the model has seen issued before is refused. A row naming an item
     edits it when a column it carries holds a different value there, a null clearing a held value,
-    and is unchanged otherwise. Refused rows write nothing.
+    or its labels differ from the item's, and is unchanged otherwise. Refused rows write nothing.
     """
     counts = {"created": 0, "edited": 0, "unchanged": 0}
     for i, (row, verdict) in enumerate(zip(rows, verdicts, strict=True)):
         cells = {
             column: holdings.key(column, value) if column in holdings.unique else value
             for column, value in row.items()
-            if column != MOSAICA_ID
+            if column not in (MOSAICA_ID, "access")
         }
+        labels = labels_of(holdings, row)
         if isinstance(verdict, Creates):
             item = created[i]
             if item in holdings.issued:
@@ -310,12 +386,17 @@ def apply_ingest(
                 holdings.numbers.created(item)
             holdings.issued.add(item)
             holdings.items[item] = {c: v for c, v in cells.items() if v is not None}
+            holdings.labels[item] = labels if labels is not None else [holdings.default]
             counts["created"] += 1
         elif isinstance(verdict, Names):
             if holdings.numbers is not None:
                 holdings.numbers.named(verdict.item)
             values = holdings.items[verdict.item]
             changed = False
+            if labels is not None:
+                held_labels = holdings.labels.get(verdict.item, [holdings.default])
+                changed |= sorted(set(labels)) != sorted(set(held_labels))
+                holdings.labels[verdict.item] = labels
             for column, value in cells.items():
                 if value is None:
                     changed |= values.pop(column, None) is not None

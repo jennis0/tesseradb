@@ -9,10 +9,17 @@
 //! seeing the other: the first in row order is kept and the later ones are refused. Rows are
 //! decided in row order against the rows kept before them, so a refused row claims neither its
 //! item nor its values and never refuses a later row. Where two reasons apply to one row, the rule
-//! gives the first of: a `mosaica_id` naming nothing, values naming two items, naming no item where
-//! the batch creates none, an item an earlier row names, a value an earlier row sets.
+//! gives the first of: a `mosaica_id` naming nothing, values naming two items or a value held
+//! outside the writer's terms, naming no item where the batch creates none, an item an earlier row
+//! names, a value an earlier row sets.
 //!
 //! A deleted item names nothing: its values may be given to a new item.
+//!
+//! A writer whose terms bound its writes names only the items inside them. An item outside names
+//! nothing, as an absent one does: its `mosaica_id` is unknown, and a value it holds names no item.
+//! The one exception is uniqueness: a row that would create an item, or set a value on the item it
+//! names, with a value an item outside holds is refused as `value_held`, which says that the value
+//! is held and nothing about its holder. A row only addressing items by such a value names nothing.
 //!
 //! The pieces are public so that each path applies them to the batch shape it holds.
 //! [`name_row`] decides one row from what its identifiers name, and [`require_identifier`] says
@@ -44,11 +51,19 @@ pub trait Holdings {
     type Error;
 
     /// Every item holding a key in the unique field at declared position `field`, as
-    /// `(position in keys, item)`.
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, Self::Error>;
+    /// `(position in keys, holder)`.
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, Holder)>, Self::Error>;
 
-    /// For each `mosaica_id`, the item it names.
+    /// For each `mosaica_id`, the item it names: `None` for one outside the writer's terms.
     fn mosaica_holders(&self, ids: &[MosaicaId]) -> Result<Vec<Option<ItemAt>>, Self::Error>;
+}
+
+/// An item holding a value, as the writer may know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    Inside(ItemAt),
+    /// An item outside the writer's terms, of which nothing more is told.
+    Outside,
 }
 
 /// What identified an item in a refusal.
@@ -104,6 +119,16 @@ pub enum Refusal {
     /// A later row sets a unique value an earlier row sets: `rows` is the kept row and the refused
     /// one.
     OneValueTwice { rows: [usize; 2], field: Identifier },
+    /// A row would create an item, or set a value on the item `names`, with a value of `field`
+    /// that an item outside the writer's terms holds.
+    ValueHeld {
+        row: usize,
+        field: Identifier,
+        names: Option<ItemAt>,
+    },
+    /// A row sets an access label the writer's terms do not satisfy. Decided by the service before
+    /// the rule, from the row alone.
+    LabelNotHeld { row: usize },
 }
 
 impl Refusal {
@@ -112,7 +137,9 @@ impl Refusal {
         match self {
             Refusal::NamesTwo { row, .. }
             | Refusal::UnknownMosaicaId { row }
-            | Refusal::NamesNoItem { row } => *row,
+            | Refusal::NamesNoItem { row }
+            | Refusal::ValueHeld { row, .. }
+            | Refusal::LabelNotHeld { row } => *row,
             Refusal::OneItemTwice { rows, .. } | Refusal::OneValueTwice { rows, .. } => rows[1],
         }
     }
@@ -121,8 +148,8 @@ impl Refusal {
     /// other.
     fn stage(&self) -> u8 {
         match self {
-            Refusal::UnknownMosaicaId { .. } => 0,
-            Refusal::NamesTwo { .. } => 1,
+            Refusal::LabelNotHeld { .. } | Refusal::UnknownMosaicaId { .. } => 0,
+            Refusal::NamesTwo { .. } | Refusal::ValueHeld { .. } => 1,
             Refusal::NamesNoItem { .. } => 2,
             Refusal::OneItemTwice { .. } => 3,
             Refusal::OneValueTwice { .. } => 4,
@@ -134,6 +161,8 @@ impl Refusal {
     pub const NAMES_NO_ITEM: &'static str = "names_no_item";
     pub const ONE_ITEM_TWICE: &'static str = "one_item_twice";
     pub const ONE_VALUE_TWICE: &'static str = "one_value_twice";
+    pub const VALUE_HELD: &'static str = "value_held";
+    pub const LABEL_NOT_HELD: &'static str = "label_not_held";
 
     /// Why the row is refused, without the rows and items the refusal names.
     pub fn kind(&self) -> Reason {
@@ -143,6 +172,8 @@ impl Refusal {
             Refusal::NamesNoItem { .. } => Reason::NamesNoItem,
             Refusal::OneItemTwice { .. } => Reason::OneItemTwice,
             Refusal::OneValueTwice { .. } => Reason::OneValueTwice,
+            Refusal::ValueHeld { .. } => Reason::ValueHeld,
+            Refusal::LabelNotHeld { .. } => Reason::LabelNotHeld,
         }
     }
 
@@ -163,6 +194,8 @@ pub enum Reason {
     NamesNoItem,
     OneItemTwice,
     OneValueTwice,
+    ValueHeld,
+    LabelNotHeld,
 }
 
 impl Reason {
@@ -174,6 +207,8 @@ impl Reason {
             Reason::NamesNoItem => Refusal::NAMES_NO_ITEM,
             Reason::OneItemTwice => Refusal::ONE_ITEM_TWICE,
             Reason::OneValueTwice => Refusal::ONE_VALUE_TWICE,
+            Reason::ValueHeld => Refusal::VALUE_HELD,
+            Reason::LabelNotHeld => Refusal::LABEL_NOT_HELD,
         }
     }
 }
@@ -254,6 +289,8 @@ pub fn resolve<H: Holdings>(
         }
     }
 
+    // The first value of each row held outside the writer's terms, by row.
+    let mut outside: FxHashMap<usize, Identifier> = FxHashMap::default();
     let mut by_field: FxHashMap<u16, Vec<(usize, Key)>> = FxHashMap::default();
     for (at, row) in rows.iter().enumerate() {
         for (field, key) in &row.unique {
@@ -265,8 +302,14 @@ pub fn resolve<H: Holdings>(
     for field in fields {
         let settings = &by_field[&field];
         let keys: Vec<Key> = settings.iter().map(|(_, key)| *key).collect();
-        for (at, item) in holdings.holders(field, &keys)? {
-            found.push((settings[at].0, (Identifier::Unique(field), item)));
+        for (at, holder) in holdings.holders(field, &keys)? {
+            let row = settings[at].0;
+            match holder {
+                Holder::Inside(item) => found.push((row, (Identifier::Unique(field), item))),
+                Holder::Outside => {
+                    outside.entry(row).or_insert(Identifier::Unique(field));
+                }
+            }
         }
     }
     found.sort_by_key(|(at, _)| *at);
@@ -282,14 +325,28 @@ pub fn resolve<H: Holdings>(
             continue;
         }
         let named = &named[start..next];
-        *verdict = Some(match name_row(named) {
-            Named::Two => Verdict::Refused(Refusal::NamesTwo {
+        // A value held outside is set where the batch sets values, and names nothing otherwise.
+        let held = outside.get(&at).copied().filter(|_| batch.sets_values());
+        *verdict = Some(match (name_row(named), held) {
+            (Named::Two, _) => Verdict::Refused(Refusal::NamesTwo {
                 row: at,
                 named: named.to_vec(),
             }),
-            Named::One(item) => Verdict::Names(item),
-            Named::Nothing if batch.creates() => Verdict::Creates,
-            Named::Nothing => Verdict::Refused(Refusal::NamesNoItem { row: at }),
+            (Named::One(item), Some(field)) => Verdict::Refused(Refusal::ValueHeld {
+                row: at,
+                field,
+                names: Some(item),
+            }),
+            (Named::Nothing, Some(field)) if batch.creates() => {
+                Verdict::Refused(Refusal::ValueHeld {
+                    row: at,
+                    field,
+                    names: None,
+                })
+            }
+            (Named::One(item), None) => Verdict::Names(item),
+            (Named::Nothing, None) if batch.creates() => Verdict::Creates,
+            (Named::Nothing, _) => Verdict::Refused(Refusal::NamesNoItem { row: at }),
         });
     }
     let mut verdicts: Vec<Verdict> = verdicts.into_iter().map(|v| v.expect("decided")).collect();
@@ -349,22 +406,31 @@ pub fn first_refusal(verdicts: &[Verdict]) -> Option<&Refusal> {
 mod tests {
     use super::*;
 
-    /// Holdings over fixed maps: `unique[(field, key)]` and `mosaica[id]`.
+    /// Holdings over fixed maps: `unique[(field, key)]` and `mosaica[id]`, and the values items
+    /// outside the writer's terms hold.
     #[derive(Default)]
     struct Held {
         unique: FxHashMap<(u16, Key), Vec<ItemAt>>,
         mosaica: FxHashMap<u64, ItemAt>,
+        outside: Vec<(u16, Key)>,
     }
 
     impl Holdings for Held {
         type Error = ();
-        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, ItemAt)>, ()> {
+        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, Holder)>, ()> {
             Ok(keys
                 .iter()
                 .enumerate()
                 .flat_map(|(at, key)| {
                     let held = self.unique.get(&(field, *key)).cloned().unwrap_or_default();
-                    held.into_iter().map(move |item| (at, item))
+                    let outside = self
+                        .outside
+                        .contains(&(field, *key))
+                        .then_some(Holder::Outside);
+                    held.into_iter()
+                        .map(Holder::Inside)
+                        .chain(outside)
+                        .map(move |holder| (at, holder))
                 })
                 .collect())
         }
@@ -690,6 +756,86 @@ mod tests {
                 })
             ],
             "two rows naming the item in its shard"
+        );
+    }
+
+    /// A value held outside the writer's terms names nothing where a batch only names items. Where
+    /// a row would create an item with it, or set it on the item the row names, the row is refused
+    /// as the value held, naming no holder; where the value is a row's only name in a batch that
+    /// creates nothing, the row names no item, as for a value nobody holds.
+    #[test]
+    fn a_value_held_outside_the_writers_terms_names_nothing_and_is_never_given_twice() {
+        let mut held = held();
+        held.outside.push((0, 40));
+        let by_mosaica = |id: u64, unique: Vec<(u16, Key)>| RowIdentity {
+            mosaica_id: Some(MosaicaId::new(id)),
+            unique,
+        };
+        let rows = [
+            by_unique(0, 40),
+            by_mosaica(102, vec![(0, 40)]),
+            by_unique(0, 41),
+        ];
+        assert_eq!(
+            resolve(&rows, &held, Batch::Creates).unwrap(),
+            vec![
+                refused(Refusal::ValueHeld {
+                    row: 0,
+                    field: Identifier::Unique(0),
+                    names: None
+                }),
+                refused(Refusal::ValueHeld {
+                    row: 1,
+                    field: Identifier::Unique(0),
+                    names: Some(e(2))
+                }),
+                Verdict::Creates,
+            ]
+        );
+        assert_eq!(
+            resolve(&rows, &held, Batch::Edits).unwrap(),
+            vec![
+                refused(Refusal::NamesNoItem { row: 0 }),
+                refused(Refusal::ValueHeld {
+                    row: 1,
+                    field: Identifier::Unique(0),
+                    names: Some(e(2))
+                }),
+                refused(Refusal::NamesNoItem { row: 2 }),
+            ]
+        );
+        assert_eq!(
+            resolve(&rows, &held, Batch::Names).unwrap(),
+            vec![
+                refused(Refusal::NamesNoItem { row: 0 }),
+                Verdict::Names(e(2)),
+                refused(Refusal::NamesNoItem { row: 2 }),
+            ]
+        );
+    }
+
+    /// A row refused for a value held outside claims neither its item nor its values.
+    #[test]
+    fn a_row_refused_for_a_value_held_outside_refuses_no_later_row() {
+        let mut held = held();
+        held.outside.push((1, 40));
+        let rows = [
+            RowIdentity {
+                mosaica_id: None,
+                unique: vec![(0, 17), (1, 40)],
+            },
+            by_unique(0, 17),
+        ];
+        assert_eq!(
+            resolve(&rows, &held, Batch::Creates).unwrap(),
+            vec![
+                refused(Refusal::ValueHeld {
+                    row: 0,
+                    field: Identifier::Unique(1),
+                    names: Some(e(1))
+                }),
+                Verdict::Names(e(1)),
+            ]
         );
     }
 }

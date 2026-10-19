@@ -272,48 +272,9 @@ impl Engine {
         // describe one generation: a dictionary a later flush published could otherwise be
         // recorded as seen while `satisfied` was resolved against the one before it.
         let generation = self.generation.load();
-
-        let mut credentials: FxHashSet<Vec<u8>> =
-            auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
-        credentials.insert(mosaica_authz::PUBLIC_LABEL.to_vec());
-        let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
-        let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
-        let labels = generation.dict.labels();
-        for term in &auth_terms {
-            // A held term never names a conjunction's key, which starts with a control character
-            // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
-            // credential presents. An unknown term is unsatisfied, never an error.
-            if let Some(id) = generation.dict.lookup(term.as_bytes()) {
-                if !labels.is_conjunction_key(id) {
-                    satisfied.insert(id);
-                    descriptors.insert(id, term.as_bytes().to_vec());
-                }
-            }
-        }
-        let mut keys = Vec::new();
-        labels.authorise(auth_terms.iter().map(String::as_str), &mut keys);
-        satisfied.extend(keys);
-
-        // Every session holds `public`, and this is the only place it is added: not by a
-        // credential and not by a grant. Looked up by descriptor, because in a bundle whose
-        // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
-        // everyone.
-        if let Some(term) = generation.dict.lookup(mosaica_authz::PUBLIC_LABEL) {
-            debug_assert_eq!(
-                term,
-                mosaica_authz::PUBLIC_TERM,
-                "`public` is reserved at term 0 by every build"
-            );
-            satisfied.insert(term);
-            descriptors.insert(term, mosaica_authz::PUBLIC_LABEL.to_vec());
-        }
-
+        let (satisfied, held) = satisfied_by(&generation, &auth_terms);
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable();
-        let held = HeldTerms {
-            descriptors,
-            credentials,
-        };
         self.mint(
             &generation,
             auth_data,
@@ -323,6 +284,75 @@ impl Engine {
         )
     }
 
+    /// The scope of a writer holding `terms`: the items a session authorised for them may be
+    /// served, suppressed ones included ([`crate::resolver::WriteScope`]). Built once per set of
+    /// terms and kept, and built again where a key promoted since is one the terms satisfy.
+    pub fn write_scope<'t>(
+        &self,
+        terms: impl IntoIterator<Item = &'t str>,
+    ) -> crate::resolver::WriteScope {
+        let mut held: Vec<String> = terms
+            .into_iter()
+            .filter_map(mosaica_access::held_term)
+            .map(str::to_owned)
+            .collect();
+        held.sort_unstable();
+        held.dedup();
+        let generation = self.generation.load();
+        self.write_scopes.get_or_build(&held, &generation, || {
+            let (keys, terms) = satisfied_by(&generation, &held);
+            crate::resolver::TermsScope::new(keys, terms.credentials, generation.dict.len())
+        })
+    }
+}
+
+/// The index keys `auth_terms` satisfy in `generation`, and the terms they hold: each term the
+/// dictionary carries, `public`, and the key of each conjunction the terms satisfy.
+fn satisfied_by(generation: &Generation, auth_terms: &[String]) -> (FxHashSet<TermId>, HeldTerms) {
+    let mut credentials: FxHashSet<Vec<u8>> =
+        auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
+    credentials.insert(mosaica_authz::PUBLIC_LABEL.to_vec());
+    let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
+    let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
+    let labels = generation.dict.labels();
+    for term in auth_terms {
+        // A held term never names a conjunction's key, which starts with a control character
+        // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
+        // credential presents. An unknown term is unsatisfied, never an error.
+        if let Some(id) = generation.dict.lookup(term.as_bytes()) {
+            if !labels.is_conjunction_key(id) {
+                satisfied.insert(id);
+                descriptors.insert(id, term.as_bytes().to_vec());
+            }
+        }
+    }
+    let mut keys = Vec::new();
+    labels.authorise(auth_terms.iter().map(String::as_str), &mut keys);
+    satisfied.extend(keys);
+
+    // Every session holds `public`, and this is the only place it is added: not by a
+    // credential and not by a grant. Looked up by descriptor, because in a bundle whose
+    // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
+    // everyone.
+    if let Some(term) = generation.dict.lookup(mosaica_authz::PUBLIC_LABEL) {
+        debug_assert_eq!(
+            term,
+            mosaica_authz::PUBLIC_TERM,
+            "`public` is reserved at term 0 by every build"
+        );
+        satisfied.insert(term);
+        descriptors.insert(term, mosaica_authz::PUBLIC_LABEL.to_vec());
+    }
+    (
+        satisfied,
+        HeldTerms {
+            descriptors,
+            credentials,
+        },
+    )
+}
+
+impl Engine {
     /// Authorise a session that satisfies every index key, whenever it was promoted, and so every
     /// view's, layer's and artifact's label. Its fragment is the union of every posting at the
     /// watermark it is built for, under one cache entry that every such session shares, and the

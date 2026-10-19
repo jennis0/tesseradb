@@ -132,6 +132,8 @@ pub struct Engine {
     /// One session's visible values per category column, keyed on the generation and the overlay
     /// so a set taken before a suppression cannot keep offering a value with no visible members.
     pub(crate) suggest_sets: Arc<crate::suggest_set::SuggestSets>,
+    /// Each writer's scope, by its terms ([`Engine::write_scope`]).
+    pub(crate) write_scopes: crate::resolver::WriteScopes,
     /// One lineage per `(layer, level)`, keyed per *deployment* and on the store's version alone.
     pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// One viewer's cluster slots per layer and palette size ([`crate::slots`]).
@@ -1324,6 +1326,7 @@ impl Engine {
             occupancy: Arc::clone(&occupancy),
             derived_geometry: Arc::new(crate::derived::cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
+            write_scopes: Default::default(),
             lineages: Arc::new(crate::cut::Lineages::new()),
             slots: Arc::new(crate::slots::SlotsCache::new()),
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),

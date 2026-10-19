@@ -216,9 +216,8 @@ async fn require_admin(
     Ok(next.run(request).await)
 }
 
-/// Writes, flush and compaction need `write`. Not built yet: masking a write by the writer's own
-/// terms. A principal with `write` and without `write-all` writes against the whole corpus, as one
-/// with both does.
+/// Writes, flush and compaction need `write`. What a write names is bounded by the writer's
+/// terms unless it also holds `write-all` ([`crate::auth::Caller::write_scope`]).
 async fn require_write(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -418,10 +417,10 @@ fn run_ingest(
     state: &AppState,
     encoding: BodyEncoding,
     body: &[u8],
-    principal: String,
     batch_id: String,
     view: Option<&str>,
     strict: bool,
+    caller: &crate::auth::Caller,
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
@@ -541,18 +540,19 @@ fn run_ingest(
             omitted: item.omitted,
         })
         .collect();
+    let request = mosaica_engine::IngestRequest {
+        principal: caller.principal.write_key(),
+        batch_id,
+        body_hash,
+        view: view_id,
+        rows: rows_in,
+        artifacts,
+        strict,
+        mosaica_id_column,
+    };
     let receipt = state
         .engine
-        .ingest(mosaica_engine::IngestRequest {
-            principal,
-            batch_id,
-            body_hash,
-            view: view_id,
-            rows: rows_in,
-            artifacts,
-            strict,
-            mosaica_id_column,
-        })
+        .ingest_as(request, caller.write_scope(&state.engine))
         .map_err(|e| {
             tracing::debug!(detail = %e, "an ingest batch was refused");
             map_accept_error(e)
@@ -632,7 +632,6 @@ async fn ingest(
     // The permit moves into the closure: if the client disconnects, the closure still holds its
     // thread, and the permit must be held as long.
     let strict = query.strict;
-    let principal = caller.principal.write_key();
     let mut resp = state
         .blocking(move |state| {
             let _permit = permit;
@@ -640,10 +639,10 @@ async fn ingest(
                 state,
                 encoding,
                 &body,
-                principal,
                 batch_id,
                 view.as_deref(),
                 strict,
+                &caller,
             )
         })
         .await?;
@@ -681,6 +680,7 @@ fn run_changes(
     state: &AppState,
     items: Vec<ChangeItem>,
     strict: bool,
+    caller: &crate::auth::Caller,
 ) -> Result<ChangesDone, ApiError> {
     // Shape is checked over the whole request before any address is resolved, so a malformed
     // item's 422 is answered ahead of another item's 404.
@@ -706,7 +706,7 @@ fn run_changes(
         tables.push(Table::one_row(item.matching));
     }
     let mut merged = crate::address::Merged::of(tables)?;
-    let names = merged.names(state, true)?;
+    let names = merged.names(state, &caller.write_scope(&state.engine), true)?;
     let ignored = names.ignored().to_vec();
     let applied = ops.clone();
     let refused = state
@@ -736,6 +736,7 @@ fn run_changes(
 async fn changes(
     State(state): State<Arc<AppState>>,
     ApiQuery(query): ApiQuery<RowsQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     body: Result<ApiJson<Vec<ChangeItem>>, ApiJsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let ApiJson(items) = body.map_err(|rejection| match rejection {
@@ -761,7 +762,7 @@ async fn changes(
     // gating on readiness would refuse them unapplied.
     let engine = Arc::clone(&state);
     let strict = query.strict;
-    let done = spawn_on_deny_lane(move || run_changes(&engine, items, strict))
+    let done = spawn_on_deny_lane(move || run_changes(&engine, items, strict, &caller))
         .await
         .map_err(map_join_error)??;
 
@@ -1762,8 +1763,9 @@ fn member_names(
     merged: &mut crate::address::Merged,
     lists: &[MemberList],
     strict: bool,
+    caller: &crate::auth::Caller,
 ) -> Result<mosaica_engine::MemberNames, ApiError> {
-    let names = merged.names(state, false)?;
+    let names = merged.names(state, &caller.write_scope(&state.engine), false)?;
     let mut start = 0;
     let named = lists
         .iter()
@@ -2254,6 +2256,7 @@ async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(query): ApiQuery<RowsQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2427,7 +2430,7 @@ async fn publish_artifacts(
 
             let keys: Vec<Option<String>> = artifacts.iter().map(|a| a.key.clone()).collect();
             let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict)?;
+            let names = member_names(state, &mut merged, &lists, strict, &caller)?;
             let ignored = names.names().ignored().to_vec();
             // Each artifact's sets are filled from its member tables by the engine.
             let incoming: Vec<mosaica_lifecycle::IncomingArtifact> = artifacts
@@ -2575,6 +2578,7 @@ async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     ApiQuery(query): ApiQuery<RowsQuery>,
+    axum::Extension(caller): axum::Extension<crate::auth::Caller>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2660,7 +2664,7 @@ async fn grow_memberships(
 
             let keys: Vec<String> = artifacts.iter().map(|a| a.key.clone()).collect();
             let mut merged = merge_member_lists(&mut lists)?;
-            let names = member_names(state, &mut merged, &lists, strict)?;
+            let names = member_names(state, &mut merged, &lists, strict, &caller)?;
             let ignored = names.names().ignored().to_vec();
             // Each join's sets are filled from its member tables by the engine.
             let joins: Vec<mosaica_lifecycle::IncomingGrowth> = artifacts

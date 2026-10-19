@@ -2,7 +2,7 @@
 //! files read before hold: the linear build's numbering and the streaming build's reference.
 
 use rustc_hash::FxHashMap;
-use mosaica_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
+use mosaica_lifecycle::resolve::{self, Batch, Holder, Holdings, RowIdentity, Verdict};
 use mosaica_types::{EntityId, ItemAt, MosaicaId, ShardId};
 
 use super::report::{Tally, OUTSIDE_LIMIT};
@@ -27,7 +27,7 @@ impl Holdings for Held {
         &self,
         field: u16,
         keys: &[resolve::Key],
-    ) -> std::result::Result<Vec<(usize, ItemAt)>, Self::Error> {
+    ) -> std::result::Result<Vec<(usize, Holder)>, Self::Error> {
         Ok(keys
             .iter()
             .enumerate()
@@ -35,7 +35,7 @@ impl Holdings for Held {
                 let item = self.holder.get(&(field, *key))?;
                 Some((
                     at,
-                    ItemAt::new(ShardId::ZERO, EntityId::new(u64::from(*item))),
+                    Holder::Inside(ItemAt::new(ShardId::ZERO, EntityId::new(u64::from(*item)))),
                 ))
             })
             .collect())

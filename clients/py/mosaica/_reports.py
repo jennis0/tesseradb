@@ -224,8 +224,10 @@ class PagedReport(Summarised):
       applying the rest of its request. A row is `{"target", "view", "row", "reason"}`, `row`
       being its position in the table inserted into `target`; a member is `{"layer", "level",
       "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent.
-      `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`
-      and `unknown_mosaica_id`. `refused_by_reason` counts them.
+      `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`,
+      `unknown_mosaica_id`, `value_held` (a unique value an item outside the writer's terms holds)
+      and `label_not_held` (a label the writer's terms do not satisfy). `refused_by_reason` counts
+      them. A writer without `write-all` names only the items its terms reach.
     - `ignored_columns`: by layer, the fields of its member structs, and the columns of the
       memberships its declaration writes, that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those the plan did not send, and any the server says it
@@ -358,7 +360,8 @@ class ChangeReport(Summarised):
     - `accepted`: how many were applied.
     - `refused`: each row the identity rule refused, `{"row", "reason"}`, `row` being its
       position in what was given, and `reason` one of `names_no_item`, `names_two_items` and
-      `unknown_mosaica_id`. The other rows were applied. `refused_by_reason` counts them.
+      `unknown_mosaica_id`; an item outside the terms of a writer without `write-all` names
+      nothing. The other rows were applied. `refused_by_reason` counts them.
     - `ignored_columns`: the columns given that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those not sent, and any the server says it ignored.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`

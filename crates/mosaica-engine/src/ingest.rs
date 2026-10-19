@@ -172,6 +172,16 @@ impl Engine {
     ///
     /// Blocking: a tokio handler calls this inside `spawn_blocking`.
     pub fn ingest(&self, request: IngestRequest) -> Result<IngestReceipt, AcceptError> {
+        self.ingest_as(request, WriteScope::All)
+    }
+
+    /// [`Engine::ingest`] by a writer of `scope`: a row names only the items inside it, and a row
+    /// setting a label its terms do not satisfy is refused as `label_not_held`.
+    pub fn ingest_as(
+        &self,
+        request: IngestRequest,
+        scope: WriteScope,
+    ) -> Result<IngestReceipt, AcceptError> {
         #[cfg(feature = "fault-injection")]
         self.switches.park_ingest_while_wanted();
         // A stepped-down node would bury what it accepts under a manifest assembled from older
@@ -193,7 +203,6 @@ impl Engine {
         }
         let generation = self.generation();
         let unique_seq = generation.unique_live.seq();
-        let scope = WriteScope::All;
         let planned = self
             .resolver(&generation, &scope)
             .plan_ingest(&request, Prepared::default())?;
@@ -294,21 +303,65 @@ impl Resolver<'_> {
             })?;
         }
         let unreadable = |e: mosaica_store::StoreError| AcceptError::Unreadable(e.to_string());
-        let mut verdicts = resolve::resolve(&identities, self, batch).map_err(unreadable)?;
-        let unplaced: Vec<usize> = (0..request.rows.len())
-            .filter(|at| {
-                request.rows[*at].position.is_none() && verdicts[*at] == resolve::Verdict::Creates
-            })
-            .collect();
-        if !unplaced.is_empty() {
-            let mut without = identities.clone();
-            for at in &unplaced {
-                without[*at].unique.clear();
+        // A row setting a label the writer's terms do not satisfy is refused before the rule, and
+        // names nothing, so it claims neither an item nor a value. A label that does not parse is
+        // left to the row's decision, which refuses the batch where the row would write it.
+        let mut unheld: FxHashSet<usize> = FxHashSet::default();
+        let mut default_held = true;
+        if let WriteScope::Terms(scope) = self.scope {
+            let satisfied = |at: usize, labels: &[Vec<u8>]| {
+                index_keys(at, labels)
+                    .map_or(true, |keys| keys.iter().any(|key| scope.satisfies_key(key)))
+            };
+            for (at, row) in request.rows.iter().enumerate() {
+                if row
+                    .labels
+                    .as_deref()
+                    .is_some_and(|labels| !satisfied(at, labels))
+                {
+                    unheld.insert(at);
+                    identities[at] = RowIdentity::default();
+                }
             }
-            verdicts = resolve::resolve(&without, self, batch).map_err(unreadable)?;
-            for at in unplaced {
-                verdicts[at] = resolve::Verdict::Refused(Refusal::NamesNoItem { row: at });
+            if let Some(default) = view.and_then(|view| view.point_default.as_ref()) {
+                default_held = satisfied(0, &[default.as_bytes().to_vec()]);
             }
+        }
+        // A row that would create an item and cannot is refused: one carrying no position, as
+        // naming no item, and one taking a default label the writer's terms do not satisfy. The
+        // batch is decided again without their values, so that a refused row sets none a later
+        // row sets, until no other row is refused so.
+        let mut unplaced: FxHashSet<usize> = FxHashSet::default();
+        let mut verdicts = loop {
+            let verdicts = resolve::resolve(&identities, self, batch).map_err(unreadable)?;
+            let creating = |at: usize| match &verdicts[at] {
+                resolve::Verdict::Creates => true,
+                resolve::Verdict::Refused(Refusal::ValueHeld { names, .. }) => names.is_none(),
+                _ => false,
+            };
+            let more: Vec<usize> = (0..request.rows.len())
+                .filter(|at| creating(*at) && !unplaced.contains(at) && !unheld.contains(at))
+                .filter(|at| {
+                    let row = &request.rows[*at];
+                    row.position.is_none() || (row.labels.is_none() && !default_held)
+                })
+                .collect();
+            if more.is_empty() {
+                break verdicts;
+            }
+            for at in more {
+                identities[at].unique.clear();
+                match request.rows[at].position {
+                    None => unplaced.insert(at),
+                    Some(_) => unheld.insert(at),
+                };
+            }
+        };
+        for &at in &unplaced {
+            verdicts[at] = resolve::Verdict::Refused(Refusal::NamesNoItem { row: at });
+        }
+        for &at in &unheld {
+            verdicts[at] = resolve::Verdict::Refused(Refusal::LabelNotHeld { row: at });
         }
         if let Some(refusal) = resolve::first_refusal(&verdicts).filter(|_| request.strict) {
             return Err(AcceptError::Conflict(
@@ -1176,6 +1229,27 @@ impl Resolver<'_> {
                 rows[1],
                 value(rows[1], *field).trim_start_matches("its ")
             ),
+            Refusal::ValueHeld { row, field, .. } => format!(
+                "row {row} carries {}, which an item holds; a unique value is held by one item, \
+                 so send another value or leave it out",
+                value(*row, *field).trim_start_matches("its ")
+            ),
+            Refusal::LabelNotHeld { row } => {
+                let labels: Vec<String> = request.rows[*row]
+                    .labels
+                    .iter()
+                    .flatten()
+                    .map(|label| format!("'{}'", String::from_utf8_lossy(label)))
+                    .collect();
+                let labels = match labels.is_empty() {
+                    true => "the view's default access label".to_string(),
+                    false => format!("the access label {}", labels.join(", ")),
+                };
+                format!(
+                    "row {row} sets {labels}, which this credential's terms do not satisfy; send \
+                     a label they satisfy, or write with a credential holding `write-all`"
+                )
+            }
         }
     }
 }
