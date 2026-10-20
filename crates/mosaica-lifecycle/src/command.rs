@@ -521,15 +521,23 @@ pub enum ExecError {
     /// The detail names the values and, for an ingest, the holders' `mosaica_id`s; never an entity
     /// id.
     UniqueTaken { detail: String },
-    /// What the handler resolved a batch against has changed since: an item a row names was
-    /// deleted or joined to the row's view, or a value a row carries has a new holder, or a
-    /// command's names are stale by `mosaica_engine::Stamp`'s rule. Nothing took effect, and the
-    /// names are resolved again.
-    Stale,
+    /// Row `row` of a write's names, in a table a refused row refuses whole, was refused for
+    /// `reason` → HTTP **404** or **409**, no effect.
+    NamesRefused {
+        row: usize,
+        reason: crate::resolve::Reason,
+    },
+    /// Artifact `artifact` of a strict write sets an access label the writer's terms do not
+    /// satisfy → HTTP **409**, no effect.
+    LabelNotHeld { artifact: usize },
     /// A store file the command needs could not be written or opened → HTTP 500, no effect. The
     /// detail names the files, so it is logged and not sent.
     Store { detail: String },
 }
+
+/// What a write refused as `label_not_held` did, as its refusal says it.
+pub const LABEL_NOT_HELD: &str =
+    "sets an access label this credential's terms do not satisfy; send a label they satisfy";
 
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -554,10 +562,14 @@ impl std::fmt::Display for ExecError {
             | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
             | ExecError::UniqueTaken { detail } => write!(f, "{detail}"),
-            ExecError::Stale => write!(
+            ExecError::NamesRefused { row, reason } => write!(
                 f,
-                "the items this batch names changed while it was checked; send it again"
+                "row {row} of this request is refused where it applies: {}",
+                reason.as_str()
             ),
+            ExecError::LabelNotHeld { artifact } => {
+                write!(f, "artifact {artifact} of this request {LABEL_NOT_HELD}")
+            }
             ExecError::Store { detail } => write!(f, "store failure: {detail}"),
         }
     }

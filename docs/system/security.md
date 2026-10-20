@@ -45,13 +45,14 @@ full term index and the geometry. Nothing here defends against this party.
 An operator drives the control plane: ingest, deletion, suppression, compaction and the catalogue.
 Every route on the control plane, without exception, requires a credential: the operator
 credential, which authenticates a built-in superuser holding every permission, an API key, or an
-OIDC access token. Writes, flush and compaction need `write`. Status and the catalogue need
-`admin`. **Not built yet:** writes masked by the writer's own terms
-([users and access](../users-and-access.md#writes)). Until they are built, every principal with
-`write` writes against the whole corpus, with or without `write-all`, and is trusted with every
-item, as the operator is: a write can change or name an item the writer cannot see. A principal
-with `write` can upsert an item it cannot see, by its unique value, and change its label, so
-granting `write` grants what `read-all` grants wherever a view has a unique field.
+OIDC access token. Writes, flush and compaction need `write`. Declarations and drops need
+`write-all` beside it. Status and the catalogue need `admin`. A principal holding `write` and not
+`write-all` names only the items, layers, views and artifacts a session holding its terms would be
+served, suppressed items included; anything else answers as absent
+([users and access](../users-and-access.md#writes)). Deleting an artifact also deletes the
+artifacts attached to it outside the writer's terms: every viewer is denied a dependent once what
+it attaches to is deleted, so the cascade removes nothing anyone is shown. The operator holds
+`write-all`.
 
 `admin` can grant any permission to any principal, itself included. A principal holding `admin`
 can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
@@ -289,17 +290,29 @@ may not see gives the same answer, with the same status and the same shape, as a
 holds. The item card route does the same for a `mosaica_id`: an item the viewer may not see and an
 identifier naming nothing both answer `404 unknown`.
 
-The control plane answers differently, because its caller is a writer, who is trusted with every
-item until writes are masked. An ingest row carrying a unique value names the item that holds it,
-whether or not any viewer can see that item, and the receipt answers its `mosaica_id`. An ingest row
-whose values name two items, as one setting a unique value another item holds does, is refused and
-listed by its position and reason; in a strict batch the batch is refused with `409`, naming the
-values and the holders' `mosaica_id`s so that the operator can find the item to change. It names the
-`mosaica_id`, never the entity id. A declaration of `unique` at a running service is refused where
-values are held twice, and the refusal names how many there are and up to ten of the values, and no
-item. A build leaves out each later row naming an item or setting a value an earlier row of its file
-named or set. Its report counts the rows it left out and names up to ten of their values, and it
-names no item.
+The control plane answers a writer from inside its scope, as the viewer plane answers a viewer from
+inside its visible set, except for uniqueness. An ingest row carrying a unique value names the item
+that holds it where the writer's scope holds that item, and the receipt answers its `mosaica_id`. A
+value held only by an item outside the scope names nothing where a row only addresses items by it,
+which answers as a value no item holds does. Where the row would create an item with it, or set it
+on the item the row names, the row is refused as `value_held`: the value is held, and nothing else
+about the holder is said, neither its `mosaica_id` nor how many hold it, in the receipt or in a
+strict batch's `409`. A writer without `write-all` therefore learns, of an item outside its terms,
+that some item holds a value it tried to set, and nothing more. An ingest row whose values name two
+items in the scope is refused and listed by its position and reason; in a strict batch the batch is
+refused with `409`, naming the values and the holders' `mosaica_id`s so that the operator can find
+the item to change. It names the `mosaica_id`, never the entity id. A declaration of `unique` at a
+running service is refused where values are held twice, and the refusal names how many there are and
+up to ten of the values, and no item. A build leaves out each later row naming an item or setting a
+value an earlier row of its file named or set. Its report counts the rows it left out and names up
+to ten of their values, and it names no item.
+
+Artifact keys have the same exception as values. A publication under a key an artifact outside the
+writer's terms holds is refused as the key taken, naming no artifact. A writer without `write-all`
+is not told, of a `derived` vocabulary, which keys of a page it added, since whether a key was held
+before says that some item carried it. In both cases the lookups are made as for a held value or
+key, so the time of the scope test is the one difference from one nobody holds; for an artifact
+that test counts its members and generating sets within the scope.
 
 ## An incomplete answer is refused
 

@@ -120,8 +120,10 @@ use crate::wal::{RowOutcome, RowReceipt, WalEdit, WalRecord, WalRow};
 /// is `pub(crate)` inside a private module (`mosaica-engine`'s `write.rs`, `mod ack`), whose private
 /// field is the whole of the ack-ordering guarantee — a successful receipt cannot be constructed
 /// without proof that the generation carrying it is live. It must not become nameable from here.
-/// The window never *does* anything to a waiter, so it needs to know nothing about one.
-pub struct WindowEntry<W> {
+/// The window never *does* anything to a waiter, so it needs to know nothing about one. Generic
+/// in the writer's scope for the same reason: the close resolves the keys the batch names under it,
+/// and the window only carries it.
+pub struct WindowEntry<W, S = ()> {
     /// The rows this batch writes.
     pub rows: Vec<UnallocatedRow>,
     /// The items this batch moves to new entities.
@@ -144,6 +146,8 @@ pub struct WindowEntry<W> {
     /// the layer already holds agreed at admission and is gone by here. A minted child takes its
     /// parent from these; an existing one is filled with it.
     pub edges: Vec<crate::command::BatchEdge>,
+    /// What the writer that sent the batch may name, which the close resolves its keys under.
+    pub scope: S,
     pub waiters: Vec<W>,
 }
 
@@ -230,7 +234,7 @@ pub struct ResolvedMembership {
 }
 
 /// One entry after allocation: the record to append, and everything the apply and the ack need.
-pub struct ClosedEntry<W> {
+pub struct ClosedEntry<W, S = ()> {
     /// Always [`WalRecord::IngestBatch`], with every row carrying its assigned id — replay reuses
     /// them rather than re-deriving placement (lifecycle §5.1, SA §6.2).
     pub record: WalRecord,
@@ -252,6 +256,8 @@ pub struct ClosedEntry<W> {
     pub memberships: Vec<ResolvedMembership>,
     /// The edges this entry's close has to settle, carried through the allocation unchanged.
     pub edges: Vec<crate::command::BatchEdge>,
+    /// The entry's [`WindowEntry::scope`], carried through the allocation unchanged.
+    pub scope: S,
     pub waiters: Vec<W>,
     /// What the entry's request rows became, and which ones are over the key bound, as admitted:
     /// what [`ClosedEntry::reopen`] gives back.
@@ -259,10 +265,10 @@ pub struct ClosedEntry<W> {
     over_bound: Vec<u32>,
 }
 
-impl<W> ClosedEntry<W> {
+impl<W, S> ClosedEntry<W, S> {
     /// The entry as it was admitted, its ids given up: for a window that closes again without one
     /// of its entries. Each row keeps every value written into it since.
-    pub fn reopen(self) -> WindowEntry<W> {
+    pub fn reopen(self) -> WindowEntry<W, S> {
         let WalRecord::IngestBatch {
             principal,
             batch_id,
@@ -309,6 +315,7 @@ impl<W> ClosedEntry<W> {
             body_hash,
             memberships: self.memberships,
             edges: self.edges,
+            scope: self.scope,
             waiters: self.waiters,
         }
     }
@@ -660,12 +667,12 @@ pub fn wanted(rows: &[UnallocatedRow], edits: impl IntoIterator<Item = ShardId>)
 
 /// What [`CommitWindow::allocate`] returns: the closed entries, the assignment's tally and what it
 /// placed, or the refusal with each entry's waiters handed back.
-pub type Closed<W> =
-    Result<(Vec<ClosedEntry<W>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)>;
+pub type Closed<W, S = ()> =
+    Result<(Vec<ClosedEntry<W, S>>, FragmentationTally, Placed), (AllocError, Vec<Vec<W>>)>;
 
 /// The open commit window.
-pub struct CommitWindow<W> {
-    entries: Vec<WindowEntry<W>>,
+pub struct CommitWindow<W, S = ()> {
+    entries: Vec<WindowEntry<W, S>>,
     /// **The join index**, by principal and batch id. A batch held here cannot be evaluated
     /// against the idempotency map, because that map is written at *apply*;
     /// [`CommitWindow::held`] is what answers for it, and [`CommitWindow::join`] is what a
@@ -688,7 +695,7 @@ pub struct CommitWindow<W> {
     seq: u64,
 }
 
-impl<W> CommitWindow<W> {
+impl<W, S> CommitWindow<W, S> {
     pub fn new(seq: u64) -> Self {
         CommitWindow {
             entries: Vec::new(),
@@ -786,7 +793,7 @@ impl<W> CommitWindow<W> {
 
     /// Admit an entry claiming `claims`. The caller has already established that it does not
     /// conflict.
-    pub fn push(&mut self, entry: WindowEntry<W>, claims: WindowClaims) {
+    pub fn push(&mut self, entry: WindowEntry<W, S>, claims: WindowClaims) {
         let index = self.entries.len();
         self.by_batch
             .insert((entry.principal.clone(), entry.batch_id.clone()), index);
@@ -832,7 +839,7 @@ impl<W> CommitWindow<W> {
         self,
         allocators: &mut Allocators<'_>,
         mosaica_id_of: impl Fn(ItemAt) -> u64,
-    ) -> Closed<W> {
+    ) -> Closed<W, S> {
         let mut entries = self.entries;
 
         // An edit's first row takes the new entity; its other rows take the same one after.
@@ -966,6 +973,7 @@ impl<W> CommitWindow<W> {
                 items,
                 memberships: entry.memberships,
                 edges: entry.edges,
+                scope: entry.scope,
                 waiters: entry.waiters,
                 slots: entry.slots,
                 over_bound: entry.over_bound,
@@ -1033,6 +1041,7 @@ mod tests {
             body_hash: [0u8; 32],
             memberships: Vec::new(),
             edges: Vec::new(),
+            scope: (),
             waiters: vec!["w"],
         }
     }
@@ -1249,6 +1258,7 @@ mod tests {
                 body_hash: [3u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
+                scope: (),
                 waiters: vec!["w"],
             },
         );

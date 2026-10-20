@@ -12,6 +12,11 @@ The corpus is 120 items on one view, each with a distinct integer position. Two 
 batch sets that no item holds is new to the whole run, so a model and a server disagreeing about
 one row cannot hide behind a value that happens to collide.
 
+Every item is labelled `secret`, `team` or `public`, and every test runs twice: writing with the
+operator credential, which holds `write-all`, and as a principal holding `write` and the term
+`team`, whose writes name only the items labelled `team` or `public`. What is served is read by a
+session holding both terms.
+
 Each test serves its own copy of the bundle, so every test starts from the corpus as built.
 """
 
@@ -50,6 +55,11 @@ N_ITEMS = 120
 EXTENT = 1024
 GROUPS = "groups"
 TOPICS = "topics"
+COUNTED = "counted"
+#: How many of a `COUNTED` artifact's members a viewer must see for it to be served.
+COUNTED_REQUIRES = 2
+#: A layer whose artifacts attach to `COUNTED`'s.
+NOTES = "notes"
 
 UNIQUE = {"code": KEYWORD, "num": INTEGER}
 
@@ -61,7 +71,7 @@ points = "points.parquet"
 name             = "{VIEW}"
 extent           = {{ x = [0.0, {EXTENT}.0], y = [0.0, {EXTENT}.0] }}
 source           = "points"
-point_visibility = {{ default = "public" }}
+point_visibility = {{ field = "access", default = "public" }}
 
 [[attribute]]
 name   = "code"
@@ -97,7 +107,41 @@ hierarchy                 = {{ kind = "flat" }}
   name                      = "topic"
   type                      = "text"
   require_member_visibility = "all"
+
+[[layer]]
+name                      = "{COUNTED}"
+views                     = ["{VIEW}"]
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = {{ count = {COUNTED_REQUIRES} }}
+hierarchy                 = {{ kind = "flat" }}
+
+[[layer]]
+name                      = "{NOTES}"
+views                     = ["{VIEW}"]
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = "none"
+hierarchy                 = {{ kind = "flat" }}
+depends_on                = ["{COUNTED}"]
 """
+
+
+#: The term the scoped writer holds, and the one it does not.
+TEAM = "team"
+SECRET = "secret"
+
+
+def planted_labels(i: int) -> list[str] | None:
+    """Item `i`'s access labels as the points file carries them; `None` takes the default."""
+    return {1: [SECRET], 2: [TEAM]}.get(i % 4)
+
+
+def planted_at(x: float, y: float) -> int:
+    """The planted item at a lattice position."""
+    return int((y - 1) // 80) * 12 + int((x - 1) // 80)
 
 
 def planted(i: int) -> dict:
@@ -123,6 +167,9 @@ def pristine_bundle(tmp_path_factory) -> Path:
                 "y": pa.array([r["y"] for r in rows], pa.float64()),
                 "code": pa.array([r.get("code") for r in rows], pa.string()),
                 "num": pa.array([r.get("num") for r in rows], pa.uint64()),
+                "access": pa.array(
+                    [planted_labels(i) for i in range(N_ITEMS)], pa.list_(pa.string())
+                ),
             }
         ),
         work / "points.parquet",
@@ -136,18 +183,52 @@ def pristine_bundle(tmp_path_factory) -> Path:
 
 class Deployment:
     """One server over a private copy of the bundle, and the model of what it holds. `built` is
-    the copy as built, read before the server opened it."""
+    the copy as built, read before the server opened it. `writer` is `write-all`, for the operator
+    credential, or `scoped`, for a principal holding `write` and the term `team`."""
 
-    def __init__(self, server, built: Bundle):
+    def __init__(self, server, built: Bundle, writer: str):
         self.server = server
-        self.token = server.authorise([])["token"]
+        self.token = server.authorise([TEAM, SECRET])["token"]
         self.batches = count()
+        self.credential = server.operator_credential
+        terms = None
+        if writer == "scoped":
+            self.credential = self._scoped_writer()
+            terms = frozenset({TEAM})
+        served = self.served()
         self.holdings = Holdings(
-            unique=dict(UNIQUE), items=self.served(), numbers=HolderCount.of_bundle(built)
+            unique=dict(UNIQUE),
+            items=served,
+            numbers=HolderCount.of_bundle(built),
+            labels={
+                t: labels
+                for t, v in served.items()
+                if (labels := planted_labels(planted_at(v["x"], v["y"]))) is not None
+            },
+            terms=terms,
         )
         assert sorted(map(_canonical, self.holdings.items.values())) == sorted(
             _canonical(planted(i)) for i in range(N_ITEMS)
         ), "the build serves the corpus it was given"
+
+    def _scoped_writer(self) -> str:
+        """An API key for a service principal holding `write` and the term `team`."""
+
+        def control(path: str, body: dict) -> dict:
+            resp = requests.post(
+                f"{self.server.control_base}{path}",
+                headers={"Authorization": f"Bearer {self.server.operator_credential}"},
+                json=body,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            assert resp.status_code == 200, resp.text
+            return resp.json()
+
+        control("/control/principals", {"name": "pipeline", "kind": "service"})
+        control("/control/grants", {"principal": "pipeline", "permission": "write"})
+        control("/control/grants", {"principal": "pipeline", "terms": [TEAM]})
+        return control("/control/principals/pipeline/keys", {})["key"]
 
     # -- reads --------------------------------------------------------------------------------
 
@@ -221,7 +302,7 @@ class Deployment:
             f"{self.server.control_base}/control/ingest",
             params=params,
             headers={
-                "Authorization": f"Bearer {self.server.operator_credential}",
+                "Authorization": f"Bearer {self.credential}",
                 "x-mosaica-batch-id": batch_id,
                 "x-mosaica-view": VIEW,
                 "Content-Type": content_type,
@@ -234,7 +315,7 @@ class Deployment:
         return requests.post(
             f"{self.server.control_base}/control/changes",
             params={"strict": str(strict).lower()},
-            headers={"Authorization": f"Bearer {self.server.operator_credential}"},
+            headers={"Authorization": f"Bearer {self.credential}"},
             json=changes,
             timeout=60,
         )
@@ -244,7 +325,7 @@ class Deployment:
     ) -> requests.Response:
         """A publication (`PUT`) or growth (`PATCH`); `body` is JSON, or bytes of an Arrow
         stream."""
-        headers = {"Authorization": f"Bearer {self.server.operator_credential}"}
+        headers = {"Authorization": f"Bearer {self.credential}"}
         if isinstance(body, bytes):
             headers["Content-Type"] = "application/vnd.apache.arrow.stream"
             payload = {"data": body}
@@ -264,8 +345,8 @@ def _canonical(values: dict) -> tuple:
     return tuple(sorted(values.items()))
 
 
-@pytest.fixture
-def deployment(pristine_bundle, tmp_path):
+@pytest.fixture(params=["write-all", "scoped"])
+def deployment(pristine_bundle, tmp_path, request):
     bundle = tmp_path / "bundle"
     shutil.copytree(pristine_bundle, bundle)
     built = Bundle(bundle)
@@ -273,7 +354,7 @@ def deployment(pristine_bundle, tmp_path):
     state.mkdir()
     server, proc = spawn_server(bundle, state)
     try:
-        yield Deployment(server, built)
+        yield Deployment(server, built, request.param)
     finally:
         stop_server(proc)
 
@@ -322,13 +403,15 @@ def identifiers_of(rng: random.Random, item: int, values: dict) -> dict:
 
 
 def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]:
-    """A batch of `n` rows mixing every case the rule decides."""
-    held = sorted(holdings.items)
+    """A batch of `n` rows mixing every case the rule decides. Items are taken in the order of
+    their values, so a seed picks the same items whatever key blinds their `mosaica_id`s."""
+    held = sorted(holdings.items, key=lambda t: (holdings.items[t]["x"], holdings.items[t]["y"]))
     set_here: list[tuple[str, object]] = []
     named_here: list[int] = []
     rows: list[dict] = []
+    secret = [t for t in held if holdings.labels.get(t) == [SECRET]]
     while len(rows) < n:
-        kind = rng.randrange(12)
+        kind = rng.randrange(14)
         if kind in (0, 1):  # a new item, with new values or none
             row = fresh_position()
             if rng.random() < 0.6:
@@ -358,8 +441,8 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
                 row["code"] = fresh_code()
                 set_here.append(("code", row["code"]))
             named_here.append(item)
-        elif kind == 6:  # two held items
-            a, b = rng.sample(held, 2)
+        elif kind == 6:  # two held items the writer names
+            a, b = rng.sample([t for t in held if holdings.inside(t)], 2)
             row = identifiers_of(rng, a, holdings.items[a])
             other = identifiers_of(rng, b, holdings.items[b])
             clash = [c for c in other if c not in row]
@@ -383,6 +466,24 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
             rows.append({"mosaica_id": str(item), column: value})
             row = identifiers_of(rng, item, holdings.items[item])
             named_here.append(item)
+        elif kind == 12:  # labelled `secret`: a new item, or a held one relabelled
+            row = fresh_position()
+            if rng.random() < 0.5:
+                item = rng.choice(held)
+                row = identifiers_of(rng, item, holdings.items[item])
+            row["access"] = [SECRET]
+        elif kind == 13 and secret:  # a value a `secret` item holds, created or set on another
+            item = rng.choice(secret)
+            values = holdings.items[item]
+            column = rng.choice([c for c in UNIQUE if c in values] or [None])
+            if column is None:
+                continue
+            row = {column: values[column]}
+            if rng.random() < 0.5:
+                row.update(fresh_position())
+            else:
+                other = rng.choice(held)
+                row["mosaica_id"] = str(other)
         else:
             continue
         rows.append(row)
@@ -399,6 +500,7 @@ def as_arrow(rows: list[dict]) -> tuple[bytes, list[dict]]:
     every column, so a cell a JSON row leaves out is a null there, which clears what an item holds;
     a null position is no position."""
     types = {
+        "access": pa.list_(pa.string()),
         "mosaica_id": pa.string(),
         "code": pa.string(),
         "num": pa.uint64(),
@@ -473,7 +575,10 @@ def test_generated_ingest_batches_are_resolved_row_by_row_as_the_model_resolves_
             for i, v in enumerate(verdicts)
         )
         reached |= {v.reason if isinstance(v, Refused) else type(v) for v in verdicts}
-    assert reached == {Creates, Names, *naming.REASONS}, "the batches reach every verdict"
+    expected = {Creates, Names, *naming.REASONS}
+    if deployment.holdings.terms is not None:
+        expected |= set(naming.SCOPED_REASONS)
+    assert reached == expected, "the batches reach every verdict"
     assert cascaded, "a row refused for a value leaves its item to a later row"
 
 
@@ -499,7 +604,7 @@ def test_the_worked_example_of_two_unique_fields(deployment):
 
 def test_a_null_clears_a_unique_value_and_a_deleted_item_frees_its_values(deployment):
     dep = deployment
-    held = [t for t, v in dep.holdings.items.items() if "code" in v and "num" in v][:2]
+    held = [t for t, v in dep.holdings.writable().items() if "code" in v and "num" in v][:2]
     cleared, deleted = held
     code_cleared = dep.holdings.items[cleared]["code"]
     code_deleted = dep.holdings.items[deleted]["code"]
@@ -545,21 +650,22 @@ def test_a_strict_batch_is_refused_whole_at_its_first_refused_row(deployment):
 
 
 def test_a_replayed_batch_answers_its_first_acceptance(deployment):
-    """A retry answers the first acceptance's `mosaica_ids` and `refused` whatever `strict` says.
-    The retries are sent before any flush, since a flush forgets the batch ids below the write-ahead
-    log it keeps."""
+    """A retry answers the first acceptance's `mosaica_ids` and `refused` whatever `strict` says,
+    after the flushes each answer waited for, and writes nothing."""
     dep = deployment
     rows = generate_batch(random.Random(21), dep.holdings, 25)
-    first = dep.ingest(rows, batch_id="identity-replay", wait=False)
+    first = dep.ingest(rows, batch_id="identity-replay")
     assert first.status_code == 200, first.text
     assert first.json()["refused"], "the batch plants refusals"
+    issued = dep.server.status()["entity_id_high_water"]
     for strict in (False, True):
-        again = dep.ingest(rows, strict=strict, batch_id="identity-replay", wait=False)
+        again = dep.ingest(rows, strict=strict, batch_id="identity-replay")
         assert again.status_code == 200, again.text
         assert again.json().get("replayed") is True, (first.json(), again.json())
         assert again.json()["mosaica_ids"] == first.json()["mosaica_ids"]
         assert again.json()["refused"] == first.json()["refused"]
         assert again.json()["created"] == 0
+    assert dep.server.status()["entity_id_high_water"] == issued
 
 
 # ---------------------------------------------------------------------------------------------
@@ -582,7 +688,7 @@ def check_changes(dep: Deployment, changes: list[dict]) -> list:
 
 def test_changes_name_items_by_every_identifier_and_refuse_row_by_row(deployment):
     dep = deployment
-    items = {t: v for t, v in dep.holdings.items.items() if "code" in v and "num" in v}
+    items = {t: v for t, v in dep.holdings.writable().items() if "code" in v and "num" in v}
     a, b, c, d, e, f = sorted(items)[:6]
     v = dep.holdings.items
     rng = random.Random(5)
@@ -636,7 +742,7 @@ def test_a_strict_change_request_is_refused_whole_with_the_status_of_its_first_r
     deployment,
 ):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v and "num" in v)
     v = dep.holdings.items
     ok = {"op": "suppress", "match": {"mosaica_id": str(items[0])}}
     nothing = {"op": "suppress", "match": {"code": fresh_code()}}
@@ -656,7 +762,7 @@ def test_a_strict_change_request_is_refused_whole_with_the_status_of_its_first_r
 
 def test_a_match_key_naming_nothing_is_ignored_and_a_match_left_empty_names_no_item(deployment):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v)
     v = dep.holdings.items
     verdicts = check_changes(
         dep,
@@ -758,7 +864,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
     ids = {row["key"]: row["mosaica_id"] for row in published["artifacts"]}
 
     visible = dep.holdings.visible()
-    held = set(dep.holdings.items)
+    held = set(dep.holdings.writable())
     membership = {
         "g0": named(dep.holdings, members[0]),
         "g1": named(dep.holdings, members[1]),
@@ -787,7 +893,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
 
 def test_a_member_table_may_name_members_by_any_mix_of_columns(deployment):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v)[:4]
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v and "num" in v)[:4]
     v = dep.holdings.items
     table = {
         "mosaica_id": [str(items[0]), None, None, str(items[3])],
@@ -806,7 +912,7 @@ def test_a_member_table_column_naming_nothing_is_ignored(deployment):
     growth; a table left with no identifying column names nothing in each row, and a request in
     which no table has one is malformed."""
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v)
     v = dep.holdings.items
     tagged = [{"mosaica_id": str(items[0]), "colour": "red"}, {"code": v[items[1]]["code"], "colour": None}]
     untagged = [{"colour": "blue"}, {"colour": "green"}]
@@ -846,7 +952,7 @@ def test_a_strict_member_request_is_refused_whole_with_the_status_of_its_first_r
     deployment, method
 ):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v)
     v = dep.holdings.items
     if method == "PATCH":
         resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "held", "members": {"mosaica_id": [str(items[0])]}}]})
@@ -872,7 +978,7 @@ def test_a_strict_member_request_is_refused_whole_with_the_status_of_its_first_r
 
 def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(deployment):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v)
     v = dep.holdings.items
     good = [{"mosaica_id": str(items[0])}, {"code": v[items[1]]["code"]}]
     for extra, status in (
@@ -919,7 +1025,7 @@ def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(de
 def test_members_joining_a_generating_set_that_name_nothing_or_two_refuse_the_growth(deployment):
     """Strict or not; members leaving it are refused row by row."""
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "code" in v)
     v = dep.holdings.items
     body = {
         "artifacts": [
@@ -953,7 +1059,7 @@ def test_members_joining_a_generating_set_that_name_nothing_or_two_refuse_the_gr
 
 def test_the_arrow_growth_names_members_by_the_struct_fields(deployment):
     dep = deployment
-    items = sorted(t for t, v in dep.holdings.items.items() if "num" in v)
+    items = sorted(t for t, v in dep.holdings.writable().items() if "num" in v)
     v = dep.holdings.items
     resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "arrow", "members": {}}]})
     assert resp.status_code == 201, resp.text
@@ -1017,7 +1123,7 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     dep = deployment
     numbers = dep.holdings.numbers
     candidates: dict[int, list[int]] = {}
-    for t in sorted(t for t, v in dep.holdings.items.items() if "code" in v and "num" in v):
+    for t in sorted(t for t, v in dep.holdings.writable().items() if "code" in v and "num" in v):
         candidates.setdefault(item_of_key(numbers.item_of(t)[1])[0], []).append(t)
     if len(candidates) == 1:
         deleted = candidates[min(candidates)][:3]
@@ -1068,3 +1174,97 @@ def test_a_deleted_items_number_is_issued_again_and_its_old_identifier_names_not
     assert resp.status_code == 201, resp.text
     assert resp.json()["refused"] == expected_refused(dep.holdings, [(0, "members", members)])
     assert dep.members(GROUPS, resp.json()["artifacts"][0]["mosaica_id"]) == set(made)
+
+
+def by_id(items) -> dict:
+    """A member table naming `items` by `mosaica_id`."""
+    return member_table([{"mosaica_id": str(t)} for t in sorted(items)])
+
+
+def check_reach(
+    dep: Deployment,
+    layer: str,
+    artifacts: dict[str, dict],
+    inside: dict[str, bool],
+    members: dict[str, set[int]] | None = None,
+):
+    """Publish `artifacts` into `layer` as the operator; grow each as the writer and publish under
+    its key: accepted where `inside` says, otherwise answered as a key nobody holds and refused as
+    the key taken."""
+    resp = dep.server.publish_artifacts(
+        layer, artifacts=[{"key": key, **parts} for key, parts in artifacts.items()]
+    )
+    assert resp.status_code == 201, resp.text
+    joining = min(dep.holdings.writable())
+
+    def grow(key: str) -> dict:
+        return {"artifacts": [{"key": key, "members": by_id([joining])}]}
+
+    absent = dep.artifacts("PATCH", layer, grow("nokey-zz"))
+    assert absent.status_code == 422, absent.text
+    assert any(inside.values()) and (dep.holdings.terms is None or not all(inside.values()))
+    for key in artifacts:
+        resp = dep.artifacts("PATCH", layer, grow(key))
+        if inside[key]:
+            assert resp.status_code == 200, (key, resp.text)
+            if members is not None:
+                joined = resp.json()["artifacts"][0]["joined"]
+                assert joined == int(joining not in members[key]), key
+        else:
+            assert resp.status_code == absent.status_code, (key, resp.text)
+            assert resp.json() == json.loads(absent.text.replace("nokey-zz", key)), key
+        resp = dep.artifacts("PUT", layer, {"artifacts": [{"key": key, "members": {}}]})
+        assert resp.status_code == (200 if inside[key] else 409), (key, resp.text)
+
+
+def test_an_artifact_is_named_where_a_reader_of_the_writers_terms_would_be_served_it(deployment):
+    """An artifact is inside a scoped writer's terms where a reader of them would be served it: on
+    a layer requiring visible members, where as many of its members are inside them; on a layer
+    supplying content, where every item one of its contents was generated from is; and where it
+    attaches to another artifact, where that one is inside them. A growth naming one outside is
+    answered as one naming a key nobody holds, and a publication under its key is refused as the
+    key taken. A writer holding `write-all` names every one."""
+    dep = deployment
+    rng = random.Random(57)
+    held = sorted(dep.holdings.items)
+
+    def sample(most: int) -> set[int]:
+        return set(rng.sample(held, rng.randrange(1, most)))
+
+    counted = {f"c{i}": sample(6) for i in range(16)}
+    counted_inside = {
+        key: naming.artifact_inside(dep.holdings, members, COUNTED_REQUIRES)
+        for key, members in counted.items()
+    }
+    published = {key: {"members": by_id(members)} for key, members in counted.items()}
+    check_reach(dep, COUNTED, published, counted_inside, counted)
+
+    generated = {f"t{i}": [sample(4) for _ in range(rng.randrange(1, 3))] for i in range(16)}
+    check_reach(
+        dep,
+        TOPICS,
+        {
+            key: {
+                "members": by_id(set().union(*sets)),
+                "content": [{"values": [key], "generated_from": by_id(s)} for s in sets],
+            }
+            for key, sets in generated.items()
+        },
+        {
+            key: naming.artifact_inside(dep.holdings, set().union(*sets), None, contents=sets)
+            for key, sets in generated.items()
+        },
+    )
+
+    check_reach(
+        dep,
+        NOTES,
+        {
+            f"n{key}": {"attached_to": {"layer": COUNTED, "level": 0, "key": key}}
+            for key in counted
+        },
+        {
+            f"n{key}": naming.artifact_inside(dep.holdings, [], None, target=counted_inside[key])
+            for key in counted
+        },
+    )

@@ -25,9 +25,9 @@ pub(super) enum BatchState {
 impl BatchState {
     /// Look `principal`'s `batch_id` up: the durable index, then the open window, then unknown. The
     /// two sets are disjoint: a batch enters `accepted_batches` only at `close_window`.
-    pub(super) fn of<W>(
+    pub(super) fn of<W, S>(
         live: &LiveState,
-        window: &CommitWindow<W>,
+        window: &CommitWindow<W, S>,
         principal: &str,
         batch_id: &str,
     ) -> BatchState {
@@ -48,7 +48,7 @@ impl BatchState {
 /// [`ClosingWindow::fail_wal`], [`ClosingWindow::ack`] and [`ClosingWindow::reopen`] are its four
 /// exits.
 pub(super) struct ClosingWindow {
-    closed: Vec<ClosedEntry<Reply<Ingested>>>,
+    closed: Vec<ClosedEntry<IngestReply, WriteScope>>,
     /// Entries, not rows: what the service estimate is per.
     entries: u64,
     /// When the window opened, so the service covers the wait as well as the close.
@@ -140,7 +140,7 @@ pub(super) struct OpenedShards {
 
 impl ClosingWindow {
     pub(super) fn new(
-        closed: Vec<ClosedEntry<Reply<Ingested>>>,
+        closed: Vec<ClosedEntry<IngestReply, WriteScope>>,
         placing: Placing,
         entries: u64,
         started: std::time::Instant,
@@ -153,11 +153,11 @@ impl ClosingWindow {
         }
     }
 
-    pub(super) fn entries(&self) -> &[ClosedEntry<Reply<Ingested>>] {
+    pub(super) fn entries(&self) -> &[ClosedEntry<IngestReply, WriteScope>] {
         &self.closed
     }
 
-    pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<Reply<Ingested>>] {
+    pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<IngestReply, WriteScope>] {
         &mut self.closed
     }
 
@@ -170,7 +170,7 @@ impl ClosingWindow {
 
     /// Before the append: nothing was appended or applied. Every id the window took is given back,
     /// and its entries come back as they were admitted.
-    pub(super) fn reopen(self) -> Vec<WindowEntry<Reply<Ingested>>> {
+    pub(super) fn reopen(self) -> Vec<WindowEntry<IngestReply, WriteScope>> {
         drop(self.placing);
         self.closed
             .into_iter()
@@ -210,12 +210,12 @@ impl ClosingWindow {
         for (entry, (minted, joined)) in self.closed.into_iter().zip(counts) {
             let receipt = entry.receipt().to_vec();
             for waiter in entry.waiters {
-                waiter.ack(Ingested {
+                waiter.ack(Ok(Ingested {
                     receipt: receipt.clone(),
                     minted,
                     joined,
                     replayed: false,
-                });
+                }));
             }
         }
         health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
@@ -325,7 +325,7 @@ fn mint_cells<'a>(
 fn fail_allocation(
     health: &ExecutorHealth,
     error: mosaica_lifecycle::AllocError,
-    waiters: Vec<Vec<Reply<Ingested>>>,
+    waiters: Vec<Vec<IngestReply>>,
     entries: u64,
     started: std::time::Instant,
 ) {
@@ -335,7 +335,7 @@ fn fail_allocation(
 /// Answer every waiter of a window that will not commit, and time the window.
 fn refuse_waiters(
     health: &ExecutorHealth,
-    waiters: Vec<Vec<Reply<Ingested>>>,
+    waiters: Vec<Vec<IngestReply>>,
     entries: u64,
     started: std::time::Instant,
     error: impl Fn() -> ExecError,
@@ -368,7 +368,8 @@ impl Executor {
         let max_rows = self.health.commit_window_max_rows();
         #[cfg(feature = "fault-injection")]
         self.deps.switches.hold_work_pass_if_paused();
-        let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
+        let mut window: CommitWindow<IngestReply, WriteScope> =
+            CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
 
         loop {
@@ -458,8 +459,8 @@ impl Executor {
     /// replacement would charge its predecessor's whole service to itself.
     pub(super) fn close_and_reopen(
         &mut self,
-        window: CommitWindow<Reply<Ingested>>,
-    ) -> CommitWindow<Reply<Ingested>> {
+        window: CommitWindow<IngestReply, WriteScope>,
+    ) -> CommitWindow<IngestReply, WriteScope> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -474,31 +475,27 @@ impl Executor {
     /// be admitted into a fresh window twice.
     pub(super) fn admit_ingest(
         &mut self,
-        mut window: CommitWindow<Reply<Ingested>>,
-        submission: IngestSubmission,
-        reply: Reply<Ingested>,
-    ) -> (CommitWindow<Reply<Ingested>>, Admission) {
-        match BatchState::of(
-            &self.live,
-            &window,
-            &submission.principal,
-            &submission.batch_id,
-        ) {
+        mut window: CommitWindow<IngestReply, WriteScope>,
+        mut submission: IngestSubmission,
+        reply: IngestReply,
+    ) -> (CommitWindow<IngestReply, WriteScope>, Admission) {
+        let request = Arc::clone(&submission.request);
+        match BatchState::of(&self.live, &window, &request.principal, &request.batch_id) {
             BatchState::Accepted {
                 body_hash: prev_hash,
                 receipt,
             } => {
-                if prev_hash == submission.body_hash {
+                if prev_hash == request.body_hash {
                     // A replay mints nothing: this batch's keys were created when first accepted.
-                    reply.ack(Ingested {
+                    reply.ack(Ok(Ingested {
                         receipt,
                         minted: 0,
                         joined: 0,
                         replayed: true,
-                    });
+                    }));
                 } else {
                     reply.fail(ExecError::BatchConflict {
-                        batch_id: submission.batch_id,
+                        batch_id: request.batch_id.clone(),
                     });
                 }
                 (window, Admission::Answered)
@@ -512,43 +509,49 @@ impl Executor {
                     window.seq(),
                     "the entry must be joined to the window it was found in"
                 );
-                if prev_hash == submission.body_hash {
-                    let joined = window.join(&submission.principal, &submission.batch_id, reply);
+                if prev_hash == request.body_hash {
+                    let joined = window.join(&request.principal, &request.batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
                     // The 409 reaches the retry, not the held original, which is still owed its ack.
                     reply.fail(ExecError::BatchConflict {
-                        batch_id: submission.batch_id,
+                        batch_id: request.batch_id.clone(),
                     });
                 }
                 (window, Admission::Answered)
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
-                // What the open window touches is written at its close, and the re-check below
-                // reads what was written.
-                let joined = submission.slots.iter().filter_map(|slot| match slot {
-                    mosaica_lifecycle::Slot::Joined { item, .. } => Some(*item),
-                    _ => None,
-                });
-                let edited = submission.edits.iter().map(|e| e.edit.item());
-                let claims = mosaica_lifecycle::WindowClaims::of(
-                    &submission.rows,
-                    edited.chain(joined),
-                    submission.keys.clone(),
-                );
-                if window.conflicts(&claims) {
+                // What the open window touches is written at its close, and the check below reads
+                // what was written.
+                if window.conflicts(&claims_of(&submission)) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
+                // Where what the handler resolved has moved since, the open window is closed and the
+                // batch is resolved again against what it wrote.
+                if self.moved_since_resolved(&submission) {
+                    if !window.is_empty() {
+                        window = self.close_and_reopen(window);
+                        admission = Admission::YieldedAfterClose;
+                    }
+                    submission = match self.resolve_again(submission) {
+                        Ok(resolved) => resolved,
+                        Err(refused) => {
+                            reply.ack(Err(refused));
+                            return (window, admission);
+                        }
+                    };
+                }
+                let claims = claims_of(&submission);
                 // A batch that does not fit beside the open window closes it, and is refused if it
                 // does not fit alone.
                 let wanted = mosaica_lifecycle::window::wanted(
-                    &submission.rows,
-                    submission.edits.iter().map(|e| e.edit.shard),
+                    &submission.planned.rows,
+                    submission.planned.edits.iter().map(|e| e.edit.shard),
                 );
                 let live = Arc::clone(&self.live);
-                let room = |window: &CommitWindow<Reply<Ingested>>| {
+                let room = |window: &CommitWindow<IngestReply, WriteScope>| {
                     let mut total = window.wanted().clone();
                     total.add(wanted.clone());
                     live.window_room(&total.edits, total.items)
@@ -573,116 +576,164 @@ impl Executor {
         }
     }
 
-    /// The re-check of what the handler resolved, against what has changed since, from memory,
-    /// and the artifacts the batch names. `None` means the caller has already been answered.
-    pub(super) fn admit(
-        &mut self,
-        submission: IngestSubmission,
-        reply: Reply<Ingested>,
-    ) -> Option<WindowEntry<Reply<Ingested>>> {
-        let IngestSubmission {
+    /// Whether anything the handler resolved `submission` against has moved since, from memory: a
+    /// named item deleted, edited, joined to the row's view or its entity issued again, a value
+    /// the batch carries given a holder, or the holder of a value a row was refused for gone.
+    fn moved_since_resolved(&self, submission: &IngestSubmission) -> bool {
+        let crate::ingest::Planned {
             rows,
             edits,
             slots,
             keys,
-            principal,
-            batch_id,
-            body_hash,
-            artifacts,
-            unique_seq,
-            over_bound,
-        } = submission;
+            refused_keys,
+            held_by,
+            ..
+        } = &submission.planned;
+        let unique_seq = &submission.unique_seq;
         let generation = self.generation.load();
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
         // Each item is read in its own shard; one in a shard the generation no longer holds is
         // gone.
         let deleted = |item: ItemAt| crate::unique::deleted_in(&generation, item);
-        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
-                || edits.iter().any(|submitted| {
-                    let old = submitted.edit.item();
-                    deleted(old)
-                        || crate::write::joined::views_holding(
-                            generation.shard_of(old.shard),
-                            old.entity,
-                        ) != submitted.held_views
-                })
-                || slots.iter().any(|slot| match slot {
-                    mosaica_lifecycle::Slot::Unchanged { item, .. }
-                    | mosaica_lifecycle::Slot::Joined { item, .. } => deleted(*item),
-                    _ => false,
-                })
-                || rows.iter().any(|row| match row.join {
-                    Some(item) => {
-                        deleted(item)
-                            || crate::edited::holds_in_view(
-                                generation.shard_of(item.shard),
-                                item.entity,
-                                &row.view,
-                            )
-                    }
-                    None => false,
-                });
+        let moved = crate::unique::moved_since(&generation, keys, *unique_seq, creates)
+            || crate::unique::moved_since(&generation, refused_keys, *unique_seq, false)
+            || held_by.iter().any(|item| deleted(*item))
+            || edits.iter().any(|submitted| {
+                let old = submitted.edit.item();
+                deleted(old)
+                    || crate::write::joined::views_holding(
+                        generation.shard_of(old.shard),
+                        old.entity,
+                    ) != submitted.held_views
+            })
+            || slots.iter().any(|slot| match slot {
+                mosaica_lifecycle::Slot::Unchanged { item, .. }
+                | mosaica_lifecycle::Slot::Joined { item, .. } => deleted(*item),
+                _ => false,
+            })
+            || rows.iter().any(|row| match row.join {
+                Some(item) => {
+                    deleted(item)
+                        || crate::edited::holds_in_view(
+                            generation.shard_of(item.shard),
+                            item.entity,
+                            &row.view,
+                        )
+                }
+                None => false,
+            });
+        if moved {
+            return true;
+        }
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
         // to another item: each must still hold the item the handler resolved it to, and its
         // number must still be at the tenancy the identifier carries.
-        let stale = stale || {
-            let key = &self.deps.identity_key;
-            let number_of = |mosaica_id: u64| {
-                crate::edited::number_named(
-                    key,
-                    &generation,
-                    mosaica_types::MosaicaId::new(mosaica_id),
-                )
+        let key = &self.deps.identity_key;
+        let number_of = |mosaica_id: u64| {
+            crate::edited::number_named(key, &generation, mosaica_types::MosaicaId::new(mosaica_id))
                 .map(|(shard, number)| (shard.id(), number))
-            };
-            let mut named: Vec<(ItemAt, Option<(ShardId, EntityId)>)> = Vec::new();
-            for slot in &slots {
-                match slot {
-                    mosaica_lifecycle::Slot::Unchanged { item, mosaica_id }
-                    | mosaica_lifecycle::Slot::Joined { item, mosaica_id } => {
-                        named.push((*item, number_of(*mosaica_id)));
-                    }
-                    mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
-                        let old = edits.get(*edit as usize).map(|e| e.edit.item());
-                        named.extend(old.map(|old| (old, number_of(*mosaica_id))));
-                    }
-                    mosaica_lifecycle::Slot::Written {
-                        row,
-                        mosaica_id: Some(mosaica_id),
-                    } => {
-                        if let Some(item) = rows.get(*row as usize).and_then(|r| r.join) {
-                            named.push((item, number_of(*mosaica_id)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let by_shard = mosaica_types::by_shard(
-                named
-                    .iter()
-                    .enumerate()
-                    .map(|(at, (item, _))| (item.shard, at)),
-            );
-            by_shard.into_iter().any(|(id, ats)| {
-                let Some(shard) = generation.shard(id) else {
-                    return true;
-                };
-                let entities: Vec<EntityId> = ats.iter().map(|&at| named[at].0.entity).collect();
-                match crate::edited::numbers_of(shard, &entities) {
-                    Ok(numbers) => ats
-                        .iter()
-                        .zip(numbers)
-                        .any(|(&at, now)| named[at].1 != Some((id, now))),
-                    Err(_) => true,
-                }
-            })
         };
-        drop(generation);
-        if stale {
-            reply.fail(ExecError::Stale);
-            return None;
+        let mut named: Vec<(ItemAt, Option<(ShardId, EntityId)>)> = Vec::new();
+        for slot in slots {
+            match slot {
+                mosaica_lifecycle::Slot::Unchanged { item, mosaica_id }
+                | mosaica_lifecycle::Slot::Joined { item, mosaica_id } => {
+                    named.push((*item, number_of(*mosaica_id)));
+                }
+                mosaica_lifecycle::Slot::Edited { edit, mosaica_id } => {
+                    let old = edits.get(*edit as usize).map(|e| e.edit.item());
+                    named.extend(old.map(|old| (old, number_of(*mosaica_id))));
+                }
+                mosaica_lifecycle::Slot::Written {
+                    row,
+                    mosaica_id: Some(mosaica_id),
+                } => {
+                    if let Some(item) = rows.get(*row as usize).and_then(|r| r.join) {
+                        named.push((item, number_of(*mosaica_id)));
+                    }
+                }
+                _ => {}
+            }
         }
-        let (memberships, edges) = match self.resolve_memberships(&artifacts) {
+        let by_shard = mosaica_types::by_shard(
+            named
+                .iter()
+                .enumerate()
+                .map(|(at, (item, _))| (item.shard, at)),
+        );
+        by_shard.into_iter().any(|(id, ats)| {
+            let Some(shard) = generation.shard(id) else {
+                return true;
+            };
+            let entities: Vec<EntityId> = ats.iter().map(|&at| named[at].0.entity).collect();
+            match crate::edited::numbers_of(shard, &entities) {
+                Ok(numbers) => ats
+                    .iter()
+                    .zip(numbers)
+                    .any(|(&at, now)| named[at].1 != Some((id, now))),
+                Err(_) => true,
+            }
+        })
+    }
+
+    /// `submission`'s request resolved and decided again against the generation served now,
+    /// keeping each edit the handler made of an item a row still names in the views it was in.
+    fn resolve_again(
+        &self,
+        submission: IngestSubmission,
+    ) -> std::result::Result<IngestSubmission, AcceptError> {
+        let IngestSubmission {
+            request,
+            scope,
+            planned: crate::ingest::Planned { slots, edits, .. },
+            ..
+        } = submission;
+        let mut edits: Vec<Option<SubmittedEdit>> = edits.into_iter().map(Some).collect();
+        let prepared: crate::ingest::Prepared = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(at, slot)| match slot {
+                mosaica_lifecycle::Slot::Edited { edit, .. } => {
+                    let edit = edits.get_mut(*edit as usize)?.take()?;
+                    Some(((at, edit.edit.item()), edit))
+                }
+                _ => None,
+            })
+            .collect();
+        let generation = self.generation.load_full();
+        let planned = self
+            .resolver(&generation, &scope)
+            .plan_ingest(&request, prepared)?;
+        Ok(IngestSubmission {
+            request,
+            scope,
+            planned,
+            unique_seq: generation.unique_live.seq(),
+        })
+    }
+
+    /// The artifacts the batch names, resolved, as the entry the window holds. `None` means the
+    /// caller has already been answered.
+    fn admit(
+        &mut self,
+        submission: IngestSubmission,
+        reply: IngestReply,
+    ) -> Option<WindowEntry<IngestReply, WriteScope>> {
+        let IngestSubmission {
+            request,
+            scope,
+            planned:
+                crate::ingest::Planned {
+                    rows,
+                    edits,
+                    slots,
+                    artifacts,
+                    over_bound,
+                    ..
+                },
+            ..
+        } = submission;
+        let (memberships, edges) = match self.resolve_memberships(&artifacts, &scope) {
             Ok(resolved) => resolved,
             Err(detail) => {
                 reply.fail(ExecError::LayerRefused { detail });
@@ -695,11 +746,12 @@ impl Executor {
             edits: edits.into_iter().map(|e| e.edit).collect(),
             slots,
             over_bound,
-            principal,
-            batch_id,
-            body_hash,
+            principal: request.principal.clone(),
+            batch_id: request.batch_id.clone(),
+            body_hash: request.body_hash,
             memberships,
             edges,
+            scope,
             waiters: vec![reply],
         })
     }
@@ -820,7 +872,7 @@ impl Executor {
     /// artifact publications and the growths against them, in that order, since a mint must be
     /// durable before the rows it colours and a publication must exist before anything addresses
     /// it. A failure applies nothing, and gives every id the window took back to its shard.
-    pub(super) fn close_window(&mut self, window: CommitWindow<Reply<Ingested>>) {
+    pub(super) fn close_window(&mut self, window: CommitWindow<IngestReply, WriteScope>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
         let mut mark = StageMark::now();
@@ -1072,7 +1124,7 @@ impl Executor {
     /// Index every entry of a committed window by its principal and batch id, after the swap.
     pub(super) fn record_accepted_batches(
         &mut self,
-        closed: &[ClosedEntry<Reply<Ingested>>],
+        closed: &[ClosedEntry<IngestReply, WriteScope>],
         positions: &[u64],
     ) {
         let m = StageMark::now();
@@ -1191,7 +1243,7 @@ impl Executor {
     /// the new rows flush, and nobody who loses access by the edit keeps it past the ack.
     pub(super) fn apply_window(
         &self,
-        closed: &mut [ClosedEntry<Reply<Ingested>>],
+        closed: &mut [ClosedEntry<IngestReply, WriteScope>],
         positions: &[u64],
         vocabularies: Vocabularies,
         mints: &[(String, String, u32)],
@@ -1396,4 +1448,16 @@ struct ShardWrites {
     newly_denied: Vec<EntityId>,
     /// Each edit's `(number, new entity)`.
     pairs: Vec<(u32, u32)>,
+}
+
+/// What `submission` claims in a window: the rows it writes, the items it edits or joins in
+/// place, and the unique values it sets.
+fn claims_of(submission: &IngestSubmission) -> mosaica_lifecycle::WindowClaims {
+    let planned = &submission.planned;
+    let joined = planned.slots.iter().filter_map(|slot| match slot {
+        mosaica_lifecycle::Slot::Joined { item, .. } => Some(*item),
+        _ => None,
+    });
+    let edited = planned.edits.iter().map(|e| e.edit.item());
+    mosaica_lifecycle::WindowClaims::of(&planned.rows, edited.chain(joined), planned.keys.clone())
 }

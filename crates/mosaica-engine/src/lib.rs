@@ -44,6 +44,7 @@ pub mod projection;
 pub mod records;
 mod refresh;
 pub mod region;
+mod resolver;
 pub mod row_column;
 pub mod row_members;
 pub mod select;
@@ -97,9 +98,9 @@ pub use config::{
     MIN_SELECTION_WIDTH,
 };
 pub use control::{
-    AddressTable, AddressValue, GrownMembership, NamedItems, NamedTargets, PublishedArtifacts,
+    AddressTable, AddressValue, GrownMembership, GrownMemberships, PublishedArtifacts,
 };
-pub use edited::{NamedTarget, Stamp};
+pub use resolver::{MemberNames, MemberSet, NamedList, Names, Refused, WriteScope};
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;
@@ -187,8 +188,8 @@ pub use mosaica_store::utf8;
 pub use bundle_lock::BundleLockError;
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, FoldRefusal,
-    PendingChange, PublishGeometryError, WalGauge, WriteStage,
-    DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
+    PendingChange, PublishGeometryError, VocabularyDeclared, VocabularyValues, WalGauge,
+    WriteStage, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
 };
 // The flush's own laps, beside `WriteStage`'s and read by the same status block.
 pub use flush::FlushStage;

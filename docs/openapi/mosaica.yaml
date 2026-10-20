@@ -1740,6 +1740,19 @@ paths:
         is written. A deleted item names nothing, so its values may be given to a new item. A null
         is no value.
 
+        **The writer's terms.** To a caller holding `write` and not `write-all` (`Permission`), a
+        `mosaica_id` naming an item outside its terms is `unknown_mosaica_id`, and a unique value
+        such an item holds names nothing, so a row addressing an item by it alone is
+        `names_no_item`. A row that would create an item, or set a value on the item it names, with
+        a unique value an item outside holds is refused as `value_held`: its `mosaica_id` is
+        `null`, nothing names the holder, and a strict batch's `409` names the row and the value as
+        sent. A row whose `access` labels, or a new item's view default, the terms do not satisfy
+        is refused as `label_not_held`, and the batch's other rows apply. A view `x-mosaica-view`
+        names, or a layer a column names, out of the caller's reach is answered as one not
+        declared, and a refusal listing views lists only those it reaches. A layer column's key
+        naming an artifact outside the terms names nothing: on a `closed` layer it is the unknown
+        key's `422`, and on an `open` one `422` the key held, naming no artifact.
+
         **Shards.** The server places new items in its shards itself, and no batch is refused for
         the shard size `PUT /control/shards` declares. A batch is `409` and writes nothing only
         where its new items would need a shard past the last an identifier can name, or its edits
@@ -1750,7 +1763,8 @@ paths:
         batch under the same id is another batch, written and answered on its own. The same bytes
         sent again by the same caller under the same id answer `200` with `replayed: true`, the
         first acceptance's `mosaica_ids` and `refused`, and change nothing, whatever `strict` says;
-        different bytes under an id the caller has used are `409`.
+        different bytes under an id the caller has used are `409`. How long an id is remembered is
+        `x-mosaica-batch-id`'s.
 
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
         `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
@@ -1805,9 +1819,7 @@ paths:
             Nothing was written. The detail names rows by position, values as sent and items by `mosaica_id`.
 
             - The batch id was used for a different body
-            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
-            - An item a row edits changed while the batch was checked; sending it again answers
-            - The items the batch names changed while it was checked twice; sending it again answers
+            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `mosaica_id` names no live or suppressed item; it names no item and carries no coordinates; it names an item, or sets a unique value, an earlier row does; it sets a unique value an item outside the writer's terms holds; or it sets a label the writer's terms do not satisfy
             - The batch's new items would need a point shard past the 524,288 a bundle holds, or its edits would carry a shard's high water past 4,294,967,295, where the shard's ids end; the detail gives the figures
           content:
             application/json:
@@ -1869,8 +1881,14 @@ paths:
         a change whose `mosaica_id` names no item. A refused change is listed in `refused` by
         position with its reason, and the others are applied. With `strict=true` the request is
         refused at its first refused change instead, `404` where it names no item and `409` where
-        it names two, and nothing is applied. Many changes may name one item. Every item is checked
-        before any is applied, so a request with a malformed item applies nothing. The accepted
+        it names two, and nothing is applied. A change whose item is deleted, or leaves the
+        caller's terms, after the request arrived and before it applies is listed in `refused`
+        and does not refuse a strict request. Many changes may name one item. To a caller holding
+        `write` and not `write-all`, an item outside its terms names nothing, and the change is
+        answered as one naming no item is. Deleting an artifact deletes every artifact attached to
+        it, those outside such a caller's terms included, as the dependent layer's `depends_on`
+        declares. Every item is checked before any is applied, so a request with a malformed item
+        applies nothing. The accepted
         changes are written as one record: they are durable together or not at all. A request
         carries at most 10,000 items in at most 2 MiB; over either is `422`, and `/control/status`
         publishes both under `limits.changes`.
@@ -2031,6 +2049,7 @@ paths:
     put:
       tags: ["control: attributes"]
       operationId: declareAttribute
+      x-mosaica-permission: write-all
       summary: Declare an attribute column.
       description: |
         The body is a corpus declaration's `[[attribute]]` block in JSON, without the keys that
@@ -2116,6 +2135,7 @@ paths:
     put:
       tags: ["control: shards"]
       operationId: declareShards
+      x-mosaica-permission: write-all
       summary: Declare the shard size.
       description: |
         The body is a corpus declaration's `[shards]` table in JSON. The size is the high water at
@@ -2177,6 +2197,7 @@ paths:
     put:
       tags: ["control: vocabularies"]
       operationId: declareVocabulary
+      x-mosaica-permission: write-all
       summary: Declare a vocabulary, the value set a category column draws on.
       description: |
         The body is a corpus declaration's `[[vocabulary]]` block in JSON, without the keys that
@@ -2256,6 +2277,9 @@ paths:
         keeps its code. A title sent for a held key replaces the key's title, so a client draws the
         new name while every row carrying the code keeps its meaning. A page removes nothing. A
         page that adds no key and changes no title writes nothing.
+
+        A caller holding `write` and not `write-all` is not told, of a `derived` vocabulary, which
+        keys it added.
       security:
         - controlCredential: []
       parameters:
@@ -2307,6 +2331,7 @@ paths:
     put:
       tags: ["control: view groups"]
       operationId: declareViewGroup
+      x-mosaica-permission: write-all
       summary: Declare a view group, whose views are created one key at a time.
       description: |
         The body is a corpus declaration's `[[view_group]]` block in JSON, without its roster and
@@ -2390,6 +2415,7 @@ paths:
     put:
       tags: ["control: views"]
       operationId: declarePlainView
+      x-mosaica-permission: write-all
       summary: Declare a plain view, a coordinate system that belongs to no group.
       description: |
         The body is a corpus declaration's `[[view]]` block in JSON, without its source. The view
@@ -2466,6 +2492,7 @@ paths:
     put:
       tags: ["control: views"]
       operationId: createView
+      x-mosaica-permission: write-all
       summary: Create a view of a view group.
       description: |
         The view's id is `<group>:<key>`. It starts with no rows, and takes the group's frame and
@@ -2539,6 +2566,7 @@ paths:
     delete:
       tags: ["control: views"]
       operationId: dropView
+      x-mosaica-permission: write-all
       summary: Drop a view of a view group and free its key.
       description: |
         The view leaves every roster at once, including the rosters of groups sharing its views,
@@ -2595,6 +2623,7 @@ paths:
     put:
       tags: ["control: layers"]
       operationId: registerLayer
+      x-mosaica-permission: write-all
       summary: Register an annotation layer.
       description: |
         The body is a corpus declaration's `[[layer]]` block in JSON. `views` may name a view
@@ -2668,6 +2697,7 @@ paths:
     delete:
       tags: ["control: layers"]
       operationId: dropLayer
+      x-mosaica-permission: write-all
       summary: Drop a layer.
       description: |
         The layer and its artifacts stop being served at once. Its name may be registered again, as
@@ -2715,12 +2745,25 @@ paths:
         The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
         its members by `members`, or by `excluding`, the view's items it leaves out. Each is a
         `MemberTable`: one row per member, naming it by `mosaica_id` and the values of fields
-        declared unique. A member whose values name no item, a deleted item included, or name two,
-        is refused: it is left out and listed in `refused` with its reason, and the rest are
+        declared unique. Members are resolved where the publication applies, so a member names the
+        item it names then, however edits and compactions have moved it since the request
+        arrived. A member whose values name no item, a deleted item included, or name two, is
+        refused: it is left out and listed in `refused` with its reason, and the rest are
         published. With `strict=true` the request is refused at its first refused member instead,
         `404` where it names no item and `409` where it names two. A content's `generated_from`
         is refused whole at any refused member, strict or not, since a viewer must see the whole
-        set to be served the content.
+        set to be served the content. A caller holding `write` and not `write-all` names only the
+        items its terms reach: a member outside them names nothing, as an absent one does, and
+        `excluding` leaves out of the view's items those outside its terms as well.
+
+        **The writer's terms, for layers and artifacts.** To a caller holding `write` and not
+        `write-all`, a layer whose `visibility` its terms do not satisfy is one not registered, and
+        an artifact is outside its terms unless `POST /v1/artifacts` would serve it to a session
+        holding them, suppression aside. A parent or an attachment target outside is answered as
+        one no artifact is. A key an artifact outside holds is `409`; nothing else of the holder is
+        said. An artifact whose `access` labels the terms do not satisfy is refused alone: it is
+        listed in `refused` as `{artifact, reason: label_not_held}`, its `mosaica_id` is `null`,
+        and the others are published; with `strict=true` the request is `409` instead.
 
         An artifact whose `key` the level already holds is not created again: its members are
         added to the held membership, and a part it lacks (its parents, attachment, contents,
@@ -2779,7 +2822,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a member of a content's generating set, or with `strict=true` any member, names two items; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; a key is held by an artifact outside the caller's terms; a member of a content's generating set, or with `strict=true` any member, names two items, or an artifact sets an access label the caller's terms do not satisfy; or the artifacts the batch creates need more ids than the level's layer space has left, which the detail gives. Nothing was written.
           content:
             application/json:
               schema:
@@ -2794,11 +2837,10 @@ paths:
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved
-            - An unknown layer or level, or a layer whose membership is an attribute
+            - An unknown layer or level, a layer the caller does not reach included, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
             - Labels the layer does not take, or none where it requires them
-            - A parent or attachment that does not exist, or was deleted
+            - A parent or attachment that does not exist, was deleted, or is outside the caller's terms
           content:
             application/json:
               schema:
@@ -2827,9 +2869,12 @@ paths:
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
-        is `404` or `409` at the first instead. On a row with a `rank`, a member joining the
-        generating set and naming no item, or two, refuses the request, strict or not, as a publication's
-        `generated_from` does.
+        is `404` or `409` at the first instead. To a caller without `write-all`, as on a
+        publication, a member outside its terms names nothing, a key naming an artifact outside
+        them is the unknown key's `422`, and a row filling an access label its terms do not satisfy
+        is refused alone. On a row with a `rank`, a member joining the generating set and naming no
+        item, or two, refuses the request, strict or not, as a publication's `generated_from`
+        does.
 
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
@@ -2883,7 +2928,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An artifact holds a part with a different value, or with `strict=true` a member names two items. Nothing was written.
+          description: An artifact holds a part with a different value, or with `strict=true` a member names two items or a row fills an access label the caller's terms do not satisfy. Nothing was written.
           content:
             application/json:
               schema:
@@ -2894,13 +2939,12 @@ paths:
             - An unknown field, column or metadata key
             - No artifacts
             - More members than the cap
-            - An unknown layer, level or key, a deleted artifact's key included
+            - An unknown layer, level or key, a deleted artifact's key, a layer the caller does not reach and an artifact outside its terms included
             - A layer whose membership is not `enumerated`
             - `leaving` without a `rank`, or a `rank` naming no content, a withdrawn one included
             - `view` missing on a layer scoped to a group or present on another
             - A member table whose columns differ in length, or tables left with no identifying column
             - A `mosaica_id` that is not a decimal string, or a value that is not one of its field's
-            - A member deleted after it was resolved
             - A shape the layer does not take
             - A content without a generating set on a layer whose content requires every member visible
           content:
@@ -3756,7 +3800,7 @@ components:
     controlCredential:
       type: http
       scheme: bearer
-      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. Not built yet: masking a write by the writer's own terms. A principal with `write` writes against the whole corpus: it can upsert an item it cannot see, by its unique value, and change its label, so granting `write` grants what `read-all` grants wherever a view has a unique field."
+      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; a declaration and a drop, the operations marked `x-mosaica-permission: write-all`, need `write-all` beside it; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. What a `write` caller may name is bounded by its terms (`Permission`)."
     sessionToken:
       type: http
       scheme: bearer
@@ -3840,7 +3884,7 @@ components:
       name: x-mosaica-batch-id
       in: header
       required: true
-      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. Missing, or not UTF-8, is `422`.
+      description: The batch's identity among the caller's batches, chosen by the caller, for retries. Another principal's batch under the same id is another batch. The same body sent again by the same caller under the same id is answered as it was and changes nothing; a different body under an id the caller has used is `409`. The id is remembered while the log holds the batch's record, and past that for `ingest.flush_max_age_secs` from its acceptance, or from the restart that read its record, or until `ingest.flush_max_items` rows of later batches are accepted, whichever ends first; a retry after that is a new batch. Missing, or not UTF-8, is `422`.
       schema:
         type: string
     WriteView:
@@ -4125,6 +4169,7 @@ components:
     Permission:
       type: string
       enum: [read, write, authorise-as, admin, read-all, write-all]
+      description: "`write` writes, flushes and compacts, naming only the items, layers, views and artifacts a session holding the principal's terms would be served, suppressed items included; anything else answers as absent. `write-all` lifts that bound, so its writes name every one, and declares and drops."
 
     CatalogueChange:
       type: object
@@ -6188,8 +6233,8 @@ components:
     RefusedMember:
       type: object
       additionalProperties: false
-      required: [artifact, list, row, reason]
-      description: A member the identity rule refused, which the artifact was published or grown without.
+      required: [artifact, reason]
+      description: A member the identity rule refused, which the artifact was published or grown without; or, with no `list` and `row`, an artifact refused whole as `label_not_held`, which wrote nothing.
       properties:
         artifact:
           type: integer
@@ -6207,8 +6252,8 @@ components:
 
     RefusalReason:
       type: string
-      enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item (an artifact's or a layer's names none), or on `/control/changes` no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_mosaica_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
+      enum: [names_two_items, unknown_mosaica_id, names_no_item, one_item_twice, one_value_twice, value_held, label_not_held]
+      description: "`names_two_items`: the row's values name more than one item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item (an artifact's or a layer's names none), or on `/control/changes` no live or suppressed item, artifact or layer. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. `value_held`: an ingest row would create an item, or set a value on the item it names, with a unique value an item outside the writer's terms holds; nothing more is said of the holder. `label_not_held`: an ingest row sets an access label, or a new item takes its view's default, or an artifact sets an access label, that the writer's terms do not satisfy. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `label_not_held` and `unknown_mosaica_id` first, then `names_two_items` and `value_held`, then `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object
@@ -6420,22 +6465,22 @@ components:
     VocabularyValuesAdded:
       type: object
       additionalProperties: false
-      required: [name, added, existing, titles, publication]
+      required: [name, publication]
       properties:
         name:
           type: string
         added:
           type: integer
           minimum: 0
-          description: Keys the page added.
+          description: Keys the page added. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         existing:
           type: integer
           minimum: 0
-          description: Keys the page named that the vocabulary already held.
+          description: Keys the page named that the vocabulary already held. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         titles:
           type: integer
           minimum: 0
-          description: Held keys whose title the page changed.
+          description: Held keys whose title the page changed. Absent for a caller holding `write` and not `write-all` on a `derived` vocabulary.
         publication:
           type: integer
           minimum: 0
@@ -6962,9 +7007,9 @@ components:
               key:
                 type: [string, "null"]
               mosaica_id:
-                type: string
+                type: [string, "null"]
                 pattern: "^[0-9]+$"
-                description: The artifact's identifier, the held artifact's own where the key was held.
+                description: The artifact's identifier, the held artifact's own where the key was held; `null` for an artifact refused as `label_not_held`.
         created:
           type: integer
           minimum: 0
@@ -6983,7 +7028,7 @@ components:
           description: Memberships added, to created and held artifacts alike.
         refused:
           type: array
-          description: The members the identity rule refused, which the artifacts were published without. Empty with `strict=true`.
+          description: The members the identity rule refused, which the artifacts were published without, and the artifacts refused as `label_not_held`. Empty with `strict=true`.
           items:
             $ref: "#/components/schemas/RefusedMember"
         ignored_columns:
@@ -7005,7 +7050,7 @@ components:
       type: object
       additionalProperties: false
       required: [key, views]
-      description: What fitting one shape to each of its layer's views did.
+      description: What fitting one shape to each of its layer's views did. A shape is fitted to every view, and reported on those a session holding the caller's terms is served, every one for a caller holding `write-all`.
       properties:
         key:
           type: [string, "null"]
@@ -7168,8 +7213,9 @@ components:
               key:
                 type: string
               mosaica_id:
-                type: string
+                type: [string, "null"]
                 pattern: "^[0-9]+$"
+                description: "`null` for a row refused as `label_not_held`, whose counts are 0."
               joined:
                 type: integer
                 minimum: 0
@@ -7188,7 +7234,7 @@ components:
                 description: Present where this row emptied the generating set at its rank, and that rank. The content is withdrawn, and its rank is never taken again; a content supplied in its place takes the next free rank.
         refused:
           type: array
-          description: The members the identity rule refused, which the artifacts were grown without. Empty with `strict=true`.
+          description: The members the identity rule refused, which the artifacts were grown without, and the rows refused as `label_not_held`. Empty with `strict=true`.
           items:
             $ref: "#/components/schemas/RefusedMember"
         ignored_columns:

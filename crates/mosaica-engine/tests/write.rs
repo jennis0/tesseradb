@@ -1686,14 +1686,14 @@ fn a_duplicate_unique_value_across_one_window_makes_one_item() {
     assert_eq!(ids[0], ids[1], "both name one item");
     assert_eq!(item_of_key(&engine, "same-key"), Some(ids[0][0]));
 
-    // The retry was answered stale and, resolved again, changed nothing, which is sent to record
-    // its batch id. A job answered stale still occupied a queue slot, so it is counted completed.
-    // Otherwise `work_depth`, the operand of every ingest 429's `retry_after_s`, drifts upward
-    // and never comes back down.
+    // The retry was resolved again on the executor and changed nothing, which records its batch
+    // id, in the one job it was submitted as. Every job taken off the queue is counted completed;
+    // otherwise `work_depth`, the operand of every ingest 429's `retry_after_s`, drifts upward and
+    // never comes back down.
     let stats = engine.write_executor_stats();
     assert_eq!(
         (stats.work_submitted, stats.work_completed),
-        (4, 4),
+        (3, 3),
         "every job taken off the work queue must be counted completed: {stats:?}"
     );
     assert_eq!(stats.work_depth, 0);

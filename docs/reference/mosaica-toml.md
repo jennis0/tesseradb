@@ -114,8 +114,8 @@ Writes through the control plane: the limits on each request, and when buffered 
 | `ingest_max_batch_rows` | integer | `10000` | The most rows one `/control/ingest` request may carry. A request with more is refused with 422. |
 | `ingest_max_batch_bytes` | integer | `16777216` (16 MiB) | The largest body `/control/ingest` accepts, in bytes. A larger one is refused with 422. |
 | `commit_window_max_items` | integer | `10000` | Rows at which a commit window closes. Items allocated ids in one window are grouped by the access terms they carry, so a wider window stores the access index more compactly. `0` is read as 1. |
-| `flush_max_age_secs` | integer | `90` | Seconds between flushes, which publish buffered writes as a new segment and make them visible. |
-| `flush_max_items` | integer | `40000` | Buffered rows at which a flush runs before `flush_max_age_secs` has passed. |
+| `flush_max_age_secs` | integer | `90` | Seconds between flushes, which publish buffered writes as a new segment and make them visible. Also how long after its acceptance, or after the restart that read its record, an ingest batch id is answered as a replay once the log no longer holds the record, unless `flush_max_items` ends it first. |
+| `flush_max_items` | integer | `40000` | Buffered rows at which a flush runs before `flush_max_age_secs` has passed. Also how many rows of later batches end an ingest batch id's replays once the log no longer holds its record. |
 | `publish_max_body_bytes` | integer | `67108864` (64 MiB) | The largest body `PUT` and `PATCH /control/layers/{name}/artifacts` accept, in bytes. A larger one is refused with 422. |
 | `max_artifacts_per_request` | integer | `10000` | The most artifacts one `PUT /control/layers/{name}/artifacts` may publish. More is refused with 422. |
 | `max_members_per_request` | integer | `5000000` | The most members one `PATCH /control/layers/{name}/artifacts` may add and remove, counted together. More is refused with 422. |

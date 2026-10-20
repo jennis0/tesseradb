@@ -75,15 +75,25 @@ export type RowAnswer = Answer<IngestResponse> & {
 };
 
 /**
- * Why the identity rule refused a row. `names_two_items`: the row's values name more than one
- * item. `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`:
- * its values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
+ * Why a row was refused. `names_two_items`: the row's values name more than one item.
+ * `unknown_mosaica_id`: its `mosaica_id` names no live or suppressed item. `names_no_item`: its
+ * values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
  * batch names the same item. `one_value_twice`: an earlier row of the batch sets the same unique
- * value. The last two are given by `ingest` only.
+ * value. `value_held`: the row would create an item, or set a value on the item it names, with a
+ * unique value an item outside the writer's terms holds. `label_not_held`: the row, or an artifact
+ * of `publish` or `grow`, sets an access label the writer's terms do not satisfy. `one_item_twice`,
+ * `one_value_twice` and `value_held` are given by `ingest` only.
  *
  * @category Control plane
  */
-export type RefusalReason = 'names_two_items' | 'unknown_mosaica_id' | 'names_no_item' | 'one_item_twice' | 'one_value_twice';
+export type RefusalReason =
+  | 'names_two_items'
+  | 'unknown_mosaica_id'
+  | 'names_no_item'
+  | 'one_item_twice'
+  | 'one_value_twice'
+  | 'value_held'
+  | 'label_not_held';
 
 /**
  * A row the identity rule refused.
@@ -98,7 +108,8 @@ export type RefusedRow = {
 };
 
 /**
- * A member the identity rule refused, which the artifact was published or grown without.
+ * A member the identity rule refused, which the artifact was published or grown without; or, with
+ * no `list` and `row`, an artifact refused whole as `label_not_held`, which wrote nothing.
  *
  * @category Control plane
  */
@@ -106,9 +117,9 @@ export type RefusedMember = {
   /** The artifact's position in the request, from 0. */
   artifact: number;
   /** The member table the member was in. */
-  list: 'members' | 'excluding' | 'leaving';
+  list?: 'members' | 'excluding' | 'leaving';
   /** The member's row in that table, from 0. */
-  row: number;
+  row?: number;
   /** Why it was refused. */
   reason: RefusalReason;
 };
@@ -369,8 +380,8 @@ export type ShapeReport = {
  * @category Control plane
  */
 export type ArtifactsPublished = PublicationAck & {
-  /** One per artifact in the order sent, with the held artifact's own `mosaica_id` where the key was held. */
-  artifacts: {key: string | null; mosaica_id: string}[];
+  /** One per artifact in the order sent, with the held artifact's own `mosaica_id` where the key was held, and `null` for one refused as `label_not_held`. */
+  artifacts: {key: string | null; mosaica_id: string | null}[];
   /** Artifacts the request created. */
   created: number;
   /** Of those, the ones with no content on a layer that declares some. */
@@ -379,7 +390,7 @@ export type ArtifactsPublished = PublicationAck & {
   filled: number;
   /** Memberships added, to created and held artifacts alike. */
   joined: number;
-  /** The members the identity rule refused, which the artifacts were published without. Empty with `strict`. */
+  /** The members the identity rule refused, which the artifacts were published without, and the artifacts refused as `label_not_held`. Empty with `strict`. */
   refused: RefusedMember[];
   /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
@@ -393,9 +404,9 @@ export type ArtifactsPublished = PublicationAck & {
  * @category Control plane
  */
 export type MembershipsGrown = PublicationAck & {
-  /** One per artifact in the order sent. `withdrawn` is the rank of the content the row withdrew by emptying its generating set. */
-  artifacts: {key: string; mosaica_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
-  /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
+  /** One per artifact in the order sent. `withdrawn` is the rank of the content the row withdrew by emptying its generating set. `mosaica_id` is `null`, and every count 0, for a row refused as `label_not_held`. */
+  artifacts: {key: string; mosaica_id: string | null; joined: number; filled: number; left: number; withdrawn?: number}[];
+  /** The members the identity rule refused, which the artifacts were grown without, and the rows refused as `label_not_held`. Empty with `strict`. */
   refused: RefusedMember[];
   /** The member tables' columns that are neither `mosaica_id` nor a unique field, which named nothing and were ignored. */
   ignored_columns: string[];
@@ -603,8 +614,9 @@ export type ControlOptions = {
   controlUrl: string;
   /**
    * The credential sent as the bearer token on every request: the operator credential, an API key
-   * or an OIDC access token. Writes, flush and compaction need `write`; status and the catalogue's
-   * verbs need `admin`.
+   * or an OIDC access token. Writes, flush and compaction need `write`; declarations and drops need
+   * `write-all` beside it; status and the catalogue's verbs need `admin`. A writer without
+   * `write-all` writes only within its terms.
    */
   credential: string;
   /** Used for every request in place of the global `fetch`. */
@@ -912,7 +924,8 @@ export class Control {
   /**
    * `PATCH /control/vocabularies/{name}/values`: adds one page of `{key, title?}` values to a
    * vocabulary. No value is removed, and a title given for a held key replaces its title. An
-   * unknown vocabulary is refused with `404`.
+   * unknown vocabulary is refused with `404`. A writer without `write-all` is not told, of a
+   * `derived` vocabulary, `added`, `existing` and `titles`.
    */
   vocabularyValues(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PATCH', withQuery(`/control/vocabularies/${segment(name)}/values`, waiting(options)), body, options);

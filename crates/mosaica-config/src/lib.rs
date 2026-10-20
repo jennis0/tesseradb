@@ -520,11 +520,15 @@ struct RawIngest {
     /// Default: `10000`.
     commit_window_max_items: Option<usize>,
     /// Seconds between flushes, which publish buffered writes as a new segment and make them
-    /// visible.
+    /// visible. Also how long after its acceptance, or after the restart that read its record, an
+    /// ingest batch id is answered as a replay once the log no longer holds the record, unless
+    /// `flush_max_items` ends it first.
     ///
     /// Default: `90`.
     flush_max_age_secs: Option<u64>,
-    /// Buffered rows at which a flush runs before `flush_max_age_secs` has passed.
+    /// Buffered rows at which a flush runs before `flush_max_age_secs` has passed. Also how many
+    /// rows of later batches end an ingest batch id's replays once the log no longer holds its
+    /// record.
     ///
     /// Default: `40000`.
     flush_max_items: Option<usize>,

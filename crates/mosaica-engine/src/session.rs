@@ -242,17 +242,33 @@ impl Session {
         let Some(held) = &self.held else {
             return false;
         };
-        let labels = generation.dict.labels();
         (self.dict_len_at_authorise..generation.dict.len())
             .map(TermId::new)
-            .any(|key| match labels.is_conjunction_key(key) {
-                true => labels.satisfied(key, &|term| self.holds(term)),
-                false => generation
-                    .dict
-                    .descriptor(key)
-                    .is_some_and(|term| held.credentials.contains(term)),
-            })
+            .any(|key| key_satisfied(&generation.dict, key, &held.credentials))
     }
+}
+
+/// Whether a credential holding `credentials` satisfies the index key `key` of `dict`: a term it
+/// holds, or a conjunction its terms satisfy.
+pub(crate) fn key_satisfied(
+    dict: &mosaica_authz::Dict,
+    key: TermId,
+    credentials: &FxHashSet<Vec<u8>>,
+) -> bool {
+    let labels = dict.labels();
+    match labels.is_conjunction_key(key) {
+        true => labels.satisfied(key, &|term| credentials.contains(term.as_bytes())),
+        false => dict
+            .descriptor(key)
+            .is_some_and(|term| credentials.contains(term)),
+    }
+}
+
+/// The grant of the index keys `satisfied`: their postings' union.
+pub(crate) fn grant_of(satisfied: &FxHashSet<TermId>) -> Grant {
+    let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
+    sorted.sort_unstable();
+    Grant::Keys(Arc::new(sorted))
 }
 
 /// The authorisation data [`Engine::authorise_all`] hashes into its sessions' cursors. A
@@ -272,57 +288,85 @@ impl Engine {
         // describe one generation: a dictionary a later flush published could otherwise be
         // recorded as seen while `satisfied` was resolved against the one before it.
         let generation = self.generation.load();
-
-        let mut credentials: FxHashSet<Vec<u8>> =
-            auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
-        credentials.insert(mosaica_authz::PUBLIC_LABEL.to_vec());
-        let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
-        let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
-        let labels = generation.dict.labels();
-        for term in &auth_terms {
-            // A held term never names a conjunction's key, which starts with a control character
-            // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
-            // credential presents. An unknown term is unsatisfied, never an error.
-            if let Some(id) = generation.dict.lookup(term.as_bytes()) {
-                if !labels.is_conjunction_key(id) {
-                    satisfied.insert(id);
-                    descriptors.insert(id, term.as_bytes().to_vec());
-                }
-            }
-        }
-        let mut keys = Vec::new();
-        labels.authorise(auth_terms.iter().map(String::as_str), &mut keys);
-        satisfied.extend(keys);
-
-        // Every session holds `public`, and this is the only place it is added: not by a
-        // credential and not by a grant. Looked up by descriptor, because in a bundle whose
-        // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
-        // everyone.
-        if let Some(term) = generation.dict.lookup(mosaica_authz::PUBLIC_LABEL) {
-            debug_assert_eq!(
-                term,
-                mosaica_authz::PUBLIC_TERM,
-                "`public` is reserved at term 0 by every build"
-            );
-            satisfied.insert(term);
-            descriptors.insert(term, mosaica_authz::PUBLIC_LABEL.to_vec());
-        }
-
-        let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
-        sorted.sort_unstable();
-        let held = HeldTerms {
-            descriptors,
-            credentials,
-        };
+        let (satisfied, held) = satisfied_by(&generation, &auth_terms);
+        let grant = grant_of(&satisfied);
         self.mint(
             &generation,
             auth_data,
             Satisfied::Keys(satisfied),
-            Grant::Keys(Arc::new(sorted)),
+            grant,
             Some(held),
         )
     }
 
+    /// The scope of a writer holding `terms` ([`crate::resolver::WriteScope`]), built once per set
+    /// of terms and again where a key promoted since is one they satisfy.
+    pub fn write_scope<'t>(
+        &self,
+        terms: impl IntoIterator<Item = &'t str>,
+    ) -> crate::resolver::WriteScope {
+        let mut held: Vec<String> = terms
+            .into_iter()
+            .filter_map(mosaica_access::held_term)
+            .map(str::to_owned)
+            .collect();
+        held.sort_unstable();
+        held.dedup();
+        let generation = self.generation.load();
+        self.write_scopes.get_or_build(&held, &generation, || {
+            let (keys, terms) = satisfied_by(&generation, &held);
+            crate::resolver::TermsScope::new(&keys, terms.credentials, generation.dict.len())
+        })
+    }
+}
+
+/// The index keys `auth_terms` satisfy in `generation`, and the terms they hold: each term the
+/// dictionary carries, `public`, and the key of each conjunction the terms satisfy.
+fn satisfied_by(generation: &Generation, auth_terms: &[String]) -> (FxHashSet<TermId>, HeldTerms) {
+    let mut credentials: FxHashSet<Vec<u8>> =
+        auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
+    credentials.insert(mosaica_authz::PUBLIC_LABEL.to_vec());
+    let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
+    let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
+    let labels = generation.dict.labels();
+    for term in auth_terms {
+        // A held term never names a conjunction's key, which starts with a control character
+        // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
+        // credential presents. An unknown term is unsatisfied, never an error.
+        if let Some(id) = generation.dict.lookup(term.as_bytes()) {
+            if !labels.is_conjunction_key(id) {
+                satisfied.insert(id);
+                descriptors.insert(id, term.as_bytes().to_vec());
+            }
+        }
+    }
+    let mut keys = Vec::new();
+    labels.authorise(auth_terms.iter().map(String::as_str), &mut keys);
+    satisfied.extend(keys);
+
+    // Every session holds `public`, and this is the only place it is added: not by a
+    // credential and not by a grant. Looked up by descriptor, because in a bundle whose
+    // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
+    // everyone.
+    if let Some(term) = generation.dict.lookup(mosaica_authz::PUBLIC_LABEL) {
+        debug_assert_eq!(
+            term,
+            mosaica_authz::PUBLIC_TERM,
+            "`public` is reserved at term 0 by every build"
+        );
+        satisfied.insert(term);
+        descriptors.insert(term, mosaica_authz::PUBLIC_LABEL.to_vec());
+    }
+    (
+        satisfied,
+        HeldTerms {
+            descriptors,
+            credentials,
+        },
+    )
+}
+
+impl Engine {
     /// Authorise a session that satisfies every index key, whenever it was promoted, and so every
     /// view's, layer's and artifact's label. Its fragment is the union of every posting at the
     /// watermark it is built for, under one cache entry that every such session shares, and the
@@ -459,13 +503,8 @@ impl Engine {
         session: &'s Session,
         declaration: &mosaica_types::layer::LayerDeclaration,
     ) -> crate::artifacts::LabelGate<'s> {
-        use mosaica_types::layer::MemberDefault;
-        // A layer naming no field has no artifact labels, and its default says nothing.
-        let unlabelled = !declaration.artifact_visibility.carries_own_labels()
-            || match &declaration.artifact_visibility.default {
-                MemberDefault::Inherited => true,
-                MemberDefault::Label(label) => session.admits(&[label]),
-            };
+        let unlabelled =
+            crate::artifacts::unlabelled_admitted(declaration, |label| session.admits(&[label]));
         match &session.held {
             Some(held) => crate::artifacts::LabelGate::new(&held.credentials, unlabelled),
             None => crate::artifacts::LabelGate::every_term(unlabelled),
@@ -489,7 +528,7 @@ impl Engine {
     }
 }
 
-fn fragment_error(e: FragmentCacheError) -> EngineError {
+pub(crate) fn fragment_error(e: FragmentCacheError) -> EngineError {
     match e {
         FragmentCacheError::Building => EngineError::FragmentBuilding,
         FragmentCacheError::Cancelled => EngineError::Cancelled,

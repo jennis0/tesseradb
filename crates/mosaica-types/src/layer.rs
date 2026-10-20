@@ -1376,6 +1376,12 @@ impl std::fmt::Display for DeclarationError {
 impl std::error::Error for DeclarationError {}
 
 impl LayerDeclaration {
+    /// Whether a reader may know this layer exists: where its `visibility` is one `admits` says
+    /// the reader satisfies, `None` being `public`.
+    pub fn reached_by(&self, admits: impl Fn(&str) -> bool) -> bool {
+        self.visibility.as_deref().is_none_or(admits)
+    }
+
     /// Whether this layer's artifacts are drawn on `view`, a view id. Every route serving an
     /// artifact asks this, and so does the publication of an artifact attached to another.
     pub fn draws_on(&self, view: &str) -> bool {

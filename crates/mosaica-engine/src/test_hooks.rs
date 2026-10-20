@@ -670,6 +670,29 @@ impl Engine {
             .store(true, Ordering::SeqCst);
     }
 
+    /// [`Engine::names`] against `generation` rather than the live one, for a writer holding
+    /// `write-all`, as a reader that took a generation before later publications answers.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn names_under_for_test(
+        &self,
+        generation: &crate::Generation,
+        table: crate::AddressTable,
+    ) -> Result<crate::Names> {
+        let scope = crate::WriteScope::All;
+        crate::Names::resolve(&self.resolver(generation, &scope), table, false)
+    }
+
+    /// Answer every writer's grant's fragments as built by another request past the wait budget,
+    /// while `building`.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_fragments_building_for_test(&self, building: bool) {
+        self.switches
+            .fragments_building
+            .store(building, Ordering::SeqCst);
+    }
+
     /// Lower the number of terms a flush may carry the dictionary to, so a small fixture reaches
     /// the bound promotion enforces.
     #[cfg(feature = "fault-injection")]
@@ -741,18 +764,6 @@ impl Engine {
     #[doc(hidden)]
     pub fn unique_round_is_holding_for_test(&self) -> bool {
         self.switches.unique_round_holding.load(Ordering::SeqCst)
-    }
-
-    /// [`Engine::name_items`] against `generation` rather than the live one, as a reader that
-    /// took a generation before later publications answers.
-    #[cfg(feature = "fault-injection")]
-    #[doc(hidden)]
-    pub fn name_items_under_for_test(
-        &self,
-        generation: &crate::Generation,
-        table: &crate::AddressTable,
-    ) -> Result<crate::NamedItems> {
-        crate::control::name_items_in(self, generation, table)
     }
 }
 

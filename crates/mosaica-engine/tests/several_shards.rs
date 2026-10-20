@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use mosaica_engine::{AcceptError, Engine, ExecutorPosture, RecordsOrder, ViewportRequest};
-use mosaica_lifecycle::resolve::Refusal;
+use mosaica_lifecycle::resolve::Reason;
 use mosaica_lifecycle::wal::ChangeOp;
 use mosaica_lifecycle::{DeclaredValue, IncomingArtifact, IncomingGrowth, VocabularyRequest};
 use mosaica_store::manifest::EntitySet;
@@ -208,6 +208,7 @@ fn writes(engine: &Engine) -> Vec<(&'static str, Result<(), AcceptError>)> {
                         key: "k".into(),
                         title: None,
                     }],
+                    &mosaica_engine::WriteScope::All,
                 )
                 .map(drop),
         ),
@@ -367,11 +368,12 @@ fn each_item_is_named_in_its_own_shard() {
     let read = read_items(&engine, &session, &Items::new(RecordsOrder::Stored)).rows_with_ids;
     assert_eq!(read.len(), TWO_SHARD_N as usize);
 
-    let named = engine.name_items(&by_identifier_and_id(&read)).unwrap();
-    let items: Vec<ItemAt> = named
-        .verdicts
-        .iter()
-        .map(|verdict| verdict.clone().expect("each row names its item"))
+    let items: Vec<ItemAt> = verdicts(&engine, by_identifier_and_id(&read), false)
+        .into_iter()
+        .map(|verdict| match verdict {
+            Ok(Target::Item(shard, entity)) => ItemAt::new(shard, entity),
+            other => panic!("each row names its item: {other:?}"),
+        })
         .collect();
     let distinct: std::collections::BTreeSet<ItemAt> = items.iter().copied().collect();
     assert_eq!(distinct.len(), TWO_SHARD_N as usize, "no two items are one");
@@ -410,14 +412,12 @@ fn each_item_is_named_in_its_own_shard() {
         read[at]
     };
     let (in_zero, in_one) = (by_id(0), by_id(1));
-    let crossed = engine
-        .name_items(&by_identifier_and_id(&[(in_one.0, in_zero.1)]))
-        .unwrap();
-    assert!(
-        matches!(&crossed.verdicts[0], Err(Refusal::NamesTwo { .. })),
-        "{:?}",
-        crossed.verdicts
+    let crossed = verdicts(
+        &engine,
+        by_identifier_and_id(&[(in_one.0, in_zero.1)]),
+        false,
     );
+    assert_eq!(crossed, vec![Err(Reason::NamesTwo)]);
 }
 
 /// An insert into a bundle built as two shards lands in the open one, shard 1, at its high
@@ -431,12 +431,12 @@ fn an_insert_lands_in_the_open_shard_and_replays_there() {
     let landed = ItemAt::new(shard(1), EntityId::new(TWO_SHARD_N - TWO_SHARD_SIZE));
     let named = |engine: &Engine| {
         let table = by_identifier_and_id(&[(inserted.raw(), key_id("new-0"))]);
-        let verdicts = engine.name_items(&table).unwrap().verdicts;
-        (engine.resolve_targets(&[inserted]).unwrap(), verdicts)
+        let named = verdicts(engine, table, false);
+        (engine.resolve_targets(&[inserted]).unwrap(), named)
     };
     assert_eq!(
         named(&engine),
-        (vec![Some(landed.target())], vec![Ok(landed)])
+        (vec![Some(landed.target())], vec![Ok(landed.target())])
     );
     assert_eq!(engine.allocator_high_water(), TWO_SHARD_N + 1);
     drop(engine);
@@ -444,7 +444,7 @@ fn an_insert_lands_in_the_open_shard_and_replays_there() {
     let engine = several.open_writing();
     assert_eq!(
         named(&engine),
-        (vec![Some(landed.target())], vec![Ok(landed)]),
+        (vec![Some(landed.target())], vec![Ok(landed.target())]),
         "the log replays the row into shard 1"
     );
     assert_eq!(engine.allocator_high_water(), TWO_SHARD_N + 1);
@@ -784,8 +784,8 @@ fn an_identifier_at_another_tenancy_names_nothing_in_its_shard() {
         columns: Vec::new(),
     };
     assert_eq!(
-        engine.name_targets(&table).unwrap().verdicts,
-        vec![Err(Refusal::UnknownMosaicaId { row: 0 })]
+        verdicts(&engine, table, true),
+        vec![Err(Reason::UnknownMosaicaId)]
     );
 }
 
@@ -797,9 +797,11 @@ fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
     let engine = several.open_writing();
     let moved = insert_keyed(&engine, "moved", &[true])[0];
     let table = by_identifier_and_id(&[(moved.raw(), key_id("moved-0"))]);
-    let named = engine.name_targets(&table).unwrap();
-    let resolved = named.verdicts[0].clone().expect("the row names the item");
-    assert!(matches!(resolved.target(), Target::Item(at, _) if at == shard(1)));
+    let named = engine
+        .names(table, &mosaica_engine::WriteScope::All, true)
+        .unwrap();
+    let resolved = named.verdict(0).expect("the row names the item");
+    assert!(matches!(resolved, Target::Item(at, _) if at == shard(1)));
 
     let receipt = engine
         .ingest(mosaica_engine::IngestRequest {
@@ -827,12 +829,12 @@ fn a_deletion_resolved_before_an_edit_follows_the_item_in_its_shard() {
     );
     assert_ne!(
         engine.resolve_targets(&[moved]).unwrap(),
-        vec![Some(resolved.target())],
+        vec![Some(resolved)],
         "the edit moved the item"
     );
 
     engine
-        .accept_changes_at(vec![(resolved, ChangeOp::Delete)], named.at)
+        .accept_changes_named(named, vec![ChangeOp::Delete], false)
         .unwrap();
     let gone = |engine: &Engine| {
         assert_eq!(engine.resolve_targets(&[moved]).unwrap(), vec![None]);

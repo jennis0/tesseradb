@@ -174,7 +174,7 @@ fn provider_json(p: ProviderInfo) -> Value {
 
 fn session_json(e: &SessionEntry) -> Value {
     let (principal, provider, subject) = match &e.principal {
-        Principal::Local(name) => (Some(name.as_str()), None, None),
+        Principal::Local { name, .. } => (Some(name.as_str()), None, None),
         Principal::Oidc {
             provider, subject, ..
         } => (None, Some(provider.as_str()), Some(subject.as_str())),
@@ -585,7 +585,7 @@ fn selects(principal: &Option<String>, provider: &Option<String>, e: &SessionEnt
     let o = provider.as_deref().map(str::trim);
     match (&e.principal, p, o) {
         (_, None, None) => true,
-        (Principal::Local(name), Some(want), None) => name == want,
+        (Principal::Local { name, .. }, Some(want), None) => name == want,
         (Principal::Oidc { provider, .. }, None, Some(want)) => provider == want,
         _ => false,
     }

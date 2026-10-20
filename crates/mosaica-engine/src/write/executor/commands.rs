@@ -109,7 +109,14 @@ pub(super) fn growth_receipt(
         .enumerate()
         .map(|(index, (join, filled))| {
             let ordinal = registry
-                .resolve_growth_key(layer, level, join.view.as_deref(), &join.key, store)
+                .resolve_growth_key(
+                    layer,
+                    level,
+                    join.view.as_deref(),
+                    &join.key,
+                    store,
+                    &mosaica_lifecycle::Everything,
+                )
                 .expect("prepare_grow resolved every key before the receipt was read");
             let record = store
                 .get(layer, level, ordinal)
@@ -187,7 +194,8 @@ pub(super) fn refusal_of(e: mosaica_lifecycle::RegistryError) -> ExecError {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
         // complement it asks for is a different set from the one the artifact holds.
         mosaica_lifecycle::RegistryError::PartConflict { .. }
-        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
+        | mosaica_lifecycle::RegistryError::ExclusionOnHeldKey { .. }
+        | mosaica_lifecycle::RegistryError::KeyHeld { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         mosaica_lifecycle::RegistryError::SpacesExhausted
@@ -217,77 +225,11 @@ pub(crate) struct PublishedBatch {
     pub(crate) without_content: u64,
     pub(crate) filled: u64,
     pub(crate) joined: u64,
-}
-
-/// How many members of `sets` their own shards of `generation` have deleted.
-fn deleted_members(generation: &Generation, sets: &mosaica_lifecycle::ShardSets) -> u64 {
-    sets.iter()
-        .filter_map(|(id, set)| {
-            let shard = generation.shard(id)?;
-            Some(set.and_cardinality(shard.overlay.deleted_set()))
-        })
-        .sum()
-}
-
-/// The refusal of a publication naming a deleted member or content source, where it names one.
-/// A suppressed one is accepted, being a live member temporarily outside every mask. The detail is
-/// the caller's 422 body, so it gives a count and an artifact's position, never an entity id.
-fn deleted_in_publication(
-    generation: &Generation,
-    artifacts: &[IncomingArtifact],
-) -> Option<ExecError> {
-    let (count, first_artifact) =
-        first_deleted(artifacts.iter().enumerate().map(|(index, artifact)| {
-            let in_contents: u64 = artifact
-                .contents
-                .iter()
-                .map(|content| deleted_members(generation, &content.generated_from))
-                .sum();
-            (
-                index,
-                deleted_members(generation, &artifact.members) + in_contents,
-            )
-        }))?;
-    Some(ExecError::LayerRefused {
-        detail: format!(
-            "{count} member(s) or content source(s) of this batch are deleted, the first in \
-             artifact {first_artifact}; remove the deleted members and send the batch again"
-        ),
-    })
-}
-
-/// The refusal of a growth whose joining members include a deleted one, on
-/// [`deleted_in_publication`]'s terms: a count and the key of the first join naming one.
-fn deleted_in_growth(
-    generation: &Generation,
-    joins: &[mosaica_lifecycle::IncomingGrowth],
-) -> Option<ExecError> {
-    let (count, first_key) = first_deleted(joins.iter().map(|join| {
-        (
-            join.key.as_str(),
-            deleted_members(generation, &join.joining),
-        )
-    }))?;
-    Some(ExecError::LayerRefused {
-        detail: format!(
-            "{count} joining member(s) are deleted, the first joining '{first_key}'; remove the \
-             deleted members and send the batch again"
-        ),
-    })
-}
-
-/// The sum of the deleted counts, and the first entry whose count is not zero; `None` where every
-/// count is zero.
-fn first_deleted<K>(counts: impl IntoIterator<Item = (K, u64)>) -> Option<(u64, K)> {
-    let mut total = 0u64;
-    let mut first = None;
-    for (key, count) in counts {
-        if count > 0 {
-            total += count;
-            first.get_or_insert(key);
-        }
-    }
-    Some((total, first?))
+    /// The member rows that named nothing where the batch applied.
+    pub(crate) refused: crate::resolver::Refused,
+    /// The artifacts, by position in the batch, refused for an access label the writer's terms
+    /// do not satisfy. `entities` holds one per other artifact.
+    pub(crate) unheld: Vec<usize>,
 }
 
 impl Executor {
@@ -308,32 +250,45 @@ impl Executor {
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
             Command::Changes {
-                changes,
-                stamp,
+                mut names,
+                ops,
+                strict,
                 reply,
             } => {
-                let changes = match self.changes_now(changes, stamp) {
-                    Ok(changes) if changes.is_empty() => return reply.ack(()),
-                    Ok(changes) => changes,
+                let (changes, refused) = match self.changes_now(&mut names, &ops, strict) {
+                    Ok((changes, refused)) if changes.is_empty() => return reply.ack(refused),
+                    Ok(answer) => answer,
                     Err(e) => return reply.fail(e),
                 };
                 let mut entries = vec![DenyEntry {
                     changes,
                     reply: Some(reply),
+                    refused,
                 }];
                 // The cascade rides this path too: a deletion admitted here that skipped it would
                 // strand every artifact depending on the one deleted.
                 self.cascade_dependents(&mut entries);
                 self.commit_denies(entries)
             }
-            Command::RegisterLayer { declaration, reply } => self.commit_registry(
-                |registry| registry.prepare_create(*declaration),
-                |record| match record {
-                    WalRecord::LayerCreate { space, .. } => *space,
-                    _ => unreachable!("prepare_create returns a LayerCreate"),
-                },
+            Command::RegisterLayer {
+                mut declaration,
                 reply,
-            ),
+            } => {
+                // Named as the generation the declaration applies in holds its views.
+                let generation = self.generation.load_full();
+                let meta = crate::viewport::meta_of(&generation);
+                if let Err(detail) = crate::control::declared_views(&meta, &mut declaration) {
+                    return reply.fail(ExecError::LayerRefused { detail });
+                }
+                self.commit_registry(
+                    |registry| registry.prepare_create(*declaration),
+                    |record| match record {
+                        WalRecord::LayerCreate { space, .. } => *space,
+                        _ => unreachable!("prepare_create returns a LayerCreate"),
+                    },
+                    reply,
+                )
+            }
             Command::DropLayer { name, reply } => {
                 self.commit_registry(|registry| registry.prepare_drop(&name), |_| (), reply)
             }
@@ -356,7 +311,7 @@ impl Executor {
                 vocabulary,
                 values,
                 reply,
-            } => self.commit_vocabulary_values(vocabulary, values, reply),
+            } => self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity),
             Command::CreateViewGroup { declaration, reply } => {
                 self.commit_view_group_create(*declaration, reply)
             }
@@ -367,42 +322,95 @@ impl Executor {
                 layer,
                 level,
                 mut artifacts,
-                stamp,
+                mut names,
                 reply,
-            } => {
-                let generation = self.generation.load_full();
-                if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_artifacts(generation, &mut artifacts)
-                }) {
-                    reply.fail(ExecError::Stale);
-                    return;
+            } => match self.members_now(&mut names, |_| false) {
+                Ok(moved) => {
+                    names.fill_artifacts(&mut artifacts, Some(&moved));
+                    self.commit_artifacts(layer, level, artifacts, &names, reply)
                 }
-                if let Some(refusal) = deleted_in_publication(&generation, &artifacts) {
-                    reply.fail(refusal);
-                    return;
-                }
-                self.commit_artifacts(layer, level, artifacts, reply)
-            }
+                Err(e) => reply.fail(e),
+            },
             Command::GrowMemberships {
                 layer,
                 level,
                 mut joins,
-                stamp,
+                mut names,
                 reply,
-            } => {
-                let generation = self.generation.load_full();
-                if !stamp.follow_since(&generation, |generation| {
-                    crate::edited::follow_growth(generation, &mut joins)
-                }) {
-                    reply.fail(ExecError::Stale);
-                    return;
+            } => match self.members_now(&mut names, |at| joins[at].rank.is_some()) {
+                Ok(moved) => {
+                    names.fill_growth(&mut joins, Some(&moved));
+                    self.commit_growth(layer, level, joins, &names, reply)
                 }
-                if let Some(refusal) = deleted_in_growth(&generation, &joins) {
-                    reply.fail(refusal);
-                    return;
-                }
-                self.commit_growth(layer, level, joins, reply)
-            }
+                Err(e) => reply.fail(e),
+            },
+        }
+    }
+
+    /// An item whose label the writer's terms do not satisfy is refused alone, or refuses a strict
+    /// batch. Drops from `items` each whose access labels, where `labels` reads some, the writer of
+    /// `scope` does not satisfy on `layer`'s label gate, and answers their positions. A layer the
+    /// writer does not reach refuses the write later, in the registry's words.
+    fn drop_unheld<T>(
+        &self,
+        scope: &WriteScope,
+        layer: &str,
+        items: &mut Vec<T>,
+        labels: impl Fn(&T) -> Option<&[Vec<u8>]>,
+        strict: bool,
+    ) -> std::result::Result<Vec<usize>, ExecError> {
+        if matches!(scope, WriteScope::All) {
+            return Ok(Vec::new());
+        }
+        let Some(registered) = self.live.reached_layer(layer, scope) else {
+            return Ok(Vec::new());
+        };
+        let unheld: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                labels(item).is_some_and(|labels| {
+                    !scope.admits_artifact_label(&registered.declaration, labels)
+                })
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if let (Some(&artifact), true) = (unheld.first(), strict) {
+            return Err(ExecError::LabelNotHeld { artifact });
+        }
+        let mut at = 0;
+        items.retain(|_| {
+            at += 1;
+            unheld.binary_search(&(at - 1)).is_err()
+        });
+        Ok(unheld)
+    }
+
+    /// A resolver of the names a writer of `scope` sends, against `generation`.
+    pub(super) fn resolver<'a>(
+        &'a self,
+        generation: &'a crate::Generation,
+        scope: &'a WriteScope,
+    ) -> crate::resolver::Resolver<'a> {
+        crate::resolver::Resolver::new(generation, scope, &self.deps.identity_key, &self.live)
+    }
+
+    /// A batch's member names brought to the generation served now ([`crate::Names::now`]): the
+    /// rows resolved again, or the refusal of a batch a refused row refuses, `ranked` saying
+    /// which artifacts are a ranked growth's.
+    fn members_now(
+        &self,
+        names: &mut crate::resolver::MemberNames,
+        ranked: impl Fn(usize) -> bool,
+    ) -> std::result::Result<Vec<crate::resolver::Moved>, ExecError> {
+        let generation = self.generation.load_full();
+        let moved = names
+            .names
+            .now(&generation, &self.deps.identity_key, &self.live)
+            .map_err(store_error)?;
+        match names.refusing(ranked) {
+            Some((row, reason)) => Err(ExecError::NamesRefused { row, reason }),
+            None => Ok(moved),
         }
     }
 
@@ -420,8 +428,21 @@ impl Executor {
         layer: String,
         level: u32,
         mut incoming: Vec<IncomingArtifact>,
+        names: &crate::resolver::MemberNames,
         reply: Reply<PublishedBatch>,
     ) {
+        let refused = names.names().refused();
+        let scope = names.names().scope();
+        let unheld = match self.drop_unheld(
+            scope,
+            &layer,
+            &mut incoming,
+            |artifact| artifact.access.as_deref(),
+            names.strict,
+        ) {
+            Ok(unheld) => unheld,
+            Err(e) => return reply.fail(e),
+        };
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows: see [`Self::bring_artifacts_forward`].
         // Partitioned before any ordinal is claimed: a key the level holds is compared under the
@@ -439,14 +460,17 @@ impl Executor {
         // ([`RegistryError::ExclusionOnHeldKey`], which `prepare_put` makes below over the same
         // store), and the walk of the view's entities is the most expensive thing this route does,
         // so the refusal spends nothing, as every other refusal on this path does not.
-        if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming) {
+        if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming, names) {
             reply.fail(e);
             return;
         }
         let served = self.generation.load_full();
-        let views = crate::write::ServedViews(&served.bundle.manifest);
+        let reached = scope.views(&served.bundle.manifest);
+        let views = crate::write::ServedViews(&served.bundle.manifest, reached.as_ref());
+        let resolver = self.resolver(&served, scope);
         let prepared = self.live.with_publication_state(|registry, store| {
-            registry.prepare_put(&layer, level, &incoming, store, &views)
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store);
+            registry.prepare_put(&layer, level, &incoming, store, &views, &reach)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -471,6 +495,8 @@ impl Executor {
                 without_content: 0,
                 filled: 0,
                 joined: 0,
+                refused,
+                unheld,
             });
             return;
         }
@@ -492,6 +518,8 @@ impl Executor {
             without_content: prepared.without_content,
             filled: prepared.fills.len() as u64,
             joined: prepared.joined,
+            refused,
+            unheld,
         });
     }
 
@@ -516,6 +544,7 @@ impl Executor {
         layer: &str,
         level: u32,
         incoming: &mut [IncomingArtifact],
+        names: &crate::resolver::MemberNames,
     ) -> Result<(), ExecError> {
         if !incoming.iter().any(|a| a.excluding.is_some()) {
             return Ok(());
@@ -549,6 +578,7 @@ impl Executor {
             ));
         };
         let generation = self.generation.load_full();
+        let resolver = self.resolver(&generation, names.names().scope());
         let mut sets: std::collections::HashMap<Option<String>, mosaica_lifecycle::ShardSets> =
             std::collections::HashMap::new();
         for artifact in incoming.iter_mut() {
@@ -571,9 +601,12 @@ impl Executor {
                         .collect(),
                     None => registered.declaration.views.clone(),
                 };
+                // A scoped writer's complement is taken within its scope.
                 let mut entities = mosaica_lifecycle::ShardSets::default();
                 for shard in generation.shards() {
-                    entities.set(shard.id(), view_entities(shard, &views));
+                    let mut set = view_entities(shard, &views);
+                    resolver.mask(shard.id(), &mut set);
+                    entities.set(shard.id(), set);
                 }
                 entities
             });
@@ -626,16 +659,32 @@ impl Executor {
         &mut self,
         layer: String,
         level: u32,
-        joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        reply: Reply<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>)>,
+        mut joins: Vec<mosaica_lifecycle::IncomingGrowth>,
+        names: &crate::resolver::MemberNames,
+        reply: Reply<crate::write::GrownBatch>,
     ) {
+        let refused = names.names().refused();
+        let scope = names.names().scope();
+        let unheld = match self.drop_unheld(
+            scope,
+            &layer,
+            &mut joins,
+            |join| Some(join.parts.access.as_slice()).filter(|labels| !labels.is_empty()),
+            names.strict,
+        ) {
+            Ok(unheld) => unheld,
+            Err(e) => return reply.fail(e),
+        };
+        let served = self.generation.load_full();
+        let resolver = self.resolver(&served, scope);
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
         // The receipt is read beside the preparation, under the same lock and before the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
         let prepared = self.live.with_publication_state(|registry, store| {
-            let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
+            let reach = crate::resolver::ArtifactReach::new(&resolver, registry, store);
+            let prepared = registry.prepare_grow(&layer, level, &joins, store, &reach)?;
             let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared);
             Ok::<_, mosaica_lifecycle::RegistryError>((prepared, grown))
         });
@@ -657,7 +706,12 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            reply.ack((prepared.space, grown));
+            reply.ack(crate::write::GrownBatch {
+                space: prepared.space,
+                grown,
+                refused,
+                unheld,
+            });
             return;
         }
 
@@ -670,7 +724,12 @@ impl Executor {
         };
         // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
         self.apply_artifact_records(&records, &positions, Publish::Promptly);
-        reply.ack((prepared.space, grown));
+        reply.ack(crate::write::GrownBatch {
+            space: prepared.space,
+            grown,
+            refused,
+            unheld,
+        });
     }
 
     /// Validate, append, sync, apply: in that order, which is the whole of the registry's
@@ -1114,12 +1173,10 @@ impl Executor {
         let compiled = match crate::vocabularies::resolve(&request, &generation.bundle.manifest) {
             Ok(crate::vocabularies::Resolution::Existing) => {
                 // A redeclaration is the same vocabulary, and its values are a page against it.
-                self.commit_vocabulary_page(request.name, request.values, reply, |page| {
-                    VocabularyDeclared {
-                        existing: true,
-                        added: page.added,
-                        titles: page.titles,
-                    }
+                let (name, values) = (request.name, request.values);
+                self.commit_vocabulary_page(name, values, reply, |values| VocabularyDeclared {
+                    existing: true,
+                    values,
                 });
                 return;
             }
@@ -1188,22 +1245,15 @@ impl Executor {
         self.side_manifests.behind_live = true;
         reply.ack(VocabularyDeclared {
             existing: false,
-            added,
-            // A new vocabulary holds no value whose title could be replaced: every title it
-            // carries arrived with the value that drew its code.
-            titles: 0,
+            values: VocabularyValues {
+                added,
+                existing: 0,
+                // A new vocabulary holds no value whose title could be replaced: every title it
+                // carries arrived with the value that drew its code.
+                titles: 0,
+                withheld: false,
+            },
         });
-    }
-
-    /// `PATCH /control/vocabularies/{name}/values`: a page of values for a vocabulary that
-    /// exists.
-    pub(super) fn commit_vocabulary_values(
-        &mut self,
-        vocabulary: String,
-        values: Vec<mosaica_lifecycle::DeclaredValue>,
-        reply: Reply<VocabularyValues>,
-    ) {
-        self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity);
     }
 
     /// One page of values, whether it arrived on the values route or as the inline values of a
@@ -1284,6 +1334,7 @@ impl Executor {
                 added,
                 existing,
                 titles: 0,
+                withheld: false,
             }));
             return;
         }
@@ -1326,6 +1377,7 @@ impl Executor {
             added,
             existing,
             titles,
+            withheld: false,
         }));
     }
 

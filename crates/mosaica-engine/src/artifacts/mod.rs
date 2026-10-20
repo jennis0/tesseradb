@@ -41,8 +41,9 @@ pub use rows::{
 pub use sources::{AttributeSource, PredicateSource, SpatialSource};
 pub(crate) use slice::LevelSlice;
 pub use view::{ArtifactSide, ArtifactVerdict, ArtifactView, LabelGate, Withheld};
+pub(crate) use view::{unlabelled_admitted, verdict, ArtifactFacts, DEPENDENCY_CHAIN_MAX};
 
-pub(crate) use rows::view_key;
+pub(crate) use rows::{satisfied_rank_over, view_key};
 
 use projections::{Coordinate, Held, LevelAddress, ProjectionKey};
 use rows::{covered_by, drawn_record, total_rows};

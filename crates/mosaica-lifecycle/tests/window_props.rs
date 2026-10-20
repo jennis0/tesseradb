@@ -85,6 +85,7 @@ proptest! {
                     body_hash: [0u8; 32],
                     memberships: Vec::new(),
                 edges: Vec::new(),
+                    scope: (),
                     waiters: vec![()],
                 }, WindowClaims::default());
             }
@@ -138,6 +139,7 @@ proptest! {
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
+                scope: (),
                 waiters: vec![()],
             }, WindowClaims::default());
         }
@@ -160,6 +162,7 @@ proptest! {
             body_hash: [0u8; 32],
             memberships: Vec::new(),
                 edges: Vec::new(),
+            scope: (),
             waiters: vec![()],
         }, WindowClaims::default());
         let whole_ids: Vec<u64> = close(whole, &mut Allocator::new(9))
@@ -223,6 +226,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
+                scope: (),
                 waiters: vec![()],
             }, WindowClaims::default());
             for entry in close(window, &mut alloc).unwrap().0 {
@@ -319,6 +323,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
+                scope: (),
                 waiters: vec![()],
             }, WindowClaims::default());
             let (_, tally, _) = close(window, &mut alloc).unwrap();

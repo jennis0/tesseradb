@@ -21,6 +21,7 @@ use mosaica_engine::viewport::ViewportRequest;
 use mosaica_engine::{Engine, EngineConfig};
 
 use common::*;
+use mosaica_catalogue::Permission;
 
 /// An Arrow ingest batch of `(id, x, y, access label)` rows, every row carrying its `id`.
 fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
@@ -187,11 +188,16 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
     assert_eq!(resp.status(), 409);
 }
 
-/// Post one ingest batch and return its status and answer.
-async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, serde_json::Value) {
+/// Post one ingest batch under `query` and return its status and answer.
+async fn post_body(
+    server: &TestServer,
+    query: &str,
+    batch_id: &str,
+    body: Vec<u8>,
+) -> (u16, serde_json::Value) {
     let resp = server
         .client
-        .post(server.control_url("/control/ingest"))
+        .post(server.control_url(&format!("/control/ingest?{query}")))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-mosaica-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
@@ -201,19 +207,6 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
         .unwrap();
     let status = resp.status().as_u16();
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
-}
-
-/// A service principal named `name` holding `write`, and an API key for it.
-fn writer(server: &TestServer, name: &str) -> String {
-    use mosaica_catalogue::{Grantee, Permission, PrincipalKind};
-    let catalogue = &server.state.catalogue;
-    catalogue
-        .create_principal(name, PrincipalKind::Service)
-        .unwrap();
-    catalogue
-        .grant_permission(Grantee::Principal(name), Permission::Write)
-        .unwrap();
-    catalogue.create_api_key(name, None, None).unwrap().0.key
 }
 
 /// Post one ingest batch as the holder of `key`, and return its status and answer.
@@ -244,7 +237,8 @@ async fn post_as(
 async fn two_principals_sending_one_batch_id_each_write_and_each_replay_their_own() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    let (ann, bob) = (writer(&server, "ann"), writer(&server, "bob"));
+    let ann = writer_key(&server, "ann", Permission::Write, &["0"]);
+    let bob = writer_key(&server, "bob", Permission::Write, &["0"]);
     let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
 
     let ((a_status, a), (b_status, b)) = tokio::join!(
@@ -280,10 +274,7 @@ async fn two_principals_sending_one_batch_id_each_write_and_each_replay_their_ow
         409
     );
 
-    // The catalogue is not kept across this restart, so each principal is created again under
-    // its name.
     let server = restart(server, &tmp).await;
-    let (ann, bob) = (writer(&server, "ann"), writer(&server, "bob"));
     for (key, ids) in [(&ann, &ann_ids), (&bob, &bob_ids)] {
         let (status, again) = post_as(&server, key, "shared", body.clone()).await;
         assert_eq!(
@@ -294,12 +285,116 @@ async fn two_principals_sending_one_batch_id_each_write_and_each_replay_their_ow
         assert_eq!(&ingested_ids(&again), ids);
     }
     assert_eq!(post_as(&server, &ann, "shared", different).await.0, 409);
-    let carol = writer(&server, "carol");
+    let carol = writer_key(&server, "carol", Permission::Write, &["0"]);
     let (status, fresh) = post_as(&server, &carol, "shared", body).await;
     assert_eq!(
         (status, fresh["created"].as_u64()),
         (200, Some(2)),
         "{fresh}"
+    );
+}
+
+/// How many items the service holds, by the entity ids it has issued.
+async fn issued(server: &TestServer) -> Option<u64> {
+    control_status(server).await["entity_id_high_water"].as_u64()
+}
+
+/// **A batch retried after the flush its answer waited for is replayed, not applied again**: the
+/// flush rotates the log past the batch's record, and the retry is answered the first acceptance's
+/// `mosaica_ids` with nothing written, before and after further flushes, and after a restart.
+#[tokio::test]
+async fn a_batch_retried_after_its_answer_waited_for_a_flush_is_replayed() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
+    let first = post_body(&server, "wait=visible", "visible", body.clone())
+        .await
+        .1;
+    assert_eq!(first["created"], 2, "{first}");
+    let ids = ingested_ids(&first);
+    let replayed = |again: &serde_json::Value| {
+        assert_eq!(again["replayed"], true, "{again}");
+        assert_eq!(again["created"], 0, "{again}");
+        assert_eq!(ingested_ids(again), ids);
+    };
+
+    replayed(
+        &post_body(&server, "wait=visible", "visible", body.clone())
+            .await
+            .1,
+    );
+    post_body(
+        &server,
+        "wait=visible",
+        "another",
+        build_ingest_batch_labels(&[&["0"]]),
+    )
+    .await;
+    replayed(
+        &post_body(&server, "wait=visible", "visible", body.clone())
+            .await
+            .1,
+    );
+    assert_eq!(issued(&server).await, Some(N_ITEMS + 3));
+
+    let server = restart(server, &tmp).await;
+    replayed(
+        &post_body(&server, "wait=visible", "visible", body.clone())
+            .await
+            .1,
+    );
+    assert_eq!(issued(&server).await, Some(N_ITEMS + 3));
+}
+
+/// **A batch is remembered for the flush tick after it was accepted, or until `flush_max_items`
+/// rows of later batches**, whichever ends first; a retry after that is a new batch.
+#[tokio::test]
+async fn a_batch_retried_past_its_horizon_is_a_new_batch() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture(tmp.path(), N_ITEMS);
+    let body = build_ingest_batch_labels(&[&["0"], &["0"]]);
+
+    // Past the tick.
+    let ticking = EngineConfig {
+        flush_max_age_secs: 1,
+        ..default_engine_config()
+    };
+    let server = open_with(&tmp, ticking).await;
+    post_body(&server, "wait=visible", "aged", body.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    post_body(
+        &server,
+        "wait=visible",
+        "later",
+        build_ingest_batch_labels(&[&["0"]]),
+    )
+    .await;
+    let again = post_body(&server, "wait=visible", "aged", body.clone())
+        .await
+        .1;
+    assert_eq!(
+        (again.get("replayed"), &again["created"]),
+        (None, &serde_json::json!(2)),
+        "{again}"
+    );
+    server.shutdown().await;
+
+    // Past the rows.
+    let bounded = EngineConfig {
+        flush_max_items: 3,
+        ..default_engine_config()
+    };
+    let server = open_with(&tmp, bounded).await;
+    post_body(&server, "wait=visible", "early", body.clone()).await;
+    let later = build_ingest_batch_labels(&[&["0"], &["0"], &["0"]]);
+    post_body(&server, "wait=visible", "three", later).await;
+    let again = post_body(&server, "wait=visible", "early", body.clone())
+        .await
+        .1;
+    assert_eq!(
+        (again.get("replayed"), &again["created"]),
+        (None, &serde_json::json!(2)),
+        "{again}"
     );
 }
 
@@ -312,6 +407,7 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
 
     let (status, first) = post_body(
         &server,
+        "",
         "z-batch-1",
         build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0")]),
     )
@@ -323,6 +419,7 @@ async fn a_second_row_for_an_ingested_id_edits_its_item() {
 
     let (status, second) = post_body(
         &server,
+        "",
         "z-batch-2",
         build_ingest_batch(&[(N_ITEMS + 1, 9.0, 9.0, "0")]),
     )
@@ -373,7 +470,7 @@ async fn a_batch_past_the_shard_size_goes_in() {
         (N_ITEMS + 1, 20.4, 20.4, "0"),
         (N_ITEMS + 2, 20.6, 20.6, "0"),
     ]);
-    let (status, answer) = post_body(&server, "past-the-size", two).await;
+    let (status, answer) = post_body(&server, "", "past-the-size", two).await;
     assert_eq!(
         (status, answer["created"].as_u64()),
         (200, Some(2)),
@@ -425,6 +522,7 @@ async fn a_row_for_an_id_in_the_bundle_edits_its_item() {
 
     let (status, answer) = post_body(
         &server,
+        "",
         "bundle-edit",
         build_ingest_batch(&[(0, 5.0, 5.0, "0")]),
     )
@@ -693,6 +791,7 @@ async fn ingest_mixed_batch_only_supplied_ids_name_an_item() {
     // A follow-up batch re-using one of the supplied ids names that item.
     let (status, again) = post_body(
         &server,
+        "",
         "mixed-batch-again",
         build_ingest_batch_optional(&[(Some(N_ITEMS + 1), 9.0, 9.0, "0")]),
     )

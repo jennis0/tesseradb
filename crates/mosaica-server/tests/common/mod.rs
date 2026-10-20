@@ -598,6 +598,7 @@ pub async fn spawn_server_with_stream_flush(
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
         generous_bulk_gate(),
+        None,
         |_| {},
     )
     .await
@@ -612,14 +613,33 @@ pub async fn open(dir: impl AsRef<Path>) -> TestServer {
     open_with(dir, default_engine_config()).await
 }
 
-/// [`open`] under `config`.
+/// [`open`] under `config`. The catalogue is kept in `dir/catalogue`, so it survives a restart.
 pub async fn open_with(dir: impl AsRef<Path>, config: EngineConfig) -> TestServer {
     let dir = dir.as_ref();
-    spawn_server_with_config(
+    let max_k = config.max_k;
+    let mut engine = Engine::open(
         &dir.join("bundle"),
         &dir.join("cache"),
         &dir.join("wal.log"),
         config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once per engine");
+    mount_server_with_flush(
+        engine,
+        max_k,
+        generous_test_gate(),
+        generous_ingest_limits(),
+        CorsOrigins::none(),
+        1 << 20,
+        10_000,
+        Arc::new(FaultSwitchboard::new()),
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        Some(&dir.join("catalogue")),
+        |_| {},
     )
     .await
 }
@@ -771,6 +791,7 @@ pub async fn spawn_server_with_bulk_reads(
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
         bulk_gate,
+        None,
         tune,
     )
     .await
@@ -956,6 +977,7 @@ pub async fn spawn_server_with_visible_wait(
         Arc::new(FaultSwitchboard::new()),
         visible_wait_max_secs,
         generous_bulk_gate(),
+        None,
         |_| {},
     )
     .await
@@ -1001,6 +1023,7 @@ async fn mount_server_with(
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
         generous_bulk_gate(),
+        None,
         |_| {},
     )
     .await
@@ -1026,6 +1049,7 @@ pub async fn mount_server_with_faults(
         faults,
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
         generous_bulk_gate(),
+        None,
         |_| {},
     )
     .await
@@ -1044,6 +1068,7 @@ async fn mount_server_with_flush(
     faults: Arc<FaultSwitchboard>,
     visible_wait_max_secs: u64,
     bulk_gate: ComputeGate,
+    catalogue_at: Option<&Path>,
     tune: impl FnOnce(&mut ServeLimits),
 ) -> TestServer {
     let mut limits = ServeLimits {
@@ -1076,7 +1101,16 @@ async fn mount_server_with_flush(
         ..Default::default()
     };
     tune(&mut limits);
-    let (catalogue, integrator_key, catalogue_dir) = test_identity();
+    let (catalogue, integrator_key, catalogue_dir) = match catalogue_at {
+        Some(dir) => {
+            let (catalogue, key) = test_identity_at(dir);
+            (catalogue, key, None)
+        }
+        None => {
+            let (catalogue, key, dir) = test_identity();
+            (catalogue, key, Some(dir))
+        }
+    };
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
@@ -1094,7 +1128,7 @@ async fn mount_server_with_flush(
         request_log: None,
         faults,
     });
-    serve_state(state, integrator_key, Some(catalogue_dir)).await
+    serve_state(state, integrator_key, catalogue_dir).await
 }
 
 /// The service principal [`authorise`] mints sessions through.
@@ -1217,6 +1251,28 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
         .unwrap();
     assert_eq!(resp.status(), 200, "authorise should succeed");
     resp.json().await.unwrap()
+}
+
+/// A service principal `name` holding `permission` and `terms`, and an API key for it.
+pub fn writer_key(
+    server: &TestServer,
+    name: &str,
+    permission: Permission,
+    terms: &[&str],
+) -> String {
+    let catalogue = &server.state.catalogue;
+    catalogue
+        .create_principal(name, PrincipalKind::Service)
+        .unwrap();
+    catalogue
+        .grant_permission(Grantee::Principal(name), permission)
+        .unwrap();
+    for term in terms {
+        catalogue
+            .grant_term(Grantee::Principal(name), term)
+            .unwrap();
+    }
+    catalogue.create_api_key(name, None, None).unwrap().0.key
 }
 
 /// The token [`authorise`] returns for a principal holding `terms`.
@@ -1397,8 +1453,8 @@ pub async fn post_changes(server: &TestServer, body: &serde_json::Value) -> reqw
         .unwrap()
 }
 
-/// The layers `/v1/meta` lists for a principal holding `terms`.
-pub async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Value> {
+/// What `/v1/meta` answers a principal holding `terms`.
+pub async fn meta(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let token = token_for(server, terms).await;
     let resp = server
         .client
@@ -1408,8 +1464,15 @@ pub async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json:
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["layers"].as_array().cloned().unwrap_or_default()
+    resp.json().await.unwrap()
+}
+
+/// The layers `/v1/meta` lists for a principal holding `terms`.
+pub async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Value> {
+    meta(server, terms).await["layers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Register the layer `declaration` names, failing the test unless it is created.
@@ -1505,6 +1568,27 @@ pub async fn wait_until<A: Attempt<()>>(
     done: impl AsyncFnMut() -> A,
 ) {
     wait_for(what, within, done).await
+}
+
+/// `write`'s answer, sent with the next write check held, and `meanwhile` run while it is held; the
+/// check is released once `meanwhile` has run.
+pub async fn while_write_held<T>(
+    engine: &Engine,
+    write: impl std::future::Future<Output = T>,
+    meanwhile: impl std::future::Future<Output = ()>,
+) -> T {
+    engine.hold_next_write_check_for_test();
+    let release = async {
+        wait_until(
+            "the write check holds",
+            std::time::Duration::from_secs(30),
+            async || engine.write_check_is_holding_for_test(),
+        )
+        .await;
+        meanwhile.await;
+        engine.release_write_check_for_test();
+    };
+    tokio::join!(write, release).0
 }
 
 /// Send `request` until the answer is neither shed nor stale and return it, failing the test
@@ -2370,7 +2454,7 @@ pub fn aggregate_rows(batch: &RecordBatch) -> Vec<AggregateRow> {
 }
 
 /// The item each of `values` names in the unique field `field`, `None` for a value naming none,
-/// asked of [`mosaica_engine::Engine::name_items`].
+/// asked of [`mosaica_engine::Engine::names`].
 pub fn unique_holders(
     engine: &mosaica_engine::Engine,
     field: &str,
@@ -2387,11 +2471,12 @@ pub fn unique_holders(
                 .collect(),
         )],
     };
-    Ok(engine
-        .name_items(&table)?
-        .verdicts
-        .into_iter()
-        .map(|verdict| verdict.ok().map(|item| item.entity))
+    let names = engine.names(table, &mosaica_engine::WriteScope::All, false)?;
+    Ok((0..values.len())
+        .map(|row| match names.verdict(row) {
+            Ok(mosaica_types::Target::Item(_, entity)) => Some(entity),
+            _ => None,
+        })
         .collect())
 }
 

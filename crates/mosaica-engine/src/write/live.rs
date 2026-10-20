@@ -4,21 +4,19 @@ use super::*;
 // Live state
 // =================================================================================================
 
-/// One accepted batch, as the idempotency index holds it: what each row of the request became,
-/// so a byte-identical replay answers the `mosaica_id`s the first acceptance did.
-#[derive(Clone)]
-pub(in crate::write) struct AcceptedBatch {
-    pub(in crate::write) body_hash: [u8; 32],
-    pub(in crate::write) receipt: Vec<mosaica_lifecycle::RowReceipt>,
-    /// Where the record carrying this batch lies in the log. The index is a cache of the WAL
-    /// ([`mosaica_lifecycle::batch_identity`]), so an entry outlives its record only until the
-    /// rotation that deletes the member holding it. `Executor::rotate_wal` forgets everything
-    /// below [`ExecutorWal::retained_from`], which is the horizon a restart would rebuild.
-    pub(in crate::write) wal_pos: u64,
-}
+/// The `/control/ingest` idempotency index: (principal, batch id) -> what was accepted under it,
+/// so a byte-identical replay answers the `mosaica_id`s the first acceptance did. The index is a
+/// cache of the WAL ([`mosaica_lifecycle::accepted_batches`]): an entry is held while the log holds
+/// its record, and past that while a rotation carries it ([`LiveState::batches_to_carry`]).
+pub(in crate::write) type AcceptedBatches =
+    FxHashMap<(String, String), mosaica_lifecycle::AcceptedBatch>;
 
-/// The `/control/ingest` idempotency index: (principal, batch id) -> what was accepted under it.
-pub(in crate::write) type AcceptedBatches = FxHashMap<(String, String), AcceptedBatch>;
+/// Now, in milliseconds since the Unix epoch.
+pub(in crate::write) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
 
 /// The descriptor resolver's detached extension state: interned novel descriptors, plus the next
 /// extension id to hand out.
@@ -372,6 +370,17 @@ impl LiveState {
         self.forget_probed_owing();
     }
 
+    /// The registry and the artifact store, read together under the order
+    /// [`Self::with_publication_state`] takes them in.
+    pub(crate) fn with_layers_and_artifacts<R>(
+        &self,
+        f: impl FnOnce(&LayerRegistry, &ArtifactStore) -> R,
+    ) -> R {
+        let registry = lock_recover(&self.registry);
+        let artifacts = lock_recover(&self.artifacts);
+        f(&registry, &artifacts)
+    }
+
     /// Read the artifact store: the request path's route to a membership.
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
         f(&lock_recover(&self.artifacts))
@@ -644,23 +653,6 @@ impl LiveState {
         *lock_recover(&self.settled_owing) = settled;
     }
 
-    /// Whether `entity` of `space` is a live layer's own entity or an artifact its levels hold.
-    pub(crate) fn artifact_held(&self, space: LayerSpace, entity: EntityId) -> bool {
-        let registry = lock_recover(&self.registry);
-        if registry
-            .in_space(space)
-            .is_some_and(|_| entity == mosaica_types::layer::LAYER_ENTITY)
-        {
-            return true;
-        }
-        let Some((name, level, ordinal)) = registry.locate_in(space, entity) else {
-            return false;
-        };
-        lock_recover(&self.artifacts)
-            .get(name, level, ordinal)
-            .is_some()
-    }
-
     /// The name of the live layer whose own entity `entity` of `space` is.
     pub(crate) fn layer_of_own_entity(
         &self,
@@ -752,6 +744,16 @@ impl LiveState {
         name: &str,
     ) -> Option<mosaica_types::layer::RegisteredLayer> {
         lock_recover(&self.registry).get(name).cloned()
+    }
+
+    /// [`Self::registered_layer`] where a writer of `scope` reaches the layer.
+    pub(crate) fn reached_layer(
+        &self,
+        name: &str,
+        scope: &crate::resolver::WriteScope,
+    ) -> Option<mosaica_types::layer::RegisteredLayer> {
+        self.registered_layer(name)
+            .filter(|layer| scope.reaches_layer(&layer.declaration))
     }
 
     /// Whether a registered layer resolves its memberships from shapes: [`spatial_membership`],
@@ -941,8 +943,6 @@ impl LiveState {
     }
 
     /// Index one accepted batch, at the position of the record that carries it.
-    ///
-    /// The arguments are [`mosaica_lifecycle::BatchIdentity`]'s fields plus that position.
     pub(in crate::write) fn record_accepted_batch(
         &self,
         principal: String,
@@ -953,23 +953,63 @@ impl LiveState {
     ) {
         lock_recover(&self.accepted_batches).insert(
             (principal, batch_id),
-            AcceptedBatch {
+            mosaica_lifecycle::AcceptedBatch {
                 body_hash,
                 receipt,
                 wal_pos,
+                accepted_ms: now_ms(),
             },
         );
     }
 
-    /// Forget every batch whose record lay below `retained_from`: the rotation half of the
-    /// idempotency horizon.
-    ///
-    /// A restart rebuilds this index from the members that survive, so dropping entries here
-    /// keeps the horizon the same on both sides of a restart. Returns how many entries went.
-    pub(in crate::write) fn forget_batches_below(&self, retained_from: u64) -> usize {
+    /// The accepted batches a rotation carries past the reclaiming of their records at `now_ms`:
+    /// those accepted within `age_ms`, until `rows` rows of later batches have been accepted,
+    /// whichever ends first. The two bounds are the flush triggers `flush_max_age_secs` and
+    /// `flush_max_items`, which bound how long the log holds a record when no flush is asked for.
+    pub(in crate::write) fn batches_to_carry(
+        &self,
+        age_ms: u64,
+        rows: u64,
+        now_ms: u64,
+    ) -> Vec<mosaica_lifecycle::CarriedBatch> {
+        let index = lock_recover(&self.accepted_batches);
+        let mut newest_first: Vec<(&(String, String), &mosaica_lifecycle::AcceptedBatch)> =
+            index.iter().collect();
+        newest_first.sort_unstable_by_key(|(_, held)| std::cmp::Reverse(held.wal_pos));
+        let mut later_rows = 0u64;
+        let mut carried = Vec::new();
+        for ((principal, batch_id), held) in newest_first {
+            if later_rows >= rows {
+                break;
+            }
+            if now_ms.saturating_sub(held.accepted_ms) < age_ms {
+                carried.push(mosaica_lifecycle::CarriedBatch {
+                    principal: principal.clone(),
+                    batch_id: batch_id.clone(),
+                    batch: held.clone(),
+                });
+            }
+            later_rows += held.receipt.len() as u64;
+        }
+        carried
+    }
+
+    /// Forget every batch whose record lay below `retained_from` and that the rotation did not
+    /// carry, as a restart reading the members that survive would.
+    pub(in crate::write) fn forget_batches(
+        &self,
+        retained_from: u64,
+        carried: &[mosaica_lifecycle::CarriedBatch],
+    ) -> usize {
+        let kept: FxHashSet<(&str, &str)> = carried
+            .iter()
+            .map(|batch| (batch.principal.as_str(), batch.batch_id.as_str()))
+            .collect();
         let mut index = lock_recover(&self.accepted_batches);
         let before = index.len();
-        index.retain(|_, held| held.wal_pos >= retained_from);
+        index.retain(|(principal, batch_id), held| {
+            held.wal_pos >= retained_from || kept.contains(&(principal.as_str(), batch_id.as_str()))
+        });
         before - index.len()
     }
 }

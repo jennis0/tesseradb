@@ -1883,6 +1883,7 @@ pub(crate) fn publish(
                     &store,
                     &mosaica_lifecycle::no_pending,
                     &DeclaredViews(views),
+                    &mosaica_lifecycle::Everything,
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are

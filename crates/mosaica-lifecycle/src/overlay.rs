@@ -479,7 +479,9 @@ impl<'a> Replay<'a> {
             | WalRecord::PlainViewCreate { .. }
             | WalRecord::ShardsDeclare { .. } => {}
             // Opening and sealing a shard buffer and deny nothing.
-            WalRecord::ShardOpen { .. } | WalRecord::ShardSeal { .. } => {}
+            WalRecord::ShardOpen { .. }
+            | WalRecord::ShardSeal { .. }
+            | WalRecord::BatchesCarried { .. } => {}
         }
     }
 

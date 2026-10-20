@@ -1460,14 +1460,15 @@ def _waited(report, answer: Answer) -> None:
 
 def refused_members(page: Page, body: dict) -> list[dict]:
     """The members a publication or growth left out, each named by its artifact, its list and the
-    member row as sent."""
+    member row as sent, and the annotations it refused whole, with no list or member."""
     out = []
     for one in body.get("refused", []):
         at = int(one["artifact"])
         level, view, key = page.artifacts[at]
-        member = page.lists[at].get(one["list"], [])[int(one["row"])]
+        listed = one.get("list")
+        member = None if listed is None else page.lists[at].get(listed, [])[int(one["row"])]
         out.append(
-            {"layer": page.name, "level": level, "view": view, "key": key, "list": one["list"],
+            {"layer": page.name, "level": level, "view": view, "key": key, "list": listed,
              "member": member, "reason": one["reason"]}
         )
     return out

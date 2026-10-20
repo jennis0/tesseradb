@@ -212,7 +212,9 @@ class PagedReport(Summarised):
     - `items_edited`: items already held that a row changed: a value, the label or a position.
       An edited item keeps its `mosaica_id`. Placing an item in an annotation changes the
       annotation, not the item, and is counted in `memberships_joined`.
-    - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
+    - `values_bound`, `titles_set`: vocabulary values added and titles replaced. A writer without
+      `write-all` is not told which values of a `derived` vocabulary it added, and these count
+      none of them.
     - `already_present`: parts the database already held, which changed nothing, rows naming an
       item they matched among them.
     - `without_content`: annotations added without the content they declare.
@@ -223,16 +225,19 @@ class PagedReport(Summarised):
     - `refused`: each row or member the identity rule refused and the server left out while
       applying the rest of its request. A row is `{"target", "view", "row", "reason"}`, `row`
       being its position in the table inserted into `target`; a member is `{"layer", "level",
-      "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent.
-      `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`
-      and `unknown_mosaica_id`. `refused_by_reason` counts them.
+      "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent; an
+      annotation refused whole, for a label the writer's terms do not satisfy, has `list` and
+      `member` `None`. `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`,
+      `one_value_twice`, `unknown_mosaica_id`, `value_held` (a unique value an item outside the
+      writer's terms holds) and `label_not_held` (a label the writer's terms do not satisfy).
+      `refused_by_reason` counts them.
     - `ignored_columns`: by layer, the fields of its member structs, and the columns of the
       memberships its declaration writes, that name no item, being neither `mosaica_id` nor a
       unique attribute's column: those the plan did not send, and any the server says it
       ignored. `check()` names those the plan leaves out.
     - `mosaica_ids`: the id given to each row sent, `None` for a refused row.
     - `artifact_ids`: the id given to each added annotation, by layer and then by
-      `(level, view, key)`.
+      `(level, view, key)`, `None` for one refused for its label.
     - `replayed`: requests the server had already carried out, which added nothing.
     - `publication`, `flush_wait`, `flush_reached`: the point at which the changes can be read,
       how long the commit waited for it in seconds, and whether it was reached in time.

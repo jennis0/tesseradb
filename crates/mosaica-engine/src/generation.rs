@@ -26,12 +26,12 @@ pub struct GenerationParts {
     /// promotes a descriptor republishes it; ordinals are preserved, so a session authorised
     /// earlier keeps its terms and is not granted the promoted one.
     pub dict: Arc<Dict>,
-    /// How many commit windows have committed an edit, how many folds have retired entities, and
-    /// how many folds have freed ids the allocator issues again, since the process started: what a
-    /// [`crate::edited::Stamp`] compares.
+    /// How many commit windows have committed an edit, and how many folds have retired entities,
+    /// since the process started.
     pub(crate) edit_epoch: u64,
     pub(crate) fold_epoch: u64,
-    pub(crate) free_epoch: u64,
+    /// What the latest folds retired, by the `fold_epoch` each published at.
+    pub(crate) retirements: Arc<crate::resolver::Retirements>,
     /// How many publications of deletions, suppressions and unsuppressions since the process
     /// started. An ingest does not move it.
     pub(crate) deny_epoch: u64,
@@ -750,7 +750,7 @@ impl Generation {
                 dict: Arc::new(Dict::load(&[]).expect("an empty dict needs no file")),
                 edit_epoch: 0,
                 fold_epoch: 0,
-                free_epoch: 0,
+                retirements: Arc::default(),
                 deny_epoch: 0,
                 vocabularies: Arc::new(Vocabularies::default()),
                 suggest: Arc::new(crate::suggest::SuggestIndexes::default()),

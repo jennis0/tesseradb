@@ -223,7 +223,12 @@ impl Executor {
                 .iter()
                 .map(|(space, parts)| (*space, &*parts.overlay)),
         );
-        match self.log.wal.rotate(&snapshot, reclaim_below) {
+        let carried = self.live.batches_to_carry(
+            self.deps.flush_max_age_secs.saturating_mul(1_000),
+            self.deps.flush_max_items as u64,
+            crate::write::live::now_ms(),
+        );
+        match self.log.wal.rotate(&snapshot, &carried, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();
                 let retained_from = self.log.wal.retained_from();
@@ -240,14 +245,17 @@ impl Executor {
                          their previous holders"
                     );
                 }
+                // The idempotency index follows the log it caches, or a replay could be answered
+                // differently after a restart.
+                let forgotten = self
+                    .live
+                    .forget_batches(self.log.wal.retained_from(), &carried);
                 if !deleted.is_empty() {
-                    // The idempotency index follows the log it caches, or a replay could be
-                    // answered as unknown after a restart.
-                    let forgotten = self.live.forget_batches_below(self.log.wal.retained_from());
                     tracing::info!(
                         members = ?self.log.wal.members(),
                         reclaimed = ?deleted,
                         forgotten_batch_ids = forgotten,
+                        carried_batch_ids = carried.len(),
                         "WAL members reclaimed below the oldest unconsumed row"
                     );
                 }

@@ -6,12 +6,9 @@ for what a principal may see. The catalogue, the three listeners' credentials, s
 ending, the catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients, access
 expressions and their index, and the removal of the plugin are built, and
 [system/access-control.md](system/access-control.md) describes them; where the build differs from
-this note, the note says so at the claim. **Not built yet:** writes masked by the writer's terms,
-writes with a session token on the viewer listener, and the audit log. Until masked writes are
-built, a principal with `write` writes against the whole corpus whether or not it holds
-`write-all`. While writes are unmasked, a principal with `write` can upsert an item it cannot see,
-by its unique value, and change its label. Granting `write` therefore grants what `read-all`
-grants wherever a view has a unique field.
+this note, the note says so at the claim. Writes are bounded by the writer's terms
+([Writes](#writes)). **Not built yet:** writes with a session token on the viewer listener, and
+the audit log.
 
 ## Decisions
 
@@ -26,8 +23,8 @@ grants wherever a view has a unique field.
 | The plugin | Removed. |
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
-| Writes to items the writer cannot see | Masked by the writer's own terms. A principal holding `write-all` acts on the whole corpus. Not built yet: the mask. Every writer acts on the whole corpus, and can upsert an item it cannot see by its unique value and change its label. |
-| A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
+| Writes to items the writer cannot see | Bounded by the writer's own terms: an item outside them is absent to the write. A principal holding `write-all` acts on the whole corpus. |
+| An insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
 ## Principals and credentials
@@ -127,11 +124,11 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. Flushing and compacting. All of it is masked by the principal's own terms ([Writes](#writes)). Not built yet: the mask, so a write acts on the whole corpus. While writes are unmasked, a principal with `write` can upsert an item it cannot see, by its unique value, and change its label. Granting `write` therefore grants what `read-all` grants wherever a view has a unique field. |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Adding values to a vocabulary. Flushing and compacting. What it names among items, layers, views and artifacts is bounded by the principal's own terms ([Writes](#writes)). |
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
 | `admin` | Every change to the catalogue, and the service's status. |
 | `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
-| `write-all` | With `write`, writes against the whole corpus, unmasked. |
+| `write-all` | With `write`, writes against the whole corpus, and declares and drops ([Writes](#writes)). |
 
 The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
 users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
@@ -409,30 +406,45 @@ system.
 
 ## Writes
 
-A write is masked by the writer's own terms unless the writer holds `write-all`. **Not built
-yet:** the mask. A principal with `write` writes against the whole corpus whether or not it holds
-`write-all`, and every rule in this section is the design for masked writes. A write is therefore
-trusted with every item, as the operator is. While writes are unmasked, a principal with `write`
-can upsert an item it cannot see, by its unique value, and change its label. Granting `write`
-therefore grants what `read-all` grants wherever a view has a unique field.
+A write is bounded by the writer's own terms unless the writer holds `write-all`, as the operator
+does. The items a write may name are the writer's scope: those a session holding its terms is
+authorised to be served, suppressed ones included, whether or not the writer holds `read`. The
+layers, views and artifacts a write may name are those a session holding the terms would be
+served: a layer whose `visibility` admits them, a view whose gate does, and an artifact
+`POST /v1/artifacts` would serve such a session, suppression aside
+([annotations](system/annotations.md#visibility)). How a write is checked against them is in
+[the write path](system/write-path.md#resolving-a-batch).
 
-- Deleting, suppressing or unsuppressing an item whose label the writer does not satisfy returns
-  the answer for an item that does not exist, and does the same work.
-- Inserting an item, or publishing an annotation, with a label the writer does not satisfy is
-  refused, and the message says which label.
-- Declaring a view or a layer with a `visibility` the writer does not satisfy is refused in the same
-  way. Changing or dropping a view or a layer the writer cannot reach returns the answer for one
-  that does not exist.
+Declaring and dropping need `write-all` beside `write`: a layer, an attribute, the shard size, a
+vocabulary, a view group, a plain view and a view of a group. A writer holding `write` alone is
+refused each with `403`, and nothing changes. A page of a vocabulary's values is a write, and needs
+`write` alone.
+
+- An ingest row, a change, or a member of a publication or a growth naming an item outside the
+  scope, by `mosaica_id` or by a unique value, names nothing, and is answered as one naming no
+  item is: `unknown_mosaica_id` or `names_no_item`, a strict request's `404`, and nothing written.
+  A writer cannot lift a suppression outside its scope, and can lift one inside it that it cannot
+  see.
+- A membership spelled by exclusion is complemented within the scope.
+- An ingest row whose label, or a new item's view default, the writer does not satisfy is refused
+  as `label_not_held`, and the message says which label. The batch's other rows apply. An
+  artifact of a publication, or a row of a growth, setting a label the writer does not satisfy is
+  refused alike, by its position, and the others apply.
+- A layer, a view or an artifact out of the writer's reach is answered as one that does not exist
+  wherever a write names it: publishing into it, growing it, naming it as a parent or an
+  attachment target, in an ingest batch's `x-mosaica-view` or a column, or by its `mosaica_id` in
+  a change. A refusal that lists views lists only those the writer reaches.
+- Deleting an artifact the writer reaches deletes every artifact attached to it, those outside its
+  terms included.
+- A publication, or an ingest column on a layer whose value set is open, naming a key an artifact
+  out of reach holds is refused as the key taken, naming no artifact: a key names one artifact.
+- A writer sending a page of a `derived` vocabulary's values is not told which keys it added.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
-  collision. It is never treated as an update of that item, and the refusal carries no
-  `mosaica_id`. It tells the writer that an item with that value exists, and nothing else about it.
-  Postgres's row-level security has the same property and documents it. Scoping uniqueness to what
-  each writer can see would let two items share a value that is meant to identify one.
-- Declaring a view or a layer under a name that a view or layer the writer cannot reach already
-  holds is refused as a collision in the same way.
-
-Checking a write evaluates each affected item's label against the writer's terms, from the label's
-root node upwards, so the writer's authorised set is never built.
+  collision, `value_held`, and so is a row setting such a value on an item it names. It is never
+  treated as an update of that item, and the refusal carries no `mosaica_id`. It tells the writer
+  that an item with that value exists, and nothing else about it. Postgres's row-level security has
+  the same property and documents it. Scoping uniqueness to what each writer can see would let two
+  items share a value that is meant to identify one.
 
 ## Bootstrap
 

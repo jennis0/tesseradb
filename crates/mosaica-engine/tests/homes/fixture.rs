@@ -24,7 +24,9 @@ use mosaica_build::{
     ViewArgs,
 };
 use mosaica_engine::filter::{FilterExpr, FilterOperand};
-use mosaica_engine::{Engine, EngineConfig, IngestReceipt, IngestRequest, Session, ViewportRequest};
+use mosaica_engine::{
+    AcceptError, Engine, EngineConfig, IngestReceipt, IngestRequest, Session, ViewportRequest,
+};
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::IngestRow;
 use mosaica_spatial::tiler::ScalarType;
@@ -348,22 +350,46 @@ pub fn open(tmp: &Path, root: &Path) -> Engine {
     engine
 }
 
-/// Ingest `row` through `view` as batch `batch`, its body hash the batch's bytes.
-pub fn send(engine: &Engine, batch: &str, view: &str, row: IngestRow) -> IngestReceipt {
+/// Send `rows` to `view` as the batch `batch`, whose body hash is its name.
+pub fn ingest_to(
+    engine: &Engine,
+    batch: &str,
+    view: &str,
+    rows: Vec<IngestRow>,
+) -> Result<IngestReceipt, AcceptError> {
     let mut body_hash = [0u8; 32];
     body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
-    engine
-        .ingest(IngestRequest {
-            principal: String::new(),
-            batch_id: batch.to_string(),
-            body_hash,
-            view: Some(view.to_string()),
-            rows: vec![row],
-            artifacts: Default::default(),
-            strict: false,
-            mosaica_id_column: false,
-        })
+    engine.ingest(IngestRequest {
+        principal: String::new(),
+        batch_id: batch.to_string(),
+        body_hash,
+        view: Some(view.to_string()),
+        rows,
+        artifacts: Default::default(),
+        strict: false,
+        mosaica_id_column: false,
+    })
+}
+
+/// [`ingest_to`], accepted: the `mosaica_id` of each row.
+pub fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<MosaicaId> {
+    ingest_to(engine, batch, view, rows)
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
+        .mosaica_ids
+        .into_iter()
+        .map(|id| id.expect("an accepted row has a mosaica_id"))
+        .collect()
+}
+
+/// The entity the item `tid` holds.
+pub fn entity_of(engine: &Engine, tid: MosaicaId) -> EntityId {
+    items_of(engine, &[tid])[0].unwrap_or_else(|| panic!("{tid:?} names an item"))
+}
+
+/// Whether `tid` is served in `s0` to the principal `credential` authorises.
+pub fn is_served(engine: &Engine, credential: &[u8], tid: MosaicaId) -> bool {
+    let session = engine.authorise(credential).unwrap();
+    served(engine, &session, "s0", None).contains(&tid.raw())
 }
 
 /// A row naming `mosaica_id`, or a new item, with every value omitted.

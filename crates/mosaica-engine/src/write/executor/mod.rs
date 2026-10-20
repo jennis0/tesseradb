@@ -92,6 +92,13 @@ impl Drop for Executor {
     }
 }
 
+/// A store failure while a write was read or resolved, as the write's refusal.
+pub(super) fn store_error(e: impl std::fmt::Display) -> ExecError {
+    ExecError::Store {
+        detail: e.to_string(),
+    }
+}
+
 /// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,
@@ -409,11 +416,13 @@ impl Executor {
             g.segments_version = segments_version;
             g.bundle = bundle;
             g.dict = dict;
-            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+            if let Some(r) = rotation.as_ref().filter(|r| !r.retired.is_empty()) {
                 g.fold_epoch = previous.fold_epoch + 1;
-            }
-            if rotation.as_ref().is_some_and(|r| r.frees) {
-                g.free_epoch = previous.free_epoch + 1;
+                g.retirements = Arc::new(previous.retirements.with(
+                    g.fold_epoch,
+                    shard_id,
+                    &r.retired,
+                ));
             }
             if let Some(r) = &rotation {
                 g.layer_spaces = Arc::new(rotated_spaces(&previous.layer_spaces, r));

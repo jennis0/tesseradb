@@ -682,11 +682,10 @@ fn one_unknown_key_refuses_the_whole_batch() {
     );
 }
 
-/// A deleted entity may not join, on the same rule a publication declaring one is refused
-/// (`annotation-write-cycle.md` §3.1): it can never contribute to a count again, so a join naming
-/// one is refused loudly rather than applied into silence.
+/// A deleted entity names nothing, so a join naming one is refused that member alone, and the
+/// other members join.
 #[test]
-fn a_deleted_point_may_not_join() {
+fn a_deleted_point_is_refused_alone_and_the_others_join() {
     let fx = fixture();
     let engine = fx.open_unrefreshed();
     publish(&fx, &engine, 0..300);
@@ -694,7 +693,7 @@ fn a_deleted_point_may_not_join() {
     let deleted = fx.members(300..301)[0];
     engine.accept_change(deleted, ChangeOp::Delete).unwrap();
 
-    let refused = engine
+    let grown = engine
         .grow_memberships(
             "clusters/a".into(),
             0,
@@ -703,13 +702,9 @@ fn a_deleted_point_may_not_join() {
                 fx.members(300..310),
             )],
         )
-        .expect_err("a deleted member refuses the join")
-        .to_string();
-    assert!(
-        refused.contains("deleted"),
-        "the refusal says what is wrong with it: {refused}"
-    );
-    assert_eq!(count(&engine), 300);
+        .expect("the join is accepted");
+    assert_eq!(grown[0].joined, 9, "every member but the deleted one joins");
+    assert_eq!(count(&engine), 309);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -766,7 +766,11 @@ fn declare_vocabulary_column(
     let mut minted = size.min(PAGE);
     while minted < size {
         let end = (minted + PAGE).min(size);
-        engine.mint_vocabulary_values(name.clone(), (minted..end).map(value).collect())?;
+        engine.mint_vocabulary_values(
+            name.clone(),
+            (minted..end).map(value).collect(),
+            &mosaica_engine::WriteScope::All,
+        )?;
         minted = end;
     }
     let column = format!("write_cost_category_{}", tag.replace('-', "_"));

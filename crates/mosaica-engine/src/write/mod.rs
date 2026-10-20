@@ -26,7 +26,7 @@ mod opening;
 mod reconstruct;
 mod schema;
 
-pub use command::ViewDropped;
+pub use command::{ViewDropped, VocabularyDeclared, VocabularyValues};
 pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
@@ -57,6 +57,7 @@ use mosaica_lifecycle::{IngestBuffer, Overlay, Overlays};
 
 use crate::cache::RowProjectionCache;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
+use crate::resolver::WriteScope;
 use mosaica_spatial::tiler::ScalarType;
 use mosaica_store::manifest::{EntitySet, ManifestVocabulary, SegmentsManifest};
 use mosaica_store::merge::MergePolicy;
@@ -201,6 +202,9 @@ pub enum AcceptError {
     /// unique column's index, the edited-items map, or an item's label, values or rows. Nothing
     /// was submitted.
     Unreadable(String),
+    /// The engine refused as it does a read: a fragment of the writer's grant is being built by
+    /// another request, or could not be read. Nothing was submitted.
+    Engine(EngineError),
     /// The batch conflicts with what is stored: a row names two items or a `mosaica_id` nobody
     /// holds, or two rows name one item or set one value. The detail names rows by position,
     /// values as sent and items by `mosaica_id`. Nothing was submitted.
@@ -214,6 +218,7 @@ impl std::fmt::Display for AcceptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AcceptError::Submit(e) => write!(f, "{e}"),
+            AcceptError::Engine(e) => write!(f, "{e}"),
             AcceptError::Exec(e) => write!(f, "{e}"),
             AcceptError::ScalarArity {
                 index,
@@ -264,7 +269,19 @@ impl From<SubmitError> for AcceptError {
 }
 
 /// A generation's groups and their views, as a publication sees them.
-pub(crate) struct ServedViews<'a>(pub(crate) &'a mosaica_store::manifest::Manifest);
+pub(crate) struct ServedViews<'a>(
+    pub(crate) &'a mosaica_store::manifest::Manifest,
+    /// The views the writer reaches, `None` for every view.
+    pub(crate) Option<&'a crate::gate::VisibleViews>,
+);
+
+impl ServedViews<'_> {
+    fn reaches(&self, group: &str, key: &str) -> bool {
+        self.1.is_none_or(|views| {
+            views.contains_view(&format!("{group}{}{key}", mosaica_store::GROUP_SEPARATOR))
+        })
+    }
+}
 
 impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
     fn incarnation_of(
@@ -272,7 +289,9 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
         group: &str,
         key: &str,
     ) -> Option<mosaica_types::view::ViewIncarnation> {
-        self.0.incarnation_of_key(group, key)
+        self.0
+            .incarnation_of_key(group, key)
+            .filter(|_| self.reaches(group, key))
     }
     fn keys_of(&self, group: &str) -> Vec<String> {
         self.0
@@ -280,6 +299,7 @@ impl mosaica_lifecycle::GroupViews for ServedViews<'_> {
             .iter()
             .filter(|held| held.name == group)
             .flat_map(|held| held.views.iter().map(|view| view.key.clone()))
+            .filter(|key| self.reaches(group, key))
             .collect()
     }
 }
@@ -717,36 +737,12 @@ impl WritePath {
     /// at the close of the commit window this submission lands in.
     pub(crate) fn accept_ingest(
         &self,
-        planned: crate::ingest::Planned,
-        principal: String,
-        batch_id: String,
-        body_hash: [u8; 32],
-        unique_seq: u64,
+        submission: IngestSubmission,
     ) -> Result<Ingested, AcceptError> {
         let mark = StageMark::now();
-        let crate::ingest::Planned {
-            rows,
-            edits,
-            slots,
-            keys,
-            artifacts,
-            over_bound,
-        } = planned;
-        let submission = command::IngestSubmission {
-            rows,
-            edits,
-            slots,
-            keys,
-            principal,
-            batch_id,
-            body_hash,
-            artifacts,
-            unique_seq,
-            over_bound,
-        };
         let answered = self.submit(|reply| Command::Ingest { submission, reply });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
-        answered
+        answered?
     }
 
     /// Register an annotation layer and wait for its receipt.
@@ -805,32 +801,29 @@ impl WritePath {
         self.submit(|reply| Command::DeclareShards { size, reply })
     }
 
-    /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
-    /// name already carried this identity, how many of the request's values were novel, and how
-    /// many held values it gave a new title.
+    /// Declare a vocabulary. Answers whether a vocabulary of that name already carried this
+    /// identity, and what the request's values did.
     pub(crate) fn declare_vocabulary(
         &self,
         request: mosaica_lifecycle::VocabularyRequest,
-    ) -> Result<(bool, u64, u64), AcceptError> {
-        let declared = self.submit(|reply| Command::DeclareVocabulary {
+    ) -> Result<VocabularyDeclared, AcceptError> {
+        self.submit(|reply| Command::DeclareVocabulary {
             request: Box::new(request),
             reply,
-        })?;
-        Ok((declared.existing, declared.added, declared.titles))
+        })
     }
 
-    /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
+    /// A page of values for a vocabulary that exists.
     pub(crate) fn mint_vocabulary_values(
         &self,
         vocabulary: String,
         values: Vec<mosaica_lifecycle::DeclaredValue>,
-    ) -> Result<(u64, u64, u64), AcceptError> {
-        let minted = self.submit(|reply| Command::MintVocabularyValues {
+    ) -> Result<VocabularyValues, AcceptError> {
+        self.submit(|reply| Command::MintVocabularyValues {
             vocabulary,
             values,
             reply,
-        })?;
-        Ok((minted.added, minted.existing, minted.titles))
+        })
     }
 
     /// Declare a view group. Answers whether a group of that name already carried this identity.
@@ -867,31 +860,31 @@ impl WritePath {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
-        stamp: crate::edited::Stamp,
+        names: Box<crate::resolver::MemberNames>,
     ) -> Result<PublishedBatch, AcceptError> {
         self.submit(|reply| Command::PublishArtifacts {
             layer,
             level,
             artifacts,
-            stamp,
+            names,
             reply,
         })
     }
 
-    /// Grow the memberships of artifacts that already exist, answering one receipt per join in
-    /// the caller's order. See `Executor::commit_growth`.
+    /// Grow the memberships of artifacts that already exist, answering one receipt per join
+    /// applied, in the caller's order. See `Executor::commit_growth`.
     pub(crate) fn grow_memberships(
         &self,
         layer: String,
         level: u32,
         joins: Vec<mosaica_lifecycle::IncomingGrowth>,
-        stamp: crate::edited::Stamp,
-    ) -> Result<(LayerSpace, Vec<mosaica_lifecycle::MembershipGrown>), AcceptError> {
+        names: Box<crate::resolver::MemberNames>,
+    ) -> Result<GrownBatch, AcceptError> {
         self.submit(|reply| Command::GrowMemberships {
             layer,
             level,
             joins,
-            stamp,
+            names,
             reply,
         })
     }
@@ -901,8 +894,9 @@ impl WritePath {
     /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
     pub(crate) fn submit_changes(
         &self,
-        changes: Vec<(crate::edited::NamedTarget, ChangeOp)>,
-        stamp: crate::edited::Stamp,
+        names: Box<crate::resolver::Names>,
+        ops: Vec<ChangeOp>,
+        strict: bool,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
             None,
@@ -910,8 +904,9 @@ impl WritePath {
             self.faults.clone(),
         );
         self.handle()?.enqueue(Command::Changes {
-            changes,
-            stamp,
+            names,
+            ops,
+            strict,
             reply,
         })?;
         Ok(PendingChange(pending))
@@ -919,17 +914,16 @@ impl WritePath {
 }
 /// An enqueued `/control/changes` request, awaiting its answer.
 ///
-/// The public face of `Pending<()>`: a change's answer carries no ids, so the only thing a caller
-/// can do with it is learn whether the change took hold, and this type says exactly that in its
-/// `wait` signature.
-pub struct PendingChange(Pending<()>);
+/// The public face of `Pending`: a change's answer carries no ids, so what a caller learns is
+/// whether the change took hold, and which rows named nothing where it applied.
+pub struct PendingChange(Pending<crate::resolver::Refused>);
 
 impl PendingChange {
-    /// Block until the executor answers this request.
+    /// Block until the executor answers this request: the rows refused, with their reasons.
     ///
     /// `Err` does not mean "nothing happened": for `Delete`/`Suppress` see [`ExecError::Wal`],
     /// and for [`SubmitError::ReceiptLost`] see `Pending::wait`.
-    pub fn wait(self) -> Result<(), AcceptError> {
+    pub fn wait(self) -> Result<crate::resolver::Refused, AcceptError> {
         self.0.accept()
     }
 }

@@ -12,17 +12,20 @@ from oracle.naming import (
     ADDRESSING_STRICT_STATUS,
     INTEGER,
     KEYWORD,
+    LABEL_NOT_HELD,
     NAMES_NO_ITEM,
     NAMES_TWO_ITEMS,
     ONE_ITEM_TWICE,
     ONE_VALUE_TWICE,
     UNKNOWN_MOSAICA_ID,
+    VALUE_HELD,
     Creates,
     Holdings,
     Names,
     Refused,
     apply_changes,
     apply_ingest,
+    artifact_inside,
     first_refusal,
     ignored_columns,
     malformed_addressing,
@@ -280,3 +283,79 @@ def test_an_ingest_that_can_only_edit_needs_an_identifying_column():
     assert not malformed_ingest(held(), [{"label": "y"}, AT])
     assert malformed_ingest(held(), [{"label": "y"}], view=False)
     assert not malformed_ingest(held(), [{"label": "y"}, {"num": None}])
+
+
+def scoped() -> Holdings:
+    """[`held`]'s items for a writer holding `team`: item 1 is labelled `team`, item 2 `secret`."""
+    holdings = held()
+    holdings.labels = {1: ["team"], 2: ["secret"]}
+    holdings.terms = frozenset({"team"})
+    return holdings
+
+
+def test_an_item_outside_the_writers_terms_names_nothing_in_a_request_that_addresses_items():
+    rows = [{"mosaica_id": "2"}, {"code": "b"}, {"code": "b", "mosaica_id": "1"}, {"num": 10}]
+    assert resolve_addresses(scoped(), rows) == [
+        Refused(UNKNOWN_MOSAICA_ID),
+        Refused(NAMES_NO_ITEM),
+        Names(1),
+        Names(1),
+    ]
+
+
+def test_a_value_held_outside_is_refused_where_a_row_would_create_or_set_it_and_names_nothing_else():
+    rows = [
+        {"code": "b", **AT},
+        {"mosaica_id": "1", "num": 20},
+        {"code": "b"},
+        {"mosaica_id": "2", **AT},
+    ]
+    assert resolve_ingest(scoped(), rows) == [
+        Refused(VALUE_HELD),
+        Refused(VALUE_HELD),
+        Refused(NAMES_NO_ITEM),
+        Refused(UNKNOWN_MOSAICA_ID),
+    ]
+
+
+def test_a_label_the_writer_does_not_hold_is_refused_before_anything_else_and_claims_nothing():
+    holdings = scoped()
+    rows = [
+        {"code": "new", "access": ["secret"], **AT},
+        {"code": "new", **AT},
+        {"mosaica_id": "1", "access": "secret"},
+        {"mosaica_id": "1", "access": ["team", "secret"]},
+    ]
+    verdicts = resolve_ingest(holdings, rows)
+    assert verdicts == [Refused(LABEL_NOT_HELD), Creates(), Refused(LABEL_NOT_HELD), Names(1)]
+    counts = apply_ingest(holdings, rows, verdicts, {1: 50})
+    assert counts == {"created": 1, "edited": 1, "unchanged": 0}
+    assert holdings.labels[1] == ["team", "secret"] and holdings.labels[50] == ["public"]
+
+    holdings.default = "secret"
+    assert resolve_ingest(holdings, [{"code": "other", **AT}]) == [Refused(LABEL_NOT_HELD)]
+
+
+def test_a_writer_holding_write_all_names_every_item():
+    holdings = scoped()
+    holdings.terms = None
+    assert resolve_ingest(holdings, [{"code": "b", **AT}, {"mosaica_id": "2"}]) == [
+        Names(2),
+        Refused(ONE_ITEM_TWICE),
+    ]
+
+
+def test_an_artifact_is_inside_the_writers_terms_where_a_reader_of_them_would_be_served_it():
+    holdings = scoped()
+    assert artifact_inside(holdings, [1, 2], 1)
+    assert not artifact_inside(holdings, [2], 1), "its one member is outside"
+    assert not artifact_inside(holdings, [1, 2, 9], 2), "an item not held is no member"
+    assert artifact_inside(holdings, [2], None), "a layer requiring no visible member"
+    assert not artifact_inside(holdings, [1], None, target=False), "what it attaches to"
+    assert artifact_inside(holdings, [1], None, contents=[[1, 2], [1]]), "one content inside"
+    assert not artifact_inside(holdings, [1], None, contents=[[1, 2]]), "no content inside"
+    assert not artifact_inside(holdings, [1], None, contents=[[1, 9]]), "an item not held"
+    assert not artifact_inside(holdings, [1], None, contents=[]), "no content at all"
+    holdings.terms = None
+    assert artifact_inside(holdings, [2], 1)
+    assert artifact_inside(holdings, [2], None, contents=[[2]], target=False)

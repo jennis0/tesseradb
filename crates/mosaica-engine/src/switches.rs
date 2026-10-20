@@ -77,6 +77,10 @@ pub(crate) struct TestSwitches {
     pub(crate) write_check_held: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) write_check_holding: AtomicBool,
+    /// Whether a writer's grant's fragments answer as another request's build past the wait
+    /// budget.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fragments_building: AtomicBool,
     /// Whether the executor waits before it drains its work queue into a commit window.
     #[cfg(feature = "fault-injection")]
     pub(crate) work_pass_paused: AtomicBool,
@@ -155,6 +159,13 @@ impl TestSwitches {
             }
             self.write_check_holding.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Whether a writer's grant's fragments answer as being built by another request.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn fragment_building_wanted(&self) -> bool {
+        self.fragments_building
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Called by a unique declaration's round once it has finished. Waits while a test holds it,
@@ -237,6 +248,8 @@ impl Default for TestSwitches {
             write_check_held: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             write_check_holding: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            fragments_building: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             work_pass_paused: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]

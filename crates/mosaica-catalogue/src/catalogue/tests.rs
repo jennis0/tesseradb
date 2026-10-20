@@ -711,7 +711,7 @@ fn the_generation_rises_with_each_change_and_survives_reopening() {
 /// Makes every write to every table in the file fail, as a full disc or a lost file would.
 fn fail_every_write(conn: &Connection) {
     let tables: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()

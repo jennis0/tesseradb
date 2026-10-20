@@ -1,6 +1,7 @@
 //! Serving annotation artifacts: the gate, the dependency prerequisite and the response pass.
 
 use super::*;
+use crate::artifacts::DEPENDENCY_CHAIN_MAX;
 
 /// The layers a request names that this principal reaches, in the request's order. Intersected
 /// with the request, never unioned: asking for a name is not a way to learn it.
@@ -107,13 +108,6 @@ pub(crate) fn authored_rings(
     let shape = mosaica_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
     Some(crate::shapes::served_rings(&shape, zoom))
 }
-
-/// How long a chain of dependencies one request will follow.
-///
-/// The dependency graph is acyclic by construction, so a real chain is one or two links deep.
-/// This is a backstop against a disagreeing store: past it, a request refuses the chain rather
-/// than risk unbounded recursion.
-const DEPENDENCY_CHAIN_MAX: u32 = 16;
 
 /// What [`Engine::gated_artifact`] answers: the artifact, located, with its level's row forms and
 /// the verdict's two outputs.

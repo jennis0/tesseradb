@@ -511,7 +511,8 @@ pub fn raise_high_water(record: &WalRecord, hw: &mut BTreeMap<ShardId, u64>) {
         | WalRecord::PlainViewCreate { .. }
         | WalRecord::ShardsDeclare { .. }
         | WalRecord::ShardOpen { .. }
-        | WalRecord::ShardSeal { .. } => {}
+        | WalRecord::ShardSeal { .. }
+        | WalRecord::BatchesCarried { .. } => {}
     }
 }
 

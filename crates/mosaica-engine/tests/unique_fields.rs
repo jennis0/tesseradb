@@ -26,12 +26,14 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use mosaica_engine::filter::{FilterExpr, FilterOperand, Scalar};
-use mosaica_engine::{AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest};
+use mosaica_engine::{
+    AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest, WriteScope,
+};
 use mosaica_lifecycle::command::UnallocatedRow;
 use mosaica_lifecycle::wal::WalScalar;
 use mosaica_lifecycle::{ChangeOp, ExecError};
 use mosaica_types::layer::LayerScope;
-use mosaica_types::{EntityId, ItemAt, ShardId};
+use mosaica_types::{EntityId, ItemAt, ShardId, Target};
 
 const N: u64 = 90;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -538,14 +540,13 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
         )],
     };
     let found = engine
-        .name_items_under_for_test(&held, &table)
-        .expect("the held generation reads its runs")
-        .verdicts;
+        .names_under_for_test(&held, table)
+        .expect("the held generation reads its runs");
     assert_eq!(
-        found,
-        vec![
-            Ok(ItemAt::new(ShardId::ZERO, a[0])),
-            Ok(ItemAt::new(ShardId::ZERO, b[0]))
+        [found.verdict(0), found.verdict(1)],
+        [
+            Ok(Target::Item(ShardId::ZERO, a[0])),
+            Ok(Target::Item(ShardId::ZERO, b[0]))
         ]
     );
 
@@ -615,25 +616,29 @@ fn an_address_cell_is_checked_against_its_field_alone() {
             vec![("doi", AddressValue::Other("true".to_string()))],
         ),
     ] {
-        let refused = engine.name_items(&table(columns));
+        let refused = engine.names(table(columns), &WriteScope::All, false);
         assert!(
             matches!(refused, Err(mosaica_engine::EngineError::AddressMalformed(_))),
             "{what}: {refused:?}"
         );
     }
     let named = engine
-        .name_items(&table(vec![
-            ("doi", AddressValue::Text(doi_of(4))),
-            ("score", AddressValue::Other("the number 0.5".to_string())),
-            ("flags", AddressValue::Other("a list".to_string())),
-            ("rank", AddressValue::Integer(3)),
-        ]))
+        .names(
+            table(vec![
+                ("doi", AddressValue::Text(doi_of(4))),
+                ("score", AddressValue::Other("the number 0.5".to_string())),
+                ("flags", AddressValue::Other("a list".to_string())),
+                ("rank", AddressValue::Integer(3)),
+            ]),
+            &WriteScope::All,
+            false,
+        )
         .expect("columns naming nothing are ignored");
     assert_eq!(
-        named.verdicts,
-        vec![Ok(ItemAt::new(ShardId::ZERO, built(&engine, 4)))]
+        named.verdict(0),
+        Ok(Target::Item(ShardId::ZERO, built(&engine, 4)))
     );
-    assert_eq!(named.ignored, ["score", "flags", "rank"]);
+    assert_eq!(named.ignored(), ["score", "flags", "rank"]);
 }
 
 /// **A row giving an item a value another live or suppressed item holds names both, and is
@@ -917,7 +922,7 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
 
     let engine = restart(&fx, engine);
     assert!(
-        engine.accepted_batch("", "join").is_none(),
+        !wal_members(&fx.tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string()),
         "the log rotated past the batches, so nothing but the stored value answers"
     );
     assert_eq!(

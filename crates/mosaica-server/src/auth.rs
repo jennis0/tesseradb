@@ -53,10 +53,20 @@ impl Caller {
         }
     }
 
+    /// The scope this caller's writes name within: everything with `write-all`, otherwise its
+    /// terms' reach. Cached by the engine per set of terms; call it off the executor.
+    pub fn write_scope(&self, engine: &mosaica_engine::Engine) -> mosaica_engine::WriteScope {
+        if self.holds(Permission::WriteAll) {
+            mosaica_engine::WriteScope::All
+        } else {
+            engine.write_scope(self.resolution.terms.iter().map(String::as_str))
+        }
+    }
+
     /// The local principal's name, where the caller is one.
     pub fn local_name(&self) -> Option<&str> {
         match &self.principal {
-            Principal::Local(name) => Some(name),
+            Principal::Local { name, .. } => Some(name),
             _ => None,
         }
     }
@@ -199,17 +209,20 @@ pub async fn password(
 
 fn local(
     catalogue: &Catalogue,
-    principal: String,
+    name: String,
     api_key: Option<String>,
     expires_at: Option<u64>,
 ) -> Result<Caller, ApiError> {
+    let id = catalogue
+        .principal_id(&name)
+        .ok_or(ApiError::BadCredential)?;
     let source = Source::Local {
-        principal: principal.clone(),
+        principal: name.clone(),
         api_key: api_key.clone(),
     };
     let resolution = source.resolve(catalogue).ok_or(ApiError::BadCredential)?;
     Ok(Caller {
-        principal: Principal::Local(principal),
+        principal: Principal::Local { id, name },
         api_key,
         resolution,
         expires_at,

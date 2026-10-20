@@ -138,22 +138,22 @@ async fn meta(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let meta = state.engine.meta();
+    // Resolved at authorise and fixed for the session, so this roster agrees with what every
+    // viewer route answers.
+    let visible = session.visible_views();
+    let meta = state.engine.meta().within(Some(visible));
     let selection = state.engine.config();
     // The layers, views, groups and scoped families below are filtered per principal, so this
     // response must not be shared between principals. A layer the caller may not know about is
     // absent exactly as an unregistered one is.
     let layers = state.engine.visible_layers(&session);
-    // Resolved at authorise and fixed for the session, so this roster agrees with what every
-    // viewer route answers.
-    let visible = session.visible_views();
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
         // The views this principal may reach, in creation order and carrying no position, so a
         // shorter list reveals nothing about what was withheld. A null `tile_scheme` means draw
         // no basemap.
-        "views": meta.views.iter().filter(|v| visible.contains_view(&v.id)).map(|v| serde_json::json!({
+        "views": meta.views.iter().map(|v| serde_json::json!({
             "id": v.id,
             "display_name": v.display_name,
             // The frame this view's positions are quantised against and its tile prefixes decode
@@ -181,11 +181,11 @@ async fn meta(
         // Groups in manifest order, each listing its reachable views in creation order as
         // `group:key` ids, so a client can step between views without interpreting keys. A group
         // the principal cannot reach is absent with all its views.
-        "groups": meta.groups.iter().filter(|g| visible.contains_group(&g.name)).map(|g| serde_json::json!({
+        "groups": meta.groups.iter().map(|g| serde_json::json!({
             "name": g.name,
             "title": g.title,
             "members_of": g.members_of,
-            "views": g.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
+            "views": g.views,
         })).collect::<Vec<_>>(),
         // The whole column schema. The `category` block is what tells a `u16` category from a
         // `u16` integer, since the points batch carries only codes. Values are served by the
@@ -213,7 +213,7 @@ async fn meta(
         // Group-scoped column families, in `declared_scalars`' shape plus `scope`: each family is
         // one column per view of its group, and `render` promises the column under those views
         // only. A family whose group this principal cannot reach is absent, as in the operand list.
-        "scoped_scalars": meta.scoped_scalars.iter().filter(|f| visible.contains_group(&f.group)).map(|f| {
+        "scoped_scalars": meta.scoped_scalars.iter().map(|f| {
             serde_json::json!({
                 "name": f.name,
                 "arrow_type": f.arrow_type.arrow_type_name(),
@@ -225,11 +225,7 @@ async fn meta(
                 // The views whose rows carry the column and this principal may reach: the group's
                 // views and those of groups declaring it in `members`. A view created while running
                 // joins only once a flush carrying its values publishes.
-                "views": meta
-                    .scoped_family_views(f)
-                    .into_iter()
-                    .filter(|id| visible.contains_view(id))
-                    .collect::<Vec<_>>(),
+                "views": meta.scoped_family_views(f),
             })
         }).collect::<Vec<_>>(),
         // Filterable columns (`filter::is_filterable`, as the viewport parse uses) with their
@@ -244,7 +240,7 @@ async fn meta(
                 "operands": mosaica_engine::filter::operands_of(d),
             })
         }).chain(
-            meta.scoped_scalars.iter().filter(|f| mosaica_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
+            meta.scoped_scalars.iter().filter(|f| mosaica_engine::filter::scoped_is_filterable(f)).map(|f| {
                 let family = mosaica_engine::filter::Family::of_scoped(f);
                 serde_json::json!({
                     "column": f.name,

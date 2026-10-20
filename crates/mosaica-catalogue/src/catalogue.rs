@@ -632,6 +632,15 @@ impl Catalogue {
         })
     }
 
+    /// The id of the enabled principal `name`, which no other principal is ever given.
+    pub fn principal_id(&self, name: &str) -> Option<i64> {
+        let st = self.state.read();
+        st.principals
+            .get(name)
+            .filter(|p| !p.disabled)
+            .map(|p| p.id)
+    }
+
     /// Whether the principal is enabled and, if a key is named, the key is its and unexpired.
     fn usable(&self, st: &State, key: &str, principal: &str) -> bool {
         let enabled = st.principals.get(principal).is_some_and(|p| !p.disabled);

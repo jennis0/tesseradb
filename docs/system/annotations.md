@@ -296,6 +296,13 @@ highlight without narrowing at all. In the artifacts of a tile, both flags are t
 artifact's visible members inside that tile, so a cluster can be lit in one tile and dull in the
 next while its count is the same in both.
 
+### What a writer may name
+
+A writer holding `write` and not `write-all` names only the layers and artifacts a session holding
+its terms would be served, suppression aside. Any other answers as one that does not exist
+([users and access](../users-and-access.md#writes)). Registering and dropping a layer need
+`write-all`.
+
 ## What an artifact carries
 
 Content is either **derived**, recomputed for each viewer from the members they can see (a count,
