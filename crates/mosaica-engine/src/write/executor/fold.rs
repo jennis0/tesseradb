@@ -478,18 +478,6 @@ pub(super) fn free_disc(_path: &Path) -> Option<u64> {
     None
 }
 
-/// The largest live segment count across `shard`'s views: the maximum, not the sum, since a
-/// viewport in one view pays only that view's own segment count.
-fn live_segments_in(shard: &Shard) -> usize {
-    shard
-        .data
-        .views
-        .values()
-        .map(|view| view.segments.len())
-        .max()
-        .unwrap_or(0)
-}
-
 /// What decides which shard the next compaction is of, beside the schedule: the request being
 /// answered, the closing compactions queued at seals, and each shard's last compaction.
 #[derive(Default)]
@@ -1033,7 +1021,7 @@ impl Executor {
             .shards()
             .map(|shard| {
                 let gauges = crate::compact::Gauges {
-                    live_segments: live_segments_in(shard),
+                    live_segments: crate::status::live_segments_in(shard),
                     retirable_deletions: shard.overlay.deleted_len(),
                     artifact_deletions: artifact_deletions.get(&shard.id()).copied().unwrap_or(0),
                     live_rows: crate::status::live_rows_in(shard),
@@ -1452,6 +1440,9 @@ impl Executor {
             );
         }
         self.compaction_taken(shard_id, from);
+        self.health
+            .compaction_shard
+            .store(shard_id.raw(), Ordering::SeqCst);
         let unit = self.fold.start();
         let health = Arc::clone(&self.health);
         let switches = Arc::clone(&self.deps.switches);
@@ -1521,9 +1512,6 @@ impl Executor {
                     self.compactions.ended.insert(last, ended);
                 }
                 self.compactions.last = Some(shard_id);
-                self.health
-                    .compaction_shard
-                    .store(shard_id.raw(), Ordering::SeqCst);
                 if let Some(now) = unix_now() {
                     self.compactions.started.insert(shard_id, now);
                 }
@@ -2142,7 +2130,6 @@ impl Executor {
             },
             shards: mosaica_store::manifest::Shards {
                 size: partition_data.shard_size,
-                next_id: partition_data.next_shard_id,
                 records: Vec::new(),
             },
             layer_spaces: Vec::new(),
@@ -2551,6 +2538,7 @@ impl Executor {
         let cost = stairs.into_cost();
 
         let (passes, fold_secs, staircase_rss) = self.health.record_fold_cost(
+            shard_id,
             cost,
             completed.attr_bytes_read,
             completed.attr_bytes_written,

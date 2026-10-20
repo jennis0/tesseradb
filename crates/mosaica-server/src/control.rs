@@ -1043,7 +1043,8 @@ struct ShardsBody {
 }
 
 /// `PUT /control/shards`: declares the point shard's size. 201 when the size changed, 200 when the
-/// shard already had it, 422 for a size of zero, 409 for one below the shard's high water.
+/// shard already had it, 422 for a size of zero. A size the open shard's high water has reached
+/// seals it.
 async fn declare_shards(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
@@ -2871,7 +2872,31 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<mosaica_engine::ViewSegments> = live.segments;
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
-        "shards": { "size": state.engine.shard_size() },
+        "shards": {
+            "size": state.engine.shard_size(),
+            "records": live.shards
+                .iter()
+                .map(|s| serde_json::json!({
+                    "shard": s.shard.raw(),
+                    "state": match s.state {
+                        mosaica_types::ShardState::Open => "open",
+                        mosaica_types::ShardState::Sealed => "sealed",
+                    },
+                    "high_water": s.high_water,
+                    "live_rows": s.live_rows,
+                    "pool": s.pool,
+                    "retired": s.retired,
+                    "deleted": s.deleted,
+                    "suppressed": s.suppressed,
+                    "segments": s.segments,
+                    "last_compaction": s.last_compaction.map(|c| serde_json::json!({
+                        "secs": c.secs,
+                        "rss_bytes": c.rss_bytes,
+                    })),
+                    "compacting": s.compacting,
+                }))
+                .collect::<Vec<_>>(),
+        },
         // Cycles completed since the executor started, one per cycle whatever it published: the
         // number a write acknowledgement's `publication` is compared against.
         "publication": state.engine.publication(),
@@ -3050,7 +3075,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "max_body_bytes": CHANGES_MAX_BODY_BYTES,
             },
             "declarations": {
-                "route": "PUT /control/layers, PUT /control/attributes, \
+                "route": "PUT /control/layers, PUT /control/attributes, PUT /control/shards, \
                           PUT /control/vocabularies/{name}, \
                           PATCH /control/vocabularies/{name}/values, \
                           PUT /control/view_groups/{name}, PUT /control/views/{name}, \
@@ -3086,13 +3111,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         },
         // Alarm on `fold_failures` (each leaves a bundle-sized tree nothing reclaims) and on
         // `fold_refusals` rising while `folds` is flat; `fold_refusals_by_gate` names the standing
-        // gate. `last_rss_bytes` is sampled between passes, so it understates the peak.
+        // gate.
         "compaction": {
             "live_rows": live.live_rows,
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
-            "shard": executor.compaction_shard.map(|shard| shard.raw()),
             "fold_refusals": executor.fold_refusals,
             "fold_refusals_by_gate": mosaica_engine::FOLD_GATES
                 .iter()
@@ -3105,8 +3129,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "had_bytes": r.had_bytes,
                 "at_unix": r.at_unix,
             })),
-            "last_secs": executor.last_fold_secs,
-            "last_rss_bytes": executor.last_fold_rss,
             "last_attr_bytes_read": executor.last_fold_attr_read,
             "last_attr_bytes_written": executor.last_fold_attr_written,
             "passes": state.engine.last_fold_passes()

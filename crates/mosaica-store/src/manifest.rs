@@ -2147,10 +2147,20 @@ pub struct SegmentsManifest {
 pub struct Shards {
     /// The high water at which a shard seals.
     pub size: u64,
-    /// The number the next shard opened takes: one past every shard ever numbered, dropped or not.
-    pub next_id: u32,
     /// One per shard, ascending by id.
     pub records: Vec<ShardRecord>,
+}
+
+impl Shards {
+    /// The number the next shard opened takes.
+    pub fn next_id(&self) -> u32 {
+        next_shard_id(self.records.iter().map(|record| record.id))
+    }
+}
+
+/// The number the next shard opened takes over a partition holding `ids`: one past the highest.
+pub fn next_shard_id(ids: impl IntoIterator<Item = ShardId>) -> u32 {
+    ids.into_iter().map(|id| id.raw() + 1).max().unwrap_or(0)
 }
 
 /// A shard's own `SEGMENTS-<m>.json` as its partition's `SEGMENTS-<n>.json` names it: `m` is the
@@ -2209,7 +2219,6 @@ pub struct PartitionFile {
 #[serde(deny_unknown_fields)]
 pub struct ShardFiles {
     pub size: u64,
-    pub next_id: u32,
     /// One per shard, ascending by id.
     pub files: Vec<ShardRef>,
 }
@@ -2767,7 +2776,6 @@ impl SegmentsManifest {
             partition: PartitionManifest::empty(),
             shards: Shards {
                 size: mosaica_types::SHARD_SIZE_DEFAULT,
-                next_id: 1,
                 records: vec![ShardRecord::empty(ShardId::ZERO)],
             },
             layer_spaces: Vec::new(),
@@ -2855,7 +2863,6 @@ impl SegmentsManifest {
             partition,
             shards: Shards {
                 size: named.size,
-                next_id: named.next_id,
                 records,
             },
             layer_spaces: spaces,
@@ -3777,7 +3784,6 @@ mod tests {
     fn shards_listing(bases: &[&[&str]]) -> Shards {
         Shards {
             size: 10,
-            next_id: bases.len() as u32,
             records: bases
                 .iter()
                 .enumerate()

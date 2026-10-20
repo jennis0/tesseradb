@@ -255,9 +255,11 @@ pub struct GenerationStamp {
 // content are digested; a unique key run carries a key filter. A 43 bundle is refused.
 // 45: a withdrawn content keeps its position in the content row and is marked withdrawn in the
 // record pack. A 44 bundle is refused.
+// 46: a partition's `SEGMENTS-<n>.json` stores no shard counter; the next shard opened takes the
+// number after the highest. A 45 bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility.
-pub const BUNDLE_FORMAT: u32 = 45;
+pub const BUNDLE_FORMAT: u32 = 46;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

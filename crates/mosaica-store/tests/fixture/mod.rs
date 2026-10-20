@@ -312,7 +312,6 @@ pub fn add_shard_one(manifest: &mut SegmentsManifest) {
         .shards
         .records
         .push(ShardRecord::empty(ShardId::new(1).unwrap()));
-    manifest.shards.next_id = 2;
 }
 
 /// Shard `shard`'s `SEGMENTS-<m>.json`.

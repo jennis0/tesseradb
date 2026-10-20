@@ -121,8 +121,8 @@ and the run's parameters under `churn`, and a table of the rows is printed.
 | `ingest_by_view` | — | each view's pass, on the shape §3 gives `ingest` |
 | `flush` | — | `POST /control/flush` until its publication lands, then the wait for `live` to return to round 0's |
 | `sessions_ended` | — | `POST /control/sessions/end`'s status for each principal, sent before the compaction |
-| `fold` | — | the cycle's fold: `fold_s` is the server's `compaction.last_secs`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
-| `fold.compactions[]` | — | each compaction seen to publish while the wait polled: `folds` after it, its `fold_s` and `fold_peak_rss_bytes`, and `missed`, the compactions that published between two polls |
+| `fold` | — | the cycle's fold: `fold_s` is the seconds of the compactions it ran, summed from each shard's `last_compaction` in `/control/status`, `observed_s` the driver's wait, and `fold_refusals` with `last_refusal` a fold refused for want of memory or disc |
+| `fold.compactions[]` | — | each compaction seen to publish while the wait polled: `folds` after it, its `shard`, `fold_s` and `fold_peak_rss_bytes`, and `missed`, the compactions that published between two polls |
 | `fold.shards_compacted` | — | the shards whose `identity` in the newest side-manifest moved across the request |
 | `live`, `live_by_view` | count | zoom-0 `visible` under every term after the compaction, on the anchor view and, where there are several, on each |
 | `entity_id_high_water`, `high_water_rise` | count | `/control/status`, and the rise since the row before |
@@ -299,8 +299,8 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
 | `flush_s` | seconds | `POST /control/flush` to `/control/status`'s `publication` reaching the number the flush answered: the cycle carrying every buffered row has published |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
-| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when `compaction.fold_requested` falls |
-| `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
+| `fold_s` | seconds | the server's own seconds for the compactions the request ran, summed over each shard's `last_compaction`; compact answers 202 at once, and the wait ends when `compaction.fold_requested` falls |
+| `fold_peak_rss` | bytes | the largest `last_compaction.rss_bytes` among those compactions |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
 | `<phase>.phase_s` | seconds | one phase's own wall — `flush`, `fold`, `equivalence`, `write_cycle`, `restart` — whether it held or failed |

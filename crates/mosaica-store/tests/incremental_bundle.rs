@@ -301,7 +301,7 @@ fn a_publication_opens_a_shard_it_names_and_may_not_drop_a_served_one() {
         0,
         "its declared view is empty"
     );
-    assert_eq!(next.partitions[PARTITION].next_shard_id, 2);
+    assert_eq!(next.partitions[PARTITION].next_shard_id(), 2);
     assert!(Arc::ptr_eq(
         &base.only_shard().views[VIEW].segments[0],
         &next.shard(mosaica_types::ShardId::ZERO).unwrap().views[VIEW].segments[0]

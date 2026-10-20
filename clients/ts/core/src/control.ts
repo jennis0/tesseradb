@@ -832,6 +832,7 @@ export class Control {
    * deletions and suppressions of items that no fold has removed. `layer_spaces` counts the
    * annotation layers' spaces in `count`, the deletions and suppressions of their artifacts and
    * of the layers themselves in `depth`, and the deletions alone in `retirable`.
+   * `shards.records` holds one record per shard.
    */
   status(options: CallOptions = {}): Promise<Answer> {
     return this.send('GET', '/control/status', options);
@@ -1018,7 +1019,8 @@ export class Control {
    * `POST /control/compact`: asks for a compaction, which removes deleted rows, and is answered
    * `202` before it runs. The server compacts every shard with something to reclaim, one after
    * another. A request made while a compaction runs is held until that compaction lands. The
-   * `compaction` object of `status()` shows what happened.
+   * `compaction` object of `status()` and each shard's record in `shards.records` show what
+   * happened.
    */
   compact(options: CallOptions = {}): Promise<Answer> {
     return this.send('POST', '/control/compact', options, '');

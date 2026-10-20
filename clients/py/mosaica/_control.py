@@ -166,8 +166,9 @@ class Control:
         `overlay` counts the deletions and suppressions of items that no fold has removed.
         `layer_spaces` counts the annotation layers' spaces in `count`, the deletions and
         suppressions of their annotations and of the layers themselves in `depth`, and the
-        deletions alone in `retirable`. A refusal gives the server's error body,
-        `{"error": ..., "detail": ...}`, and `{}` comes only where no server answered.
+        deletions alone in `retirable`. `shards.records` holds one record per shard. A refusal
+        gives the server's error body, `{"error": ..., "detail": ...}`, and `{}` comes only
+        where no server answered.
         """
         return self.status_answer().body
 
@@ -341,7 +342,8 @@ class Control:
 
         The server answers `202` at once and, from its next cycle, compacts every shard with
         something to reclaim, one after another. A request made while a compaction runs is held
-        until that compaction lands. The `compaction` block of `status()` shows what happened.
+        until that compaction lands. The `compaction` block of `status()` and each shard's record
+        in `shards.records` show what happened.
         """
         return self._send("POST", "/control/compact", b"")
 

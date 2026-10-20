@@ -63,11 +63,10 @@ def _bundle(root: Path, records: list[dict]) -> Path:
         named.append(
             {"id": record["id"], "n": 0, "size": len(data), "sha256": digest, "denies": False}
         )
-    next_id = max((record["id"] for record in records), default=-1) + 1
     side = {
         "files": {},
         "dict_extents": [],
-        "shards": {"size": 7, "next_id": next_id, "files": named},
+        "shards": {"size": 7, "files": named},
         "layer_spaces": [],
     }
     (partition / "SEGMENTS-0.json").write_text(json.dumps(side))

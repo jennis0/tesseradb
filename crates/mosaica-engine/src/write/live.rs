@@ -136,6 +136,10 @@ impl ShardWrite {
         }
     }
 
+    pub(crate) fn id(&self) -> ShardId {
+        self.id
+    }
+
     pub(crate) fn high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
     }
@@ -144,6 +148,16 @@ impl ShardWrite {
     /// windows since leave it.
     pub(crate) fn state(&self) -> mosaica_types::ShardState {
         lock_recover(&self.allocator).state()
+    }
+
+    pub(crate) fn pool(&self) -> u64 {
+        let alloc = lock_recover(&self.allocator);
+        let held = alloc.held().iter().map(|(_, ids)| ids);
+        std::iter::once(alloc.free())
+            .chain(held)
+            .flat_map(|sets| sets.values())
+            .map(croaring::Bitmap::cardinality)
+            .sum()
     }
 
     /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
@@ -194,9 +208,6 @@ pub(crate) struct LiveState {
     /// Each point shard's write state, ascending by id, the open one taking new items. Grown only
     /// by the executor, when a window that opens a shard commits.
     pub(in crate::write) shards: RwLock<Vec<Arc<ShardWrite>>>,
-    /// One past the highest shard id ever opened, as the side-manifest's `shards.next_id`, the log
-    /// and the windows since leave it. Written only by the executor.
-    pub(in crate::write) next_shard_id: std::sync::atomic::AtomicU32,
     /// The high water at which the open shard seals, as the side-manifest's `shards.size` and the
     /// log leave it. Written only by the executor.
     pub(in crate::write) size: std::sync::atomic::AtomicU64,
@@ -272,18 +283,10 @@ impl LiveState {
             .sum()
     }
 
-    /// One past the highest shard id ever opened.
-    pub(crate) fn next_shard_id(&self) -> u32 {
-        self.next_shard_id
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     /// Take the write state of the shards a committed window opened.
     pub(in crate::write) fn add_shards(&self, opened: Vec<ShardWrite>) {
         let mut shards = self.shards.write().unwrap_or_else(|e| e.into_inner());
         for shard in opened {
-            self.next_shard_id
-                .fetch_max(shard.id.raw() + 1, std::sync::atomic::Ordering::Relaxed);
             shards.push(Arc::new(shard));
         }
         shards.sort_by_key(|shard| shard.id);
@@ -309,7 +312,7 @@ impl LiveState {
             edits,
             items,
             self.shard_size(),
-            self.next_shard_id(),
+            mosaica_store::manifest::next_shard_id(shards.iter().map(|shard| shard.id)),
         )
     }
 

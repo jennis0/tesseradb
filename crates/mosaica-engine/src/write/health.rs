@@ -166,11 +166,8 @@ pub struct ExecutorHealth {
     /// When the last fold ended, however it ended, as a unix second. Written by the fold's thread
     /// on both exits, because the executor never sees a failure inside `execute`.
     pub(crate) fold_ended_unix: AtomicU64,
-    /// The last fold's wall clock in seconds.
-    pub(crate) last_fold_secs: AtomicU64,
-    /// The highest resident set the last fold's pass staircase saw. Sampled at pass boundaries, so
-    /// a spike inside a pass is not in it.
-    pub(crate) last_fold_rss: AtomicU64,
+    /// Each shard's last compaction since the executor started.
+    last_compactions: Mutex<BTreeMap<ShardId, crate::status::CompactionCost>>,
     /// The last fold's attribute pass IO, in bytes.
     pub(crate) last_fold_attr_read: AtomicU64,
     pub(crate) last_fold_attr_written: AtomicU64,
@@ -483,9 +480,6 @@ pub struct ExecutorStats {
     /// compaction it names publishes, is discarded or is refused. A request made while a
     /// compaction runs is held until that one lands.
     pub fold_requested: bool,
-    /// The shard of the running compaction, or of the last one when none runs; `None` before the
-    /// first since the executor started.
-    pub compaction_shard: Option<ShardId>,
     /// The sum of [`Self::fold_refusals_by_gate`].
     pub fold_refusals: u64,
     /// Refused folds by gate, indexed as [`FOLD_GATES`] names them.
@@ -493,9 +487,6 @@ pub struct ExecutorStats {
     pub last_fold_refusal: Option<FoldRefusal>,
     /// The WAL as the last sample found it — see [`WalGauge`].
     pub wal: WalGauge,
-    /// See [`ExecutorHealth::last_fold_secs`] and [`ExecutorHealth::last_fold_rss`].
-    pub last_fold_secs: u64,
-    pub last_fold_rss: u64,
     pub last_fold_attr_read: u64,
     pub last_fold_attr_written: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
@@ -634,8 +625,7 @@ impl ExecutorHealth {
             last_fold_refusal: Mutex::new(None),
             wal_gauge: Mutex::new(WalGauge::default()),
             fold_ended_unix: AtomicU64::new(0),
-            last_fold_secs: AtomicU64::new(0),
-            last_fold_rss: AtomicU64::new(0),
+            last_compactions: Mutex::new(BTreeMap::new()),
             last_fold_attr_read: AtomicU64::new(0),
             last_fold_attr_written: AtomicU64::new(0),
             last_fold_passes: Mutex::new(Vec::new()),
@@ -884,13 +874,10 @@ impl ExecutorHealth {
             folds: self.folds.load(Ordering::Relaxed),
             fold_failures: self.fold_failures.load(Ordering::Relaxed),
             fold_requested: self.fold_requested.load(Ordering::SeqCst),
-            compaction_shard: ShardId::new(self.compaction_shard.load(Ordering::SeqCst)).ok(),
             fold_refusals_by_gate,
             fold_refusals: fold_refusals_by_gate.iter().sum(),
             last_fold_refusal: *lock_recover(&self.last_fold_refusal),
             wal: *lock_recover(&self.wal_gauge),
-            last_fold_secs: self.last_fold_secs.load(Ordering::Relaxed),
-            last_fold_rss: self.last_fold_rss.load(Ordering::Relaxed),
             last_fold_attr_read: self.last_fold_attr_read.load(Ordering::Relaxed),
             last_fold_attr_written: self.last_fold_attr_written.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
@@ -904,11 +891,12 @@ impl ExecutorHealth {
         }
     }
 
-    /// Records what the last fold cost and returns the staircase as one log field, the fold's
+    /// Records what `shard`'s fold cost and returns the staircase as one log field, the fold's
     /// seconds and the highest resident set a pass boundary saw. Total and anonymous memory are
     /// both shown: mapped inputs becoming resident is expected, anonymous growth is not.
     pub(in crate::write) fn record_fold_cost(
         &self,
+        shard: ShardId,
         cost: Vec<crate::compact::PassCost>,
         attr_bytes_read: u64,
         attr_bytes_written: u64,
@@ -934,14 +922,31 @@ impl ExecutorHealth {
             .sum::<std::time::Duration>()
             .as_secs();
         let rss = cost.iter().map(|c| c.rss).max().unwrap_or(0);
-        self.last_fold_secs.store(secs, Ordering::Relaxed);
-        self.last_fold_rss.store(rss, Ordering::Relaxed);
+        lock_recover(&self.last_compactions).insert(
+            shard,
+            crate::status::CompactionCost {
+                secs,
+                rss_bytes: rss,
+            },
+        );
         self.last_fold_attr_read
             .store(attr_bytes_read, Ordering::Relaxed);
         self.last_fold_attr_written
             .store(attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.last_fold_passes) = cost;
         (passes, secs, rss)
+    }
+
+    /// The shard a compaction is running on, or whose finished compaction waits to publish.
+    pub(crate) fn compacting(&self) -> Option<ShardId> {
+        match outstanding(&self.fold_in_flight, &self.fold_completed_pending) {
+            true => ShardId::new(self.compaction_shard.load(Ordering::SeqCst)).ok(),
+            false => None,
+        }
+    }
+
+    pub(crate) fn last_compactions(&self) -> BTreeMap<ShardId, crate::status::CompactionCost> {
+        lock_recover(&self.last_compactions).clone()
     }
 
     /// Record a fold the planner would not plan. Executor thread only, once per refusal.

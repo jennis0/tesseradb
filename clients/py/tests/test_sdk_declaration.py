@@ -319,7 +319,7 @@ def test_a_first_commit_creating_more_items_than_the_size_builds_several_shards(
     try:
         assert db.commit().ok
         status = db.status()
-        assert (status["shards"], status["entity_id_high_water"]) == ({"size": 1}, 2)
+        assert (status["shards"]["size"], status["entity_id_high_water"]) == (1, 2)
     finally:
         db.close()
 
@@ -328,7 +328,7 @@ def test_a_size_declared_at_the_first_commit_takes_a_later_page_past_it(tmp_path
     db, rows = small(tmp_path / "db", size=2)
     try:
         assert db.commit().ok
-        assert db.status()["shards"] == {"size": 2}
+        assert db.status()["shards"]["size"] == 2
         db.insert("map", rows.assign(id=[3, 4]), x="x", y="y", access="access")
         assert db.commit().ok
         assert db.status()["entity_id_high_water"] == 4

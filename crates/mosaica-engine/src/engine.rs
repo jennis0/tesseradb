@@ -719,7 +719,6 @@ fn reconstruct_writes(
         wal_path,
         crate::write::ManifestSeed {
             shards: seeds,
-            next_id: partition.next_shard_id,
             size: shard_size_of(bundle),
             layers: &manifest_layers,
             next_layer_space,

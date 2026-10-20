@@ -104,10 +104,7 @@ fn compacting_one_shard_leaves_the_other_standing() {
     );
 
     assert_eq!(compact(&engine, Some(shard(1))), 1);
-    assert_eq!(
-        engine.write_executor_stats().compaction_shard,
-        Some(shard(1))
-    );
+    assert_eq!(compacted(&engine), vec![shard(1)]);
     let after = records(&several.root);
     assert_eq!(after[0], before[0], "shard 0's identity and denies stand");
     assert_ne!(after[1].0, before[1].0, "shard 1's identity moves");
@@ -154,9 +151,21 @@ fn compacting_one_shard_leaves_the_other_standing() {
 
     assert_eq!(compact(&engine, Some(shard(0))), 1);
     assert_eq!(
-        engine.write_executor_stats().compaction_shard,
-        Some(shard(0))
+        compacted(&engine),
+        vec![shard(0)],
+        "the restart forgot shard 1's compaction"
     );
+}
+
+/// The shards status records a compaction of since the engine opened.
+fn compacted(engine: &Engine) -> Vec<ShardId> {
+    engine
+        .generation_status()
+        .shards
+        .iter()
+        .filter(|record| record.last_compaction.is_some())
+        .map(|record| record.shard)
+        .collect()
 }
 
 /// A deletion in a sealed shard leaves its overlay only at that shard's compaction, and a

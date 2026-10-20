@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mosaica_types::{ShardId, TermId};
+use mosaica_types::{ShardId, ShardState, TermId};
 
 use crate::engine::Engine;
 use crate::Generation;
@@ -71,9 +71,42 @@ pub struct LayerSpacesStatus {
     pub retirable: u64,
 }
 
+/// What a shard's last compaction cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionCost {
+    pub secs: u64,
+    /// The highest resident set seen between the compaction's passes, so a spike inside a pass is
+    /// not in it.
+    pub rss_bytes: u64,
+}
+
+/// One point shard's figures: [`GenerationStatus::shards`]' element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardStatus {
+    pub shard: ShardId,
+    pub state: ShardState,
+    pub high_water: u64,
+    /// Rows the shard's segments hold, deleted ones included.
+    pub live_rows: u64,
+    /// Freed ids waiting to be issued again, held ones included, at every tenancy.
+    pub pool: u64,
+    /// Numbers retired at the last tenancy, never issued again.
+    pub retired: u64,
+    pub deleted: u64,
+    pub suppressed: u64,
+    /// The most segments any one view of the shard holds.
+    pub segments: usize,
+    /// `None` where the shard has not compacted since the service started.
+    pub last_compaction: Option<CompactionCost>,
+    /// Whether a compaction of the shard is running or waits to publish.
+    pub compacting: bool,
+}
+
 /// What [`Engine::generation_status`] answers.
 #[derive(Debug, Clone)]
 pub struct GenerationStatus {
+    /// One per shard the bundle holds, ascending.
+    pub shards: Vec<ShardStatus>,
     pub partitions: Vec<PartitionStatus>,
     /// Sorted by `(partition, view)`.
     pub segments: Vec<ViewSegments>,
@@ -99,6 +132,51 @@ pub(crate) fn live_rows_in(shard: &crate::Shard) -> u64 {
         .iter()
         .map(|descriptor| u64::from(descriptor.row_count))
         .sum()
+}
+
+/// The largest live segment count across `shard`'s views: the maximum, not the sum, since a
+/// viewport in one view pays only that view's own segment count.
+pub(crate) fn live_segments_in(shard: &crate::Shard) -> usize {
+    shard
+        .data
+        .views
+        .values()
+        .map(|view| view.segments.len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Each shard's figures, from the write state and `generation`.
+fn shard_status_of(engine: &Engine, generation: &Generation) -> Vec<ShardStatus> {
+    let health = engine.write.health();
+    let compacting = health.compacting();
+    let last = health.last_compactions();
+    engine
+        .write
+        .live()
+        .shards()
+        .iter()
+        .map(|write| {
+            let id = write.id();
+            let served = generation.shard(id);
+            let overlay = served.map(|shard| &shard.overlay);
+            ShardStatus {
+                shard: id,
+                state: write.state(),
+                high_water: write.high_water(),
+                live_rows: served.map_or(0, live_rows_in),
+                pool: write.pool(),
+                retired: served
+                    .and_then(|shard| shard.data.record.retired_numbers.entities())
+                    .map_or(0, croaring::Bitmap::cardinality),
+                deleted: overlay.map_or(0, |overlay| overlay.deleted_len()),
+                suppressed: overlay.map_or(0, |overlay| overlay.suppressed_set().cardinality()),
+                segments: served.map_or(0, live_segments_in),
+                last_compaction: last.get(&id).copied(),
+                compacting: compacting == Some(id),
+            }
+        })
+        .collect()
 }
 
 /// The point shards' denied items, summed.
@@ -352,12 +430,14 @@ impl Engine {
     pub fn generation_status(&self) -> GenerationStatus {
         let generation = self.generation.load();
         let (depth, retirable) = generation.space_overlay_figures();
+        let shards = shard_status_of(self, &generation);
         GenerationStatus {
+            live_rows: shards.iter().map(|shard| shard.live_rows).sum(),
+            retirable_deletions: shards.iter().map(|shard| shard.deleted).sum(),
+            shards,
             partitions: partition_status_of(&generation),
             segments: segment_counts_of(&generation),
-            live_rows: live_rows_of(&generation),
             overlay_depth: overlay_depth_of(&generation),
-            retirable_deletions: retirable_deletions_of(&generation),
             layer_spaces: LayerSpacesStatus {
                 count: self.write.live().layer_count(),
                 depth,

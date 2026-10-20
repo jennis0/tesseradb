@@ -2004,7 +2004,7 @@ async fn control_compact_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     assert_eq!(
-        control_status(&server).await["compaction"]["shard"],
+        control_status(&server).await["shards"]["records"][0]["last_compaction"],
         serde_json::Value::Null,
         "no compaction has run"
     );
@@ -2057,14 +2057,14 @@ async fn control_compact_is_accepted_and_deferred() {
     assert_eq!(compaction["folds"], 0, "no fold has published: {status}");
     assert_eq!(compaction["fold_failures"], 0, "and none has failed");
     assert!(
-        compaction["last_rss_bytes"].is_u64() && compaction["passes"].is_array(),
+        compaction["passes"].is_array(),
         "the memory gauges are present before the first fold: {compaction}"
     );
 
     flush_and_fold(&server, None).await;
     let status = control_status(&server).await;
-    assert_eq!(
-        status["compaction"]["shard"], 0,
+    assert!(
+        status["shards"]["records"][0]["last_compaction"]["rss_bytes"].is_u64(),
         "the one shard compacted: {status}"
     );
 }
@@ -3813,8 +3813,6 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/compaction/last_refusal/gate", "string"),
     ("/compaction/last_refusal/had_bytes", "integer|null"),
     ("/compaction/last_refusal/need_bytes", "integer|null"),
-    ("/compaction/last_rss_bytes", "integer"),
-    ("/compaction/last_secs", "integer"),
     ("/compaction/live_rows", "integer"),
     ("/compaction/passes", "array"),
     ("/compaction/passes/*", "object"),
@@ -3822,7 +3820,6 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/compaction/passes/*/ms", "integer"),
     ("/compaction/passes/*/pass", "string"),
     ("/compaction/passes/*/rss_bytes", "integer"),
-    ("/compaction/shard", "integer|null"),
     ("/compute", "object"),
     ("/compute/admission", "integer"),
     ("/compute/in_flight", "integer"),
@@ -3981,6 +3978,21 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/sessions/sweeps", "integer"),
     ("/sessions/swept_total", "integer"),
     ("/shards", "object"),
+    ("/shards/records", "array"),
+    ("/shards/records/*", "object"),
+    ("/shards/records/*/compacting", "bool"),
+    ("/shards/records/*/deleted", "integer"),
+    ("/shards/records/*/high_water", "integer"),
+    ("/shards/records/*/last_compaction", "null|object"),
+    ("/shards/records/*/last_compaction/rss_bytes", "integer"),
+    ("/shards/records/*/last_compaction/secs", "integer"),
+    ("/shards/records/*/live_rows", "integer"),
+    ("/shards/records/*/pool", "integer"),
+    ("/shards/records/*/retired", "integer"),
+    ("/shards/records/*/segments", "integer"),
+    ("/shards/records/*/shard", "integer"),
+    ("/shards/records/*/state", "string"),
+    ("/shards/records/*/suppressed", "integer"),
     ("/shards/size", "integer"),
     ("/suggest_sets", "object"),
     ("/suggest_sets/builds", "integer"),

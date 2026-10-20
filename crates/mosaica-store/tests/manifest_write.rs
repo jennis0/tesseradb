@@ -405,7 +405,7 @@ fn a_publication_writes_only_the_shard_it_changed_and_the_partition_file() {
         .map(|r| r.watermark)
         .collect();
     assert_eq!(watermarks, vec![5, 3]);
-    assert_eq!(published.manifest.shards.next_id, 2);
+    assert_eq!(published.manifest.shards.next_id(), 2);
 }
 
 /// **A shard file a crash left uncommitted raises the floor, and the next publication's prune
@@ -501,7 +501,6 @@ fn the_shard_and_space_fields_round_trip() {
     let prefix_dir = tmp.path();
     let space = mosaica_types::LayerSpace::new(3).unwrap();
     let mut manifest = SegmentsManifest::empty();
-    manifest.shards.next_id = 5;
     let record = manifest.only_shard_mut();
     record.state = mosaica_types::ShardState::Sealed;
     record.identity = mosaica_store::manifest::shard_identity(&[9; 32], record.id);
@@ -528,7 +527,6 @@ fn the_shard_and_space_fields_round_trip() {
     let refs = write_publication(prefix_dir, "default", 1, &manifest, None).unwrap();
     assert!(!refs.shards[0].denies && refs.layer_spaces[0].denies);
     let read = read_publication(prefix_dir, "default", 1).unwrap().manifest;
-    assert_eq!(read.shards.next_id, 5);
     let back = read.only_shard();
     let written = manifest.only_shard();
     assert_eq!(back.state, written.state);

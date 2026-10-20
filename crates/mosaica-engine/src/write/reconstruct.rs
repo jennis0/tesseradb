@@ -10,8 +10,6 @@ use super::*;
 pub(crate) struct ManifestSeed<'a> {
     /// Every point shard's allocator seed, ascending by shard.
     pub shards: Vec<ShardSeed>,
-    /// The served side-manifest's `shards.next_id`.
-    pub next_id: u32,
     /// The served side-manifest's `shards.size`.
     pub size: u64,
     pub layers: &'a [mosaica_types::layer::RegisteredLayer],
@@ -116,7 +114,6 @@ impl WritePath {
         let wal = Wal::open(wal_path).map_err(EngineError::Wal)?;
         let shard_ids: Vec<ShardId> = seed.shards.iter().map(|shard| shard.id).collect();
         let mut seeds = seed.shards;
-        let mut next_shard_id = seed.next_id;
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
         // second is read against: the declarations, the registry an extent's ordinals resolve
@@ -327,7 +324,6 @@ impl WritePath {
                     if !seeds.iter().any(|seed| seed.id == *shard) {
                         seeds.push(ShardSeed::opened(*shard));
                     }
-                    next_shard_id = next_shard_id.max(shard.raw() + 1);
                 }
                 WalRecord::ShardSeal { shard } => {
                     let Some(sealed) = seeds.iter_mut().find(|seed| seed.id == *shard) else {
@@ -546,7 +542,6 @@ impl WritePath {
             WritePathState {
                 wal,
                 shards,
-                next_shard_id,
                 size,
                 resolver_state,
                 accepted_batches,
@@ -1016,11 +1011,10 @@ mod tests {
         );
     }
 
-    /// The write state a log of `records` rebuilds over a manifest naming `seeds`, at
-    /// `shards.next_id` `next_id` and size 100, with several shards taking writes.
+    /// The write state a log of `records` rebuilds over a manifest naming `seeds`, at size 100,
+    /// with several shards taking writes.
     fn replayed(
         seeds: Vec<ShardSeed>,
-        next_id: u32,
         records: &[WalRecord],
     ) -> Result<WritePathState, EngineError> {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1056,7 +1050,6 @@ mod tests {
         };
         let seed = ManifestSeed {
             shards: seeds,
-            next_id,
             size: 100,
             layers: &[],
             next_layer_space: 0,
@@ -1097,14 +1090,16 @@ mod tests {
         }
     }
 
-    /// `(id, state, high water)` of each shard the write path holds, and `next_id`.
+    /// `(id, state, high water)` of each shard the write path holds, and the next shard's number.
     fn shards_of(state: &WritePathState) -> (Vec<(u32, mosaica_types::ShardState, u64)>, u32) {
         let shards = state
             .shards
             .iter()
             .map(|shard| (shard.id.raw(), shard.state(), shard.high_water()))
             .collect();
-        (shards, state.next_shard_id)
+        let next =
+            mosaica_store::manifest::next_shard_id(state.shards.iter().map(|shard| shard.id));
+        (shards, next)
     }
 
     fn row(shard: u32, entity: u64) -> mosaica_lifecycle::wal::WalRow {
@@ -1121,8 +1116,8 @@ mod tests {
         }
     }
 
-    /// A shard the log opens is seeded open at high water 0 and moves `next_id` past it, and the
-    /// rows the log gives it raise its high water alone; a seal seals the shard it names.
+    /// A shard the log opens is seeded open at high water 0, the next shard numbered past it, and
+    /// the rows the log gives it raise its high water alone; a seal seals the shard it names.
     #[test]
     fn the_logs_openings_and_seals_seed_each_shard() {
         use mosaica_types::ShardState::{Open, Sealed};
@@ -1139,7 +1134,7 @@ mod tests {
                 receipt: Vec::new(),
             },
         ];
-        let state = replayed(vec![held(0, Sealed, 25), held(1, Open, 15)], 2, &records)
+        let state = replayed(vec![held(0, Sealed, 25), held(1, Open, 15)], &records)
             .expect("the log replays");
         assert_eq!(
             shards_of(&state),
@@ -1149,7 +1144,6 @@ mod tests {
         // An opening the manifests already publish changes nothing.
         let state = replayed(
             vec![held(0, Sealed, 25), held(1, Open, 15)],
-            2,
             &[WalRecord::ShardOpen { shard: one }],
         )
         .expect("the log replays");
@@ -1173,16 +1167,13 @@ mod tests {
         let three = ShardId::new(3).unwrap();
         for records in [vec![batch], vec![WalRecord::ShardSeal { shard: three }]] {
             assert!(
-                matches!(
-                    replayed(seeds(), 2, &records),
-                    Err(EngineError::Malformed(_))
-                ),
+                matches!(replayed(seeds(), &records), Err(EngineError::Malformed(_))),
                 "{records:?}"
             );
         }
         let one = ShardId::new(1).unwrap();
-        let state = replayed(seeds(), 2, &[WalRecord::ShardSeal { shard: one }])
-            .expect("the log replays");
+        let state =
+            replayed(seeds(), &[WalRecord::ShardSeal { shard: one }]).expect("the log replays");
         assert_eq!(
             shards_of(&state),
             (vec![(0, Sealed, 25), (1, Sealed, 15)], 2)

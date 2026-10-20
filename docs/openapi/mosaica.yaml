@@ -7265,12 +7265,71 @@ components:
         shards:
           type: object
           additionalProperties: false
-          required: [size]
+          required: [size, records]
           properties:
             size:
               type: integer
               minimum: 1
               description: The high water at which the open shard seals, as `PUT /control/shards` or the build's `[shards]` declared it.
+            records:
+              type: array
+              description: One record per shard the bundle holds, ascending by number.
+              items:
+                type: object
+                additionalProperties: false
+                required: [shard, state, high_water, live_rows, pool, retired, deleted, suppressed, segments, last_compaction, compacting]
+                properties:
+                  shard:
+                    type: integer
+                    minimum: 0
+                  state:
+                    type: string
+                    enum: [open, sealed]
+                    description: An open shard takes new items at its high water; a sealed one only into ids its compactions freed.
+                  high_water:
+                    type: integer
+                    minimum: 0
+                    description: One past the highest id the shard's allocator has issued.
+                  live_rows:
+                    type: integer
+                    minimum: 0
+                    description: Rows the shard's segments hold, deleted ones not yet compacted included.
+                  pool:
+                    type: integer
+                    minimum: 0
+                    description: Freed ids waiting to be issued again, at every tenancy, those held until the log moves past them included.
+                  retired:
+                    type: integer
+                    minimum: 0
+                    description: Numbers retired at the last tenancy, which are never issued again.
+                  deleted:
+                    type: integer
+                    minimum: 0
+                    description: Deleted items whose rows a compaction of the shard has not yet removed.
+                  suppressed:
+                    type: integer
+                    minimum: 0
+                    description: Suppressed items in the shard.
+                  segments:
+                    type: integer
+                    minimum: 0
+                    description: The most segments any one view of the shard holds.
+                  last_compaction:
+                    description: The shard's last compaction since the service started, or `null` where it has had none.
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        additionalProperties: false
+                        required: [secs, rss_bytes]
+                        properties:
+                          secs: { type: integer, minimum: 0 }
+                          rss_bytes:
+                            type: integer
+                            minimum: 0
+                            description: The highest resident memory sampled between its passes, so it understates the peak.
+                  compacting:
+                    type: boolean
+                    description: Whether a compaction of the shard is running or waits to publish.
         publication:
           type: integer
           minimum: 0
@@ -7951,7 +8010,7 @@ components:
       type: object
       additionalProperties: false
       description: Compaction folds. Alarm on `fold_failures`, and on `fold_refusals` rising while `folds` does not.
-      required: [live_rows, folds, fold_failures, fold_requested, shard, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
+      required: [live_rows, folds, fold_failures, fold_requested, fold_refusals, fold_refusals_by_gate, last_refusal, last_attr_bytes_read, last_attr_bytes_written, passes]
       properties:
         live_rows:
           type: integer
@@ -7968,10 +8027,6 @@ components:
         fold_requested:
           type: boolean
           description: True from a `POST /control/compact` until the last compaction it asked for publishes, is discarded or is refused.
-        shard:
-          type: [integer, "null"]
-          minimum: 0
-          description: The shard the running compaction is on, or the last one's when none runs; null before the first since the service started.
         fold_refusals:
           type: integer
           minimum: 0
@@ -8010,11 +8065,6 @@ components:
                   type: integer
                   minimum: 0
                   description: When, in seconds since the Unix epoch.
-        last_secs: { type: integer, minimum: 0 }
-        last_rss_bytes:
-          type: integer
-          minimum: 0
-          description: The last fold's resident memory, sampled between passes, so it understates the peak.
         last_attr_bytes_read: { type: integer, minimum: 0 }
         last_attr_bytes_written: { type: integer, minimum: 0 }
         passes:

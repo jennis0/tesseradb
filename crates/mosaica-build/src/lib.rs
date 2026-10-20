@@ -2525,7 +2525,6 @@ fn write_manifests(
         },
         shards: mosaica_store::manifest::Shards {
             size: args.shard_size(),
-            next_id: shards.len() as u32,
             records,
         },
         layer_spaces: published_layers.layer_spaces.clone(),

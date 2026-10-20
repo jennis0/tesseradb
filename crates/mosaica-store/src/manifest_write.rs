@@ -292,7 +292,6 @@ pub fn stage_publication(
         partition: fields,
         shards: ShardFiles {
             size: manifest.shards.size,
-            next_id: manifest.shards.next_id,
             files: refs.shards.clone(),
         },
         layer_spaces: refs.layer_spaces.clone(),

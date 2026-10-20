@@ -357,9 +357,9 @@ describe('Control against a live server', () => {
     const highWater = Number((await control.status()).body.entity_id_high_water);
     expect((await control.declareShards({size: highWater})).status).toBe(201);
     expect((await control.declareShards({size: highWater})).body).toMatchObject({size: highWater, existing: true});
-    expect((await control.status()).body.shards).toEqual({size: highWater});
+    expect((await control.status()).body.shards).toMatchObject({size: highWater});
     expect((await control.declareShards({size: highWater - 1})).status).toBe(201);
-    expect((await control.status()).body.shards).toEqual({size: highWater - 1});
+    expect((await control.status()).body.shards).toMatchObject({size: highWater - 1});
     expect((await control.declareShards({size: 0})).status).toBe(422);
     const q = meta.views.find((v) => v.id === 's0')!.quantisation;
     const page = tableToIPC(

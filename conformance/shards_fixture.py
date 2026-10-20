@@ -20,6 +20,7 @@ from pyarrow import ipc
 import declared_fixture as fx
 from declared_fixture import BBOX, PRINCIPALS, WORLD, Column, Corpus, Deployment
 from oracle.bundle import Bundle
+from oracle.harness import shards_mode, shards_toml
 from oracle.identity import invert_item
 from oracle.tenancy import HolderCount
 from oracle.wire import decode_viewport, split_aggregate_frames, split_items_frames
@@ -28,16 +29,14 @@ from oracle.wire import decode_viewport, split_aggregate_frames, split_items_fra
 SCORE = Column("score", "u32", pa.uint32(), lambda i: 3 * i, render=True)
 
 
-def shards_toml(size: int) -> str:
-    return f"[shards]\nsize = {size}\n"
-
-
 class Shards:
     """One deployment of `n_items` items at `[shards] size = size`, served."""
 
     def __init__(self, work: Path, n_items: int, size: int):
         Deployment.stop_all()
-        blocks = [shards_toml(size), fx.plain_view_toml(), fx.fx_column().toml(), SCORE.toml()]
+        with shards_mode(True):
+            shards = shards_toml(n_items, size=size)
+        blocks = [shards, fx.plain_view_toml(), fx.fx_column().toml(), SCORE.toml()]
         world = {WORLD: (list(range(n_items)), [fx.fx_column(), SCORE], 0, fx.WORLD_EXTENT)}
         self.d = Deployment(work, Corpus(blocks, world))
         built = Bundle(self.d.bundle)

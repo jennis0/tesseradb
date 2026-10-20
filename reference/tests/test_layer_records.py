@@ -34,7 +34,7 @@ def test_the_newest_side_manifest_of_the_live_prefix_is_read(tmp_path):
             "n": n,
             "layers": [],
             "files": {},
-            "shards": {"size": 7, "next_id": 0, "files": []},
+            "shards": {"size": 7, "files": []},
             "layer_spaces": [],
         }
         (partition / f"SEGMENTS-{n}.json").write_text(json.dumps(published))

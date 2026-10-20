@@ -63,6 +63,12 @@ CENSUS_CANDIDATES = 6
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
+def last_compactions(status: dict) -> dict[int, dict]:
+    """Each shard's last compaction since the server started, by shard."""
+    records = status["shards"]["records"]
+    return {r["shard"]: r["last_compaction"] for r in records if r["last_compaction"]}
+
+
 def executor_laps(before: dict, after: dict, rows: int) -> dict:
     """The `WriteStage` laps across one ingest phase, µs per accepted row, differenced rather
     than read absolute since the laps are process totals. All zero without `bench-timing`.
@@ -866,34 +872,41 @@ class Cycle:
         """`POST /control/compact`, and the compaction block once the request is answered: the
         server compacts every shard with something to reclaim, one after another, and keeps
         `fold_requested` raised until the last publishes. Each compaction seen to publish is
-        recorded with its seconds and its peak memory; the shards whose identity moved on disc are
-        the ones compacted. `completed` is false where [`compaction_answered`] raises, and
+        recorded with its shard, seconds and peak memory; the shards whose identity moved on disc
+        are the ones compacted. `completed` is false where [`compaction_answered`] raises, and
         `fold_failures` and `fold_refusals` say why."""
-        before = control.status()["compaction"]
+        first = control.status()
+        before, costs_before = first["compaction"], last_compactions(first)
         identities = self.shard_identities()
         code = control.compact().status_code
         compactions: list[dict] = []
-        seen = before["folds"]
+        seen, costs_seen = before["folds"], costs_before
 
         # A request is answered when its last compaction publishes, is discarded or is refused,
         # so `fold_requested` falling ends the wait whichever happened.
         def settled() -> bool:
-            nonlocal seen
-            now = control.status()["compaction"]
+            nonlocal seen, costs_seen
+            status = control.status()
+            now, costs = status["compaction"], last_compactions(status)
             if now["folds"] > seen:
-                compactions.append(
-                    {
-                        "folds": now["folds"],
-                        "fold_s": now.get("last_secs"),
-                        "fold_peak_rss_bytes": now.get("last_rss_bytes"),
-                        "missed": now["folds"] - seen - 1,
-                    }
-                )
-                seen = now["folds"]
+                for shard, cost in sorted(costs.items()):
+                    if costs_seen.get(shard) != cost:
+                        compactions.append(
+                            {
+                                "folds": now["folds"],
+                                "shard": shard,
+                                "fold_s": cost["secs"],
+                                "fold_peak_rss_bytes": cost["rss_bytes"],
+                                "missed": now["folds"] - seen - 1,
+                            }
+                        )
+                seen, costs_seen = now["folds"], costs
             return not now["fold_requested"]
 
         settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
-        compaction = control.status()["compaction"]
+        last = control.status()
+        compaction = last["compaction"]
+        ran = [c for s, c in last_compactions(last).items() if costs_before.get(s) != c]
         try:
             done = settled_in_time and compaction_answered(before, compaction)
         except RuntimeError:
@@ -903,8 +916,8 @@ class Cycle:
             "status": code,
             "completed": done,
             "observed_s": round(wall, 2),
-            "fold_s": compaction.get("last_secs"),
-            "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
+            "fold_s": sum(c["secs"] for c in ran) if ran else None,
+            "fold_peak_rss_bytes": max((c["rss_bytes"] for c in ran), default=None),
             "folds": compaction.get("folds"),
             "compactions": compactions,
             "shards_compacted": sorted(

@@ -269,14 +269,23 @@ fn a_batch_past_the_size_straddles_into_a_new_shard() {
     assert_eq!(engine.allocator_high_water(), size + 3);
 }
 
-/// Three batches queue behind a parked window when one shard number is left: `a` fits, `b` needs
-/// a shard past the last number and is refused alone, creating nothing, and `c` fits after `a`.
+/// Three batches queue behind a parked window when one shard number is left, the log having opened
+/// and sealed the one before it: `a` fits, `b` needs a shard past the last number and is refused
+/// alone, creating nothing, and `c` fits after `a`.
 #[test]
 fn a_batch_needing_a_shard_past_the_last_number_is_refused_alone() {
     let tmp = built(None);
-    edit_side_manifest(&tmp.path().join("bundle"), |manifest| {
-        manifest.shards.next_id = ShardId::LIMIT - 1;
-    });
+    let before_last = ShardId::new(ShardId::LIMIT - 2).unwrap();
+    let opened = [
+        WalRecord::ShardOpen { shard: before_last },
+        WalRecord::ShardSeal { shard: before_last },
+    ];
+    let mut wal = mosaica_lifecycle::wal::Wal::open(tmp.path().join("wal.log")).unwrap();
+    for record in &opened {
+        wal.append(record).unwrap();
+    }
+    wal.fsync().unwrap();
+    drop(wal);
     let (engine, faults) = engine_over(tmp.path());
     let size = N + 4;
     engine.declare_shards(size).expect("the size is declared");
@@ -311,6 +320,8 @@ fn a_batch_needing_a_shard_past_the_last_number_is_refused_alone() {
     assert_eq!(
         shard_records(tmp.path()),
         [
+            opened[0].clone(),
+            opened[1].clone(),
             WalRecord::ShardsDeclare { size },
             WalRecord::ShardSeal {
                 shard: ShardId::ZERO

@@ -106,7 +106,9 @@ pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;
 pub use session::Session;
 pub use slots::{check_palette_size, SlotStats, PALETTE_SIZES};
-pub use status::{GenerationStatus, LayerSpacesStatus, PartitionStatus, ViewSegments};
+pub use status::{
+    CompactionCost, GenerationStatus, LayerSpacesStatus, PartitionStatus, ShardStatus, ViewSegments,
+};
 pub use mosaica_cache::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLIGHT_WAIT_MS};
 pub use derived::ComputedProperty;
 pub use membership_column::MembershipColumn;

@@ -344,9 +344,9 @@ impl std::fmt::Display for ManifestRegression {
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
 /// **Compared: every ordered scalar** — each shard's `watermark`, `high_water` and state (open
-/// before sealed: nothing reopens a shard), and the partition's `layer_registry_version` and
-/// `shards.next_id`; the rest are lists and maps no total order describes. A new ordered scalar
-/// joins this comparison, and a served shard's record may not be dropped.
+/// before sealed: nothing reopens a shard), and the partition's `layer_registry_version`; the rest
+/// are lists and maps no total order describes. A new ordered scalar joins this comparison, and a
+/// served shard's record may not be dropped.
 pub(crate) fn check_manifest_publishable(
     live: &mosaica_store::read::PartitionData,
     next: &mosaica_store::manifest::SegmentsManifest,
@@ -374,13 +374,6 @@ pub(crate) fn check_manifest_publishable(
                 });
             }
         }
-    }
-    if next.shards.next_id < live.next_shard_id {
-        return Err(ManifestRegression {
-            field: "next_id",
-            live: live.next_shard_id.into(),
-            offered: next.shards.next_id.into(),
-        });
     }
     if next.partition.layer_registry_version < live.manifest.layer_registry_version {
         return Err(ManifestRegression {
@@ -509,29 +502,14 @@ mod tests {
             .expect_err("a manifest that drops a served shard's record is refused");
     }
 
-    /// **The shard counter never falls and a sealed shard never reopens.**
+    /// **A sealed shard never reopens.**
     #[test]
-    fn a_side_manifest_may_not_lower_next_id_or_reopen_a_shard() {
+    fn a_side_manifest_may_not_reopen_a_shard() {
         let mut sealed = manifest_at(100, 200);
-        sealed.shards.next_id = 3;
         sealed.only_shard_mut().state = mosaica_types::ShardState::Sealed;
         let live = crate::generation::partition_of(sealed.clone());
 
         assert!(check_manifest_publishable(&live, &sealed).is_ok());
-        let mut opened = sealed.clone();
-        opened.shards.next_id = 4;
-        assert!(
-            check_manifest_publishable(&live, &opened).is_ok(),
-            "a shard opened raises the counter"
-        );
-
-        let mut fallen = sealed.clone();
-        fallen.shards.next_id = 2;
-        let refused = check_manifest_publishable(&live, &fallen)
-            .expect_err("a falling shard counter is refused");
-        assert_eq!(refused.field, "next_id");
-        assert_eq!((refused.live, refused.offered), (3, 2));
-
         let mut reopened = sealed;
         reopened.only_shard_mut().state = mosaica_types::ShardState::Open;
         let refused = check_manifest_publishable(&live, &reopened)

@@ -201,7 +201,7 @@ pub fn recorded(manifest: &SegmentsManifest) -> Recorded {
             )
         })
         .collect();
-    (shards, manifest.shards.next_id)
+    (shards, manifest.shards.next_id())
 }
 
 fn u64s(batch: &RecordBatch, name: &str) -> Vec<u64> {

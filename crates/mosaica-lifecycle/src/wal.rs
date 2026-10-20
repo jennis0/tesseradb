@@ -480,7 +480,7 @@ pub enum WalRecord {
     /// keeps.
     ShardsDeclare { size: u64 },
     /// A point shard opened at a running service, at high water 0, in the fsync that first
-    /// writes a row into it. Replay seeds the shard and moves `shards.next_id` past it.
+    /// writes a row into it. Replay seeds the shard.
     ShardOpen { shard: ShardId },
     /// A point shard sealed: it takes no new item at its high water again. Replay seals it.
     ShardSeal { shard: ShardId },

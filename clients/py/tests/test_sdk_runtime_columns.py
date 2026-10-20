@@ -367,7 +367,7 @@ def test_a_size_declared_after_the_first_commit_is_sent_where_the_server_reports
         # The two rows take the high water from 2 to the size 3 sent before them, and a second
         # shard holds the one past it.
         assert db.commit().ok
-        assert (db.status()["shards"], db.status()["entity_id_high_water"]) == ({"size": 3}, 4)
+        assert (db.status()["shards"]["size"], db.status()["entity_id_high_water"]) == (3, 4)
         assert [line for line in db.check().plan if line.startswith("declare")] == []
     finally:
         db.close()
@@ -379,7 +379,7 @@ def test_a_size_below_the_high_water_seals_the_shard_at_the_commit_and_after_a_r
         assert db.commit().ok
         db.declare_shards(1)
         assert db.commit().ok
-        assert db.status()["shards"] == {"size": 1}
+        assert db.status()["shards"]["size"] == 1
         db.insert("map", rows.head(1).assign(id=[3]), x="x", y="y", access="access")
         assert db.commit().ok
         assert db.status()["entity_id_high_water"] == 3
@@ -388,7 +388,7 @@ def test_a_size_below_the_high_water_seals_the_shard_at_the_commit_and_after_a_r
 
     again = reopen(tmp_path / "db")
     try:
-        assert again.status()["shards"] == {"size": 1}
+        assert again.status()["shards"]["size"] == 1
         again.insert("map", rows.head(1).assign(id=[4]), x="x", y="y", access="access")
         assert again.commit().ok
         assert again.status()["entity_id_high_water"] == 4

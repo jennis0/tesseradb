@@ -154,9 +154,10 @@ fn the_current_flip_site_parks_the_fold_with_the_old_prefix_still_committed() {
 
 /// **The fold's cost on `/control/status` covers its publication.** The staircase the fold thread
 /// records ends at its fifth pass; the executor continues it through the publication's phases, so
-/// `last_fold_secs` and the pass list report the fold from the thread's entry to the superseded
-/// prefix's reclaim. Shown by parking the executor at the flip for over a second: the thread's
-/// passes over this fixture take milliseconds, so a gauge that covered them alone would read zero.
+/// the shard's compaction seconds and the pass list report the fold from the thread's entry to the
+/// superseded prefix's reclaim. Shown by parking the executor at the flip for over a second: the
+/// thread's passes over this fixture take milliseconds, so a gauge that covered them alone would
+/// read zero.
 #[test]
 fn the_fold_status_covers_the_publication() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -213,13 +214,17 @@ fn the_fold_status_covers_the_publication() {
         flip.elapsed
     );
     let whole: Duration = passes.iter().map(|p| p.elapsed).sum();
+    let secs = engine.generation_status().shards[0]
+        .last_compaction
+        .expect("the shard's compaction is recorded")
+        .secs;
     assert_eq!(
-        engine.write_executor_stats().last_fold_secs,
+        secs,
         whole.as_secs(),
-        "last_fold_secs is the whole staircase in seconds"
+        "the compaction's seconds are the whole staircase"
     );
     assert!(
-        engine.write_executor_stats().last_fold_secs >= 1,
+        secs >= 1,
         "which is at least the publication's wall: the thread's passes alone are under a second here"
     );
     assert!(

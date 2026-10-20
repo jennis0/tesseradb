@@ -522,7 +522,7 @@ so it costs no more at request time than an enumerated one.
 | Flush | A newly published point joins any attribute-predicate or shape artifact it matches, and every enumerated artifact its ingest row or a publication named. Until its flush into a view, a point has no row in that view and is in no count there | Each such artifact's count, and its hull where one is declared, grow on the next request after the flush |
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes. Each held row form is rebased onto the new numbering when the merge is published | Nothing, except for a request whose row space was taken before the merge was published and which finds the held form already rebased. That request builds its own row form from the artifact store over its own row space, so its counts include every growth and publication accepted since the held form was last published. The request after it is served the published form again, so a count can fall back by those writes until they are next published. Neither answer counts a membership the store does not hold or a point the viewer cannot see |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
-| Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. What happens to content generated from the deleted member follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
+| Compaction | The deleted member's row is dropped, and each enumerated or shape level served from a column has its column, member bitmaps and coverings written again over the new rows. Content generated from the deleted member is withdrawn with its generating set, and listed in the compaction's report, `reports/fold-<prefix>.json` in the bundle root | Nothing: content generated from the deleted point stopped serving at the deletion and does not return |
 | An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `mosaica_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately, and its key is free at once: a publication under it creates a new artifact. Its record, its supplied content and every edge naming it leave at the compaction of the last point shard whose membership slice lists it ([compaction](write-path.md#compaction)). Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
@@ -544,17 +544,14 @@ each row's scalar keys at that level, as a member file's `level` column does at 
 level is level 0. A list's positions carry its levels, so a `level` column beside a list is not
 read. No attribute or layer may be named `level`, so the column always means this.
 
-A layer's supplied content declares, once, how it behaves when a point behind it is deleted. Either
-way the content stops serving the moment the deletion is accepted, because a generating set that no
-longer matches every visible member fails containment for every viewer, whatever the declaration
-says. The declaration decides what happens next, at the compaction. Under **strict**, the default,
-the compaction drops the content and its generating set for good. Under **permissive**, the
-compaction removes the deleted point from the generating set, and the content resumes serving to
-viewers who can see every point that remains, unless the deletion took the last of them, in which
-case it is dropped exactly as under strict. A content's rank is its position among the artifact's
-contents. A dropped content's rank is withdrawn: no later content takes it, and the contents after
-it keep their ranks. A content supplied at a rank that holds none, withdrawn or past the last, is a
-new content at the next free rank, with its generating set, at any time in the artifact's life.
+Supplied content stops serving the moment a point in its generating set is deleted, because a
+generating set that no longer matches every visible member fails containment for every viewer. The
+compaction that removes the point withdraws the content and its generating set for good, and reports
+it. To serve it again, the caller supplies it again, which takes the next free rank. A content's
+rank is its position among the artifact's contents. A withdrawn content's rank stays withdrawn: no
+later content takes it, and the contents after it keep their ranks. A content supplied at a rank
+that holds none, withdrawn or past the last, is a new content at the next free rank, with its
+generating set, at any time in the artifact's life.
 
 ## Dropping a layer
 

@@ -903,7 +903,9 @@ impl Executor {
                         .map(|(shard, alloc)| (shard.id, &mut **alloc))
                         .collect(),
                     size: self.live.shard_size(),
-                    next_id: self.live.next_shard_id(),
+                    next_id: mosaica_store::manifest::next_shard_id(
+                        shards.iter().map(|shard| shard.id),
+                    ),
                 },
                 mosaica_id_of,
             )

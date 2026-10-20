@@ -225,7 +225,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert!(!shard.record.deny.carries());
     // One shard, so it is the open one, and the next shard opened takes 1.
     assert_eq!(shard.record.state, mosaica_types::ShardState::Open);
-    assert_eq!(part.next_shard_id, 1);
+    assert_eq!(part.next_shard_id(), 1);
     // Its identity is derived from the digest `CURRENT` names, and stored.
     let current: mosaica_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();

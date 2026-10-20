@@ -790,7 +790,6 @@ pub(crate) fn partition_of(
     mosaica_store::read::PartitionData {
         manifest: manifest.partition,
         shard_size: manifest.shards.size,
-        next_shard_id: manifest.shards.next_id,
         refs: Default::default(),
         segments_n: 0,
         highest_candidate_n: 0,

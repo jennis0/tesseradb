@@ -99,11 +99,11 @@ def read_publication(prefix_dir: Path, n: int, partition: str = "default") -> di
             raise ValueError(f"{kind} {named[key]}'s file holds {kind} {record.get(key)}'s record")
         files.update(record.pop("files"))
         held.append(record)
-    _check_stored_fields(shards["next_id"], records, spaces)
+    _check_stored_fields(records, spaces)
     return {
         **published,
         "files": files,
-        "shards": {"size": shards["size"], "next_id": shards["next_id"], "records": records},
+        "shards": {"size": shards["size"], "records": records},
         "layer_spaces": spaces,
     }
 
@@ -134,7 +134,7 @@ def holds_only_the_build_publication(prefix_dir: Path) -> bool:
     )
 
 
-def _check_stored_fields(next_id: int, records: list[dict], spaces: list[dict]) -> None:
+def _check_stored_fields(records: list[dict], spaces: list[dict]) -> None:
     """Refuses shard and space fields no writer writes."""
     ids = {record["id"] for record in records}
     for record in records:
@@ -143,8 +143,6 @@ def _check_stored_fields(next_id: int, records: list[dict], spaces: list[dict]) 
         identity = record["identity"]
         if len(identity) != 64 or any(c not in "0123456789abcdef" for c in identity):
             raise ValueError(f"shard {record['id']}'s identity {identity!r} is not a digest")
-        if record["id"] >= next_id:
-            raise ValueError(f"shard {record['id']} is numbered at or past next_id {next_id}")
     for space in spaces:
         for owed in space["owed"]:
             if owed["shard"] not in ids:

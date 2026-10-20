@@ -529,7 +529,6 @@ impl Executor {
             (record.free_entities, record.held_entities) = shard.freed();
             record.state = record.state.max(shard.state());
         }
-        manifest.shards.next_id = manifest.shards.next_id.max(self.live.next_shard_id());
         manifest.shards.size = self.live.shard_size();
         let partition = &mut manifest.partition;
         partition.layers = registry.layers;

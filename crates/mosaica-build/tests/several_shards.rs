@@ -927,7 +927,7 @@ fn a_build_of_exactly_the_size_is_sealed_and_one_item_past_it_opens_a_second_sha
             .map(|shard| shard.record.state)
             .collect();
         assert_eq!(recorded, states, "at size {size}");
-        assert_eq!(partition.next_shard_id as usize, held.len());
+        assert_eq!(partition.next_shard_id() as usize, held.len());
         let identities: std::collections::BTreeSet<[u8; 32]> = partition
             .shards
             .iter()

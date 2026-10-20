@@ -241,8 +241,6 @@ pub struct PartitionData {
     pub manifest: PartitionManifest,
     /// The side-manifest's `shards.size`.
     pub shard_size: u64,
-    /// The side-manifest's `shards.next_id`.
-    pub next_shard_id: u32,
     /// The shard and layer-space files the served `SEGMENTS-<n>.json` names.
     pub refs: PublishedRefs,
     /// The `n` of the `SEGMENTS-<n>.json` actually served, taken from the filename.
@@ -299,6 +297,11 @@ impl PartitionData {
         self.highest_candidate_n > self.segments_n
     }
 
+    /// The number the next shard opened takes.
+    pub fn next_shard_id(&self) -> u32 {
+        crate::manifest::next_shard_id(self.shards.iter().map(|shard| shard.record.id))
+    }
+
     pub fn shard(&self, id: ShardId) -> Option<&Arc<ShardData>> {
         self.shards.iter().find(|shard| shard.record.id == id)
     }
@@ -352,7 +355,6 @@ impl PartitionData {
             partition: self.manifest.clone(),
             shards: Shards {
                 size: self.shard_size,
-                next_id: self.next_shard_id,
                 records: self
                     .shards
                     .iter()
@@ -418,7 +420,6 @@ impl PartitionData {
         Ok(PartitionData {
             manifest: partition_manifest,
             shard_size: published_shards.size,
-            next_shard_id: published_shards.next_id,
             refs,
             segments_n: n,
             highest_candidate_n: n,
@@ -682,7 +683,6 @@ impl Bundle {
             });
         }
         data.manifest.files.extend(files);
-        data.next_shard_id = data.next_shard_id.max(record.id.raw() + 1);
         let layout = ShardLayout::new(partition, record.id);
         let digests = Digests {
             side: &data.manifest.files,
@@ -930,7 +930,6 @@ fn open_prefix(
             shards:
                 Shards {
                     size: shard_size,
-                    next_id: next_shard_id,
                     records,
                 },
             layer_spaces,
@@ -973,7 +972,6 @@ fn open_prefix(
             PartitionData {
                 manifest: partition_manifest,
                 shard_size,
-                next_shard_id,
                 refs: selected.refs,
                 segments_n: selected.n,
                 highest_candidate_n: selected.highest_candidate_n,

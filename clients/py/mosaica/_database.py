@@ -1830,6 +1830,7 @@ class Database:
         each write request accepts. `overlay` counts the items deleted or hidden and not yet
         compacted. `layer_spaces` counts the layers in `count`, their annotations and the layers
         themselves deleted or hidden in `depth`, and those deleted alone in `retirable`.
+        `shards.records` holds one record per shard.
         """
         self._refuse_before_the_first_commit("status")
         return _accepted(self.control.status_answer(), "status")
@@ -1840,7 +1841,7 @@ class Database:
         It returns `{}` once the server has accepted the request, before the work is done. The
         server compacts every shard with something to reclaim, one after another. A request made
         while a compaction runs is held until that compaction lands. The `compaction` block of
-        `status()` shows what happened.
+        `status()` and each shard's record in `shards.records` show what happened.
         """
         self._refuse_before_the_first_commit("compact")
         return _accepted(self.control.compact(), "compact")

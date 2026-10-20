@@ -706,7 +706,7 @@ class Walk:
         try:
             observed = fx.observe(built.server, case.plan)
             #: The shard size the operator reads, which a live declaration has to match too.
-            self.shards = built.server.status()["shards"]
+            self.shard_size = built.server.status()["shards"]["size"]
         finally:
             built.stop()
         self.expected = observed.answers
@@ -727,9 +727,9 @@ class Walk:
             live = self.at(stage)
             observed = fx.observe(live.server, self.case.plan)
             self.found[stage] = fx.differences(self.expected, observed.answers)
-            shards = live.server.status()["shards"]
-            if shards != self.shards:
-                place = ("size", self.shards.get("size"), shards.get("size"))
+            size = live.server.status()["shards"]["size"]
+            if size != self.shard_size:
+                place = ("size", self.shard_size, size)
                 self.found[stage].append(fx.Difference("operator", "status shards", [place]))
             self.moved_codes[stage] = _moved_codes(stage, observed.codes, self._first_codes)
         return self.found[stage]
@@ -902,7 +902,7 @@ def test_an_insert_past_the_shard_size_opens_a_shard_and_a_lower_size_seals(tmp_
             d.control("PUT", "/control/shards", json={"size": TINY - 1}, expect=(201,))
             d.control("PUT", "/control/shards", json={"size": TINY}, expect=(201,))
         status = d.server.status()
-        assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY)
+        assert (status["shards"]["size"], status["entity_id_high_water"]) == (TINY, TINY)
 
         assert _placed(d, key, [TINY, TINY + 1], "past") == [(1, 0, 0), (1, 0, 1)]
         assert d.server.status()["entity_id_high_water"] == TINY + 2
@@ -910,7 +910,7 @@ def test_an_insert_past_the_shard_size_opens_a_shard_and_a_lower_size_seals(tmp_
         d.control("PUT", "/control/shards", json={"size": TINY}, expect=(201,))
         d.restart()
         status = d.server.status()
-        assert (status["shards"], status["entity_id_high_water"]) == ({"size": TINY}, TINY + 2)
+        assert (status["shards"]["size"], status["entity_id_high_water"]) == (TINY, TINY + 2)
         assert _placed(d, key, [TINY + 2], "sealed") == [(2, 0, 0)]
     finally:
         d.stop()
