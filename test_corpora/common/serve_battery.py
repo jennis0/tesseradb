@@ -95,12 +95,18 @@ class Sessions:
 
     INTEGRATOR = "measurement"
 
+    #: How long before its expiry a session is replaced by [`Sessions.live`]: longer than one
+    #: cell takes at any shard count measured.
+    RENEW_S = 600
+
     def __init__(self, session_base: str, control_base: str, operator_credential: str):
         self.session_base = session_base
         self.control_base = control_base
         self.operator_credential = operator_credential
         self._key: str | None = None
         self._made: set[str] = set()
+        #: Each token's expiry and the terms it was minted for.
+        self._minted: dict[str, tuple[int, list[str]]] = {}
 
     def _control(self, path: str, body: dict) -> requests.Response:
         return requests.post(
@@ -153,7 +159,17 @@ class Sessions:
         )
         dt = time.perf_counter() - t0
         r.raise_for_status()
-        return r.json()["token"], dt
+        body = r.json()
+        self._minted[body["token"]] = (body["expires_at"], list(terms))
+        return body["token"], dt
+
+    def live(self, token: str) -> str:
+        """`token`, or a new session for the same terms once `token` is within [`RENEW_S`] of
+        expiring, so a run longer than the deployment's `token_max_lifetime` goes on measuring."""
+        expires_at, terms = self._minted[token]
+        if time.time() < expires_at - self.RENEW_S:
+            return token
+        return self.authorise(terms)[0]
 
 
 def meta(viewer_base: str, token: str, timeout: float = 30.0) -> dict:
@@ -895,13 +911,14 @@ class Battery:
             + (" — SHED" if first.get("shed") else "")
         )
 
-        cells = [
-            self.measure_cell(token, rung["terms"], zoom, decile, which)
-            for zoom in self.zooms
-            for decile in self.deciles
-            if self.pools[zoom][decile]
-            for which in range(self.args.cells_per_decile)
-        ]
+        cells = []
+        for zoom in self.zooms:
+            for decile in self.deciles:
+                if not self.pools[zoom][decile]:
+                    continue
+                for which in range(self.args.cells_per_decile):
+                    token = self.args.sessions.live(token)
+                    cells.append(self.measure_cell(token, rung["terms"], zoom, decile, which))
         return {
             "target": rung["target"],
             "terms": rung["terms"],
@@ -959,7 +976,7 @@ class Battery:
         text = (
             {"skipped": "the server died earlier in the run"}
             if self.died is not None
-            else self._text_and_drilldown(token)
+            else self._text_and_drilldown(args.sessions.live(token))
         )
         whole_counts = whole["counts"] or {}
 
