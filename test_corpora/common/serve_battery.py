@@ -96,7 +96,7 @@ class Sessions:
     INTEGRATOR = "measurement"
 
     #: How long before its expiry a session is replaced by [`Sessions.live`]: longer than one
-    #: cell takes at any shard count measured.
+    #: condition of one cell takes at any shard count measured.
     RENEW_S = 600
 
     def __init__(self, session_base: str, control_base: str, operator_credential: str):
@@ -704,6 +704,9 @@ class Battery:
         self.rng = random.Random(args.seed)
         self.oom_seen = False
         self.failures = 0
+        #: Each rung's token, by the token it was first given as, once [`Battery._live`] has
+        #: renewed it.
+        self._renewed: dict[str, str] = {}
         self.died: dict | None = None
         # The sample shape, from the flags alone.
         self.zooms = [int(z) for z in args.zooms.split(",")]
@@ -790,6 +793,17 @@ class Battery:
             self._watch_oom()
         return out
 
+    def _live(self, token: str) -> str:
+        """`token`'s session, or a new one for the same terms near its expiry
+        ([`Sessions.live`]), warmed with one discarded request as a rung's first viewport warms
+        its own, so no measured sample carries a session's first fragment build."""
+        held = self._renewed.get(token, token)
+        live = self.args.sessions.live(held)
+        if live != held:
+            self._sample(live, 0, full_box(self.quant), cold=False)
+            self._renewed[token] = live
+        return live
+
     def _hot_samples(self, token, zoom, box, n) -> list[dict]:
         return [self._sample(token, zoom, box, cold=False) for _ in range(n)]
 
@@ -867,7 +881,7 @@ class Battery:
         # Cold and hot use different sample counts, recorded per run.
         for condition in self.conditions:
             if condition == "hot":
-                samples = self._hot_samples(token, zoom, box, self.args.samples)
+                samples = self._hot_samples(self._live(token), zoom, box, self.args.samples)
             elif condition == "cold":
                 samples = self._cold_samples(terms, zoom, rotated, self.cold_samples, True)
             elif condition == "cold_pages_warm_engine":
@@ -917,7 +931,6 @@ class Battery:
                 if not self.pools[zoom][decile]:
                     continue
                 for which in range(self.args.cells_per_decile):
-                    token = self.args.sessions.live(token)
                     cells.append(self.measure_cell(token, rung["terms"], zoom, decile, which))
         return {
             "target": rung["target"],
@@ -976,7 +989,7 @@ class Battery:
         text = (
             {"skipped": "the server died earlier in the run"}
             if self.died is not None
-            else self._text_and_drilldown(args.sessions.live(token))
+            else self._text_and_drilldown(token)
         )
         whole_counts = whole["counts"] or {}
 
@@ -1027,13 +1040,14 @@ class Battery:
         for label, word in (("common", self.args.common_token), ("rare", self.args.rare_token)):
             per_condition = {}
             for condition in ("hot", "cold"):
+                live = self._live(token)
                 samples = []
                 for _ in range(self.args.text_samples):
                     if condition == "cold":
                         self.evictor.evict()
                     samples.append(
                         self._sample(
-                            token,
+                            live,
                             0,
                             full,
                             cold=(condition == "cold"),
@@ -1047,11 +1061,12 @@ class Battery:
 
         # One drill-down; a 404 is a result, not a failure, since most low handles are not live.
         drill = []
+        live = self._live(token)
         for handle in range(1, self.args.drilldowns + 1):
             t0 = time.perf_counter()
             r = requests.post(
                 f"{self.args.viewer}/v1/items/{handle}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {live}"},
                 json={},
                 timeout=30,
             )
