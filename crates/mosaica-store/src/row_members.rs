@@ -428,9 +428,8 @@ impl RowMembersPack {
             let tail = (containers * 5 + 4).min(len);
             let page = crate::bands::page_size();
             if (to - tail) / page != (to - 1) / page {
-                let _ = self
-                    .map
-                    .advise_range(memmap2::Advice::WillNeed, to - tail, tail);
+                let base = self.map.as_ptr() as usize;
+                crate::bands::will_need_ranges(std::iter::once(base + to - tail..base + to), 0);
             }
         }
         // SAFETY: the open proved the range aligned and inside the payload, and the payload is what
@@ -445,11 +444,8 @@ impl RowMembersPack {
             return;
         };
         let (offset, len, _) = self.slot(k);
-        if len > 0 {
-            let _ = self
-                .map
-                .advise_range(memmap2::Advice::WillNeed, self.payload_at + offset, len);
-        }
+        let at = self.map.as_ptr() as usize + self.payload_at + offset;
+        crate::bands::will_need_ranges(std::iter::once(at..at + len), 0);
     }
 
     /// How many members the artifact has.

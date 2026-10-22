@@ -43,15 +43,10 @@ pub(super) fn blocks_for(keys: u64, bits_per_key: u64) -> u64 {
 
 /// The offset of `key`'s block in a filter of `blocks` blocks, and the bits it sets there.
 #[inline]
-fn place(key: u128, blocks: u64) -> (usize, u64) {
+pub(super) fn place(key: u128, blocks: u64) -> (usize, u64) {
     let x = mix(key as u64 ^ mix((key >> 64) as u64 ^ C));
     let block = ((x as u128 * blocks as u128) >> 64) as usize;
     (block * BLOCK, mix(x ^ C))
-}
-
-/// The offset of `key`'s block in a filter of `blocks` blocks.
-pub(super) fn block_offset(key: u128, blocks: u64) -> usize {
-    place(key, blocks).0
 }
 
 /// The `hashes` bits of a block `y` chooses.
@@ -97,6 +92,13 @@ impl FilterBuilder {
 #[inline]
 pub(super) fn may_hold(bytes: &[u8], blocks: u64, hashes: u32, key: u128) -> bool {
     let (at, y) = place(key, blocks);
+    holds_at(bytes, hashes, at, y)
+}
+
+/// Whether the filter `bytes`, setting `hashes` bits a key, has every bit `y` chooses set in its
+/// block at `at`: [`may_hold`] for a key [`place`] put there.
+#[inline]
+pub(super) fn holds_at(bytes: &[u8], hashes: u32, at: usize, y: u64) -> bool {
     let block = &bytes[at..at + BLOCK];
     bits(y, hashes).all(|bit| block[bit >> 3] & (1 << (bit & 7)) != 0)
 }

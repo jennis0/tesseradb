@@ -26,7 +26,9 @@
 //! mapping with `madvise(MADV_PAGEOUT)` and from the page cache with `posix_fadvise`; the header
 //! and page index stay resident. "Pages cold" drops the entry pages alone, so the filter is
 //! resident. The cold open is timed twice: as the run opens, and with the filter's pages read
-//! ahead first. Each shape prints one JSON line starting `filter-shape`.
+//! ahead first. Batches of 2, 10, 100 and 10,000 absent keys are also timed with the file in the
+//! page cache: the first and second lookup on a run just opened, and a lookup on a run whose
+//! pages were evicted and read back. Each shape prints one JSON line starting `filter-shape`.
 //!
 //! ```text
 //! cargo run --release -p mosaica-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--keys dense|random] [--spill]
@@ -45,7 +47,7 @@ use clap::{Parser, ValueEnum};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use mosaica_store::key_index::{verify_run, KeyRun, KeyRunWriter, KeySpill};
+use mosaica_store::key_index::{verify_run, KeyRun, KeyRunWriter, KeySpill, PAGE_SIZE};
 
 #[derive(Parser)]
 #[command(about = "key index run write, open, lookup and spill costs at scale")]
@@ -174,16 +176,18 @@ fn resident_in(path: &Path, range: Range<u64>) -> u64 {
     vec.iter().filter(|&&b| b & 1 == 1).count() as u64 * page
 }
 
-/// The byte ranges of a run file's entry pages and of its key filter's blocks, from its header
-/// page (the layout is in the module doc of `mosaica_store::key_index`).
+/// The byte ranges of a run file's entry pages and of its key filter's blocks, which end four
+/// bytes before the file does (the layout is in the module doc of `mosaica_store::key_index`).
 fn regions(path: &Path) -> (Range<u64>, Range<u64>) {
-    let mut header = [0u8; 84];
-    File::open(path)
-        .and_then(|mut f| f.read_exact(&mut header))
-        .expect("read header");
-    let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("8 bytes"));
-    let (pages, offset, blocks) = (u64_at(24), u64_at(64), u64_at(72));
-    (4096..4096 * (1 + pages), offset..offset + blocks * 64)
+    let check = verify_run(path).expect("verify");
+    let len = std::fs::metadata(path).expect("metadata").len();
+    let filter = if check.filter_blocks == 0 {
+        0..0
+    } else {
+        len - 4 - check.filter_blocks * 64..len - 4
+    };
+    let page = PAGE_SIZE as u64;
+    (page..page * (1 + check.pages), filter)
 }
 
 /// Drop `ranges` of the file at `path` from this process's mappings of it, with
@@ -422,6 +426,38 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
         .collect();
     time_batch();
     let batch_warm = (0..5).map(|_| time_batch()).min().expect("five runs");
+
+    // Batches of absent keys of several sizes, with the file in the page cache: the first and the
+    // second batch on a run just opened, and a batch on the run above, whose pages the cold cases
+    // evicted and read back without mapping them in again.
+    let mut sized = serde_json::Map::new();
+    for size in [2usize, 10, 100, 10_000] {
+        let mut some: Vec<u64> = (0..size)
+            .map(|_| keys.absent(rng.gen_range(0..n)))
+            .collect();
+        some.sort_unstable();
+        let lookup = |run: &KeyRun<u64>| {
+            let t = Instant::now();
+            assert!(run.lookup_sorted(&some).expect("lookup").is_empty());
+            t.elapsed()
+        };
+        let (just_opened, second): (Vec<Duration>, Vec<Duration>) = (0..20)
+            .map(|_| {
+                let fresh = KeyRun::<u64>::open(&path).expect("open");
+                (lookup(&fresh), lookup(&fresh))
+            })
+            .unzip();
+        lookup(&run);
+        let after_eviction: Vec<Duration> = (0..20).map(|_| lookup(&run)).collect();
+        sized.insert(
+            size.to_string(),
+            serde_json::json!({
+                "just_opened": stats(just_opened),
+                "warm": stats(second),
+                "after_eviction": stats(after_eviction),
+            }),
+        );
+    }
     drop(run);
 
     // The open again, with the filter's pages read ahead before it, as an open advising the
@@ -479,6 +515,7 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
             "batch_cold_major_faults": batch_cold_faults,
             "batch_pages_cold": stats(batch_pages_cold),
             "batch_warm_ns": batch_warm.as_nanos() as u64,
+            "batches": sized,
             "load_before": load_before,
             "load_after": load_average(),
         })

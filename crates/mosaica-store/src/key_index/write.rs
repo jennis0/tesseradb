@@ -54,9 +54,8 @@ impl<K: Key> KeyRunWriter<K> {
     }
 
     /// This writer, writing a key filter into every run it writes.
-    pub fn with_key_filter(mut self) -> Self {
-        self.filter = Some((BITS_PER_KEY, HASHES));
-        self
+    pub fn with_key_filter(self) -> Self {
+        self.with_key_filter_of(BITS_PER_KEY, HASHES)
     }
 
     /// This writer, writing into every run a key filter of `bits_per_key` bits and `hashes` hashes
@@ -151,10 +150,14 @@ struct OpenRun<K: Key> {
     filling: PageBuilder<K>,
     first_keys: Vec<K>,
     header: Header,
-    /// The distinct keys pushed, where the run takes a key filter.
-    filter_keys: Option<u64>,
-    /// The key filter's bits a key and hashes, read only where `filter_keys` is set.
-    filter_shape: (u64, u32),
+    filter: Option<FilterToWrite>,
+}
+
+/// The key filter a run is written with: its bits a key and hashes, and the distinct keys pushed.
+struct FilterToWrite {
+    bits_per_key: u64,
+    hashes: u32,
+    keys: u64,
 }
 
 impl<K: Key> OpenRun<K> {
@@ -184,8 +187,11 @@ impl<K: Key> OpenRun<K> {
                 max_key: 0,
                 filter: FilterShape::default(),
             },
-            filter_keys: filter.map(|_| 0),
-            filter_shape: filter.unwrap_or_default(),
+            filter: filter.map(|(bits_per_key, hashes)| FilterToWrite {
+                bits_per_key,
+                hashes,
+                keys: 0,
+            }),
         })
     }
 
@@ -197,9 +203,9 @@ impl<K: Key> OpenRun<K> {
     }
 
     fn push(&mut self, key: K, entity: u32) -> Result<()> {
-        if let Some(keys) = &mut self.filter_keys {
+        if let Some(filter) = &mut self.filter {
             if self.header.entries == 0 || self.header.max_key != key.widen() {
-                *keys += 1;
+                filter.keys += 1;
             }
         }
         if self.header.entries == 0 {
@@ -242,8 +248,8 @@ impl<K: Key> OpenRun<K> {
         self.out
             .write_all(&crc.to_le_bytes())
             .map_err(|e| self.io(e))?;
-        if let Some(keys) = self.filter_keys {
-            self.write_filter(keys)?;
+        if let Some(filter) = self.filter.take() {
+            self.write_filter(filter)?;
         }
         let header = self.header.encode();
         let path = self.path.clone();
@@ -262,14 +268,18 @@ impl<K: Key> OpenRun<K> {
         })
     }
 
-    /// Fill a filter of `keys` distinct keys from the entry pages already written, read back from
-    /// the file, and write it after the page index.
-    fn write_filter(&mut self, keys: u64) -> Result<()> {
+    /// Fill `filter` from the entry pages already written, read back from the file, and write it
+    /// after the page index.
+    fn write_filter(&mut self, filter: FilterToWrite) -> Result<()> {
+        let FilterToWrite {
+            bits_per_key,
+            hashes,
+            keys,
+        } = filter;
         let pages = self.header.pages;
         let end = index_end(pages, K::WIDTH).expect("a written run's length fits");
         let offset = filter_offset(pages, K::WIDTH).expect("a written run's length fits");
         self.out.flush().map_err(|e| self.io(e))?;
-        let (bits_per_key, hashes) = self.filter_shape;
         let blocks = blocks_for(keys, bits_per_key);
         let mut filter = FilterBuilder::new(blocks, hashes);
         let file = File::open(&self.path).map_err(|e| self.io(e))?;
