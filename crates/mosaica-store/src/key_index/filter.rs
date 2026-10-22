@@ -16,10 +16,10 @@
 /// Bytes in a block.
 pub(super) const BLOCK: usize = 64;
 
-/// Bits the writer gives each distinct key.
+/// Bits the writer gives each distinct key unless told otherwise.
 pub(super) const BITS_PER_KEY: u64 = 10;
 
-/// Bits the writer sets for each key.
+/// Bits the writer sets for each key unless told otherwise.
 pub(super) const HASHES: u32 = 7;
 
 /// The most bits a key can set: nine bits of `y` choose each.
@@ -33,9 +33,10 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The blocks a filter over `keys` distinct keys is given: at least one.
-pub(super) fn blocks_for(keys: u64) -> u64 {
-    (keys.saturating_mul(BITS_PER_KEY))
+/// The blocks a filter over `keys` distinct keys at `bits_per_key` bits a key is given: at least
+/// one.
+pub(super) fn blocks_for(keys: u64, bits_per_key: u64) -> u64 {
+    (keys.saturating_mul(bits_per_key))
         .div_ceil(8 * BLOCK as u64)
         .max(1)
 }
@@ -58,24 +59,26 @@ fn bits(y: u64, hashes: u32) -> impl Iterator<Item = usize> {
     })
 }
 
-/// A filter being filled, setting [`HASHES`] bits a key.
+/// A filter being filled, setting `hashes` bits a key.
 pub(super) struct FilterBuilder {
     bytes: Vec<u8>,
     blocks: u64,
+    hashes: u32,
 }
 
 impl FilterBuilder {
-    pub(super) fn new(blocks: u64) -> Self {
+    pub(super) fn new(blocks: u64, hashes: u32) -> Self {
         FilterBuilder {
             bytes: vec![0; blocks as usize * BLOCK],
             blocks,
+            hashes,
         }
     }
 
     pub(super) fn insert(&mut self, key: u128) {
         let (at, y) = place(key, self.blocks);
         let block = &mut self.bytes[at..at + BLOCK];
-        for bit in bits(y, HASHES) {
+        for bit in bits(y, self.hashes) {
             block[bit >> 3] |= 1 << (bit & 7);
         }
     }

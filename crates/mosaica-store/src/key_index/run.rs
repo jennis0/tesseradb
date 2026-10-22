@@ -305,7 +305,7 @@ impl<K: Key> KeyRun<K> {
     /// Whether the run may hold `key`: false, and the run holds no entry under it, when the key is
     /// outside the run's key range or its key filter does not pass it.
     #[inline]
-    pub(super) fn may_hold(&self, key: K) -> bool {
+    pub fn may_hold(&self, key: K) -> bool {
         self.key_range()
             .is_some_and(|(lo, hi)| lo <= key && key <= hi)
             && self.filter_passes(key.widen())

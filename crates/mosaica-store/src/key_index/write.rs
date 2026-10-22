@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use super::filter::{blocks_for, FilterBuilder, HASHES};
+use super::filter::{blocks_for, FilterBuilder, BITS_PER_KEY, HASHES, MAX_HASHES};
 use super::page::{Page, PageBuilder};
 use super::{filter_offset, index_end, FilterShape, Header, Key, PAGE_SIZE};
 use crate::error::{Result, StoreError};
@@ -32,7 +32,8 @@ pub struct KeyRunWriter<K: Key> {
     dir: PathBuf,
     stem: String,
     max_entries: u64,
-    filter: bool,
+    /// The key filter's bits a key and hashes, where runs take one.
+    filter: Option<(u64, u32)>,
     open: Option<OpenRun<K>>,
     written: Vec<WrittenRun<K>>,
     last: Option<(K, u32)>,
@@ -45,7 +46,7 @@ impl<K: Key> KeyRunWriter<K> {
             dir: dir.to_path_buf(),
             stem: stem.to_string(),
             max_entries: max_entries.get(),
-            filter: false,
+            filter: None,
             open: None,
             written: Vec::new(),
             last: None,
@@ -54,7 +55,23 @@ impl<K: Key> KeyRunWriter<K> {
 
     /// This writer, writing a key filter into every run it writes.
     pub fn with_key_filter(mut self) -> Self {
-        self.filter = true;
+        self.filter = Some((BITS_PER_KEY, HASHES));
+        self
+    }
+
+    /// This writer, writing into every run a key filter of `bits_per_key` bits and `hashes` hashes
+    /// a key in place of the index's default, for measuring what the filter's size buys.
+    ///
+    /// # Panics
+    ///
+    /// If `bits_per_key` is zero or `hashes` is not from 1 to 7.
+    pub fn with_key_filter_of(mut self, bits_per_key: u64, hashes: u32) -> Self {
+        assert!(bits_per_key > 0, "a key filter has at least one bit a key");
+        assert!(
+            (1..=MAX_HASHES).contains(&hashes),
+            "a key filter sets 1 to {MAX_HASHES} bits a key"
+        );
+        self.filter = Some((bits_per_key, hashes));
         self
     }
 
@@ -136,10 +153,12 @@ struct OpenRun<K: Key> {
     header: Header,
     /// The distinct keys pushed, where the run takes a key filter.
     filter_keys: Option<u64>,
+    /// The key filter's bits a key and hashes, read only where `filter_keys` is set.
+    filter_shape: (u64, u32),
 }
 
 impl<K: Key> OpenRun<K> {
-    fn create(path: PathBuf, filter: bool) -> Result<Self> {
+    fn create(path: PathBuf, filter: Option<(u64, u32)>) -> Result<Self> {
         let io = |source| StoreError::Io {
             path: path.clone(),
             source,
@@ -165,7 +184,8 @@ impl<K: Key> OpenRun<K> {
                 max_key: 0,
                 filter: FilterShape::default(),
             },
-            filter_keys: filter.then_some(0),
+            filter_keys: filter.map(|_| 0),
+            filter_shape: filter.unwrap_or_default(),
         })
     }
 
@@ -249,8 +269,9 @@ impl<K: Key> OpenRun<K> {
         let end = index_end(pages, K::WIDTH).expect("a written run's length fits");
         let offset = filter_offset(pages, K::WIDTH).expect("a written run's length fits");
         self.out.flush().map_err(|e| self.io(e))?;
-        let blocks = blocks_for(keys);
-        let mut filter = FilterBuilder::new(blocks);
+        let (bits_per_key, hashes) = self.filter_shape;
+        let blocks = blocks_for(keys, bits_per_key);
+        let mut filter = FilterBuilder::new(blocks, hashes);
         let file = File::open(&self.path).map_err(|e| self.io(e))?;
         let mut pages_in = BufReader::with_capacity(64 * PAGE_SIZE, file);
         pages_in
@@ -273,7 +294,7 @@ impl<K: Key> OpenRun<K> {
         self.header.filter = FilterShape {
             offset,
             blocks,
-            hashes: HASHES,
+            hashes,
         };
         Ok(())
     }

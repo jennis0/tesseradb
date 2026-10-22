@@ -1251,6 +1251,25 @@ fn a_key_filter_passes_every_key_its_run_holds_and_about_one_absent_key_in_a_hun
 }
 
 #[test]
+fn a_key_filter_of_any_size_and_hash_count_passes_every_key_its_run_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(u64, u32)> = (0..20_000u64).map(|k| (2 * k, k as u32)).collect();
+    for (bits, hashes) in [(1, 1), (6, 4), (16, 7)] {
+        let writer = KeyRunWriter::create(dir.path(), &format!("b{bits}"), nz(u64::MAX))
+            .with_key_filter_of(bits, hashes);
+        let path = write_with(writer, &entries).remove(0).path;
+        let header = Header::decode(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            (header.filter.blocks, header.filter.hashes),
+            ((20_000 * bits).div_ceil(512), hashes)
+        );
+        assert_eq!(verify_run(&path).unwrap().entries, 20_000);
+        let run = open::<u64>(&path);
+        assert!(entries.iter().all(|&(k, e)| run.get(k).unwrap() == vec![e]));
+    }
+}
+
+#[test]
 fn a_damaged_or_truncated_key_filter_is_refused_at_open_and_by_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
     let entries: Vec<(u64, u32)> = (0..1500u64).map(|k| (k * 1000, k as u32)).collect();
