@@ -1270,6 +1270,43 @@ fn a_key_filter_of_any_size_and_hash_count_passes_every_key_its_run_holds() {
 }
 
 #[test]
+fn a_key_filter_of_several_megabytes_is_checked_whole_at_open_and_answers_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(u64, u32)> = (0..400_000u64).map(|k| (3 * k, k as u32)).collect();
+    let writer = KeyRunWriter::create(dir.path(), "big", nz(u64::MAX)).with_key_filter_of(64, 7);
+    let path = write_with(writer, &entries).remove(0).path;
+    let header = Header::decode(&std::fs::read(&path).unwrap()).unwrap();
+    let (offset, len) = (
+        header.filter.offset as usize,
+        header.filter.blocks as usize * 64,
+    );
+    assert!(len > 3 << 20);
+
+    let run = open::<u64>(&path);
+    let mut keys: Vec<u64> = (0..1_200_000u64).step_by(7).collect();
+    keys.push(keys[keys.len() - 1]);
+    let batch = run.lookup_sorted(&keys).unwrap();
+    let one_by_one: Vec<(usize, u32)> = keys
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &k)| run.get(k).unwrap().into_iter().map(move |e| (i, e)))
+        .collect();
+    assert_eq!(batch, one_by_one);
+    assert_eq!(batch.len(), keys.iter().filter(|&&k| k % 3 == 0).count());
+
+    let copy = dir.path().join("copy.keys");
+    for at in [offset + (1 << 20) + 5, offset + len / 2, offset + len - 1] {
+        std::fs::copy(&path, &copy).unwrap();
+        flip(&copy, at);
+        assert_eq!(
+            part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
+            RunPart::Filter,
+            "byte {at}"
+        );
+    }
+}
+
+#[test]
 fn a_damaged_or_truncated_key_filter_is_refused_at_open_and_by_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
     let entries: Vec<(u64, u32)> = (0..1500u64).map(|k| (k * 1000, k as u32)).collect();

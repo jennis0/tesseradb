@@ -233,6 +233,15 @@ fn evict(path: &Path, ranges: &[Range<u64>]) {
     }
 }
 
+/// This process's major page faults so far: reads that waited on the disc.
+fn major_faults() -> u64 {
+    // SAFETY: `getrusage` fills the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let code = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    assert_eq!(code, 0, "getrusage failed");
+    usage.ru_majflt as u64
+}
+
 fn load_average() -> String {
     std::fs::read_to_string("/proc/loadavg")
         .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
@@ -300,7 +309,9 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
         filter.start
     };
 
+    let faults = major_faults();
     let (run, open_cold) = cold_open(&path);
+    let open_faults = major_faults() - faults;
 
     // The share of absent keys, spread evenly over the run, that the filter passes.
     let tested = args.fpr_keys.min(n);
@@ -394,12 +405,14 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
         assert!(run.lookup_sorted(&batch).expect("lookup").is_empty());
         t.elapsed()
     };
+    let faults = major_faults();
     let batch_cold: Vec<Duration> = (0..3)
         .map(|_| {
             evict(&path, &both);
             time_batch()
         })
         .collect();
+    let batch_cold_faults = major_faults() - faults;
     read_into_cache(&path, filter.clone());
     let batch_pages_cold: Vec<Duration> = (0..3)
         .map(|_| {
@@ -444,6 +457,7 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
             "filter_bytes": filter_bytes,
             "rest_bytes": rest_bytes,
             "open_cold_ns": open_cold.as_nanos() as u64,
+            "open_cold_major_faults": open_faults,
             "open_cold_readahead_ns": open_cold_readahead.as_nanos() as u64,
             "fpr_tested": tested,
             "fpr_passed": passed,
@@ -462,6 +476,7 @@ fn filter_shape(args: &Args, dir: &Path, keys: Keys, spec: &str) {
             "batch_keys": batch.len(),
             "batch_passed": batch_passed,
             "batch_cold": stats(batch_cold),
+            "batch_cold_major_faults": batch_cold_faults,
             "batch_pages_cold": stats(batch_pages_cold),
             "batch_warm_ns": batch_warm.as_nanos() as u64,
             "load_before": load_before,

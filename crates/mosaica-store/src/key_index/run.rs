@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::marker::PhantomData;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,10 +13,18 @@ use super::page::{max_entries, Page, PageCursor};
 use super::{
     file_len, filter_offset, index_end, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE,
 };
+use crate::bands::page_size;
 use crate::error::{Result, StoreError};
 
 /// The most pages between two ranges a batched lookup needs that it prefetches with them.
 const PREFETCH_GAP: u64 = 4;
+
+/// The most bytes one request to read ahead asks for. Linux reads at most the device's read-ahead
+/// size for a request, 128 KiB by default, and drops the rest of a longer one.
+const READ_AHEAD: usize = 128 << 10;
+
+/// The bytes the open reads the key filter in at a time.
+const FILTER_READ: usize = 1 << 20;
 
 fn corrupt(path: &Path, part: RunPart, detail: impl Into<String>) -> StoreError {
     StoreError::InvalidKeyIndex {
@@ -131,17 +140,18 @@ impl<K: Key> KeyRun<K> {
             verified: (0..words).map(|_| AtomicU64::new(0)).collect(),
             key: PhantomData,
         };
-        let index_len = run.header.pages as usize * K::WIDTH + 4;
-        let _ = run
-            .map
-            .advise_range(Advice::WillNeed, run.index_offset(), index_len);
+        run.will_need(run.index_offset(), run.header.pages as usize * K::WIDTH + 4);
         run.check_page_index()?;
-        run.check_filter()?;
+        run.check_filter(&file)?;
         Ok(run)
     }
 
     /// The key filter's checksum, and that the bytes between the page index and it are zero.
-    fn check_filter(&self) -> Result<()> {
+    ///
+    /// The filter is read through `file` front to back, which the kernel reads ahead; through the
+    /// mapping, advised for random access, it would be read a page at a time. Either way its pages
+    /// are left in the page cache for the probes.
+    fn check_filter(&self, file: &File) -> Result<()> {
         let shape = self.header.filter;
         if shape.blocks == 0 {
             return Ok(());
@@ -154,8 +164,21 @@ impl<K: Key> KeyRun<K> {
                 "the bytes between the page index and the key filter are not zero",
             ));
         }
+        let mut crc = crc32fast::Hasher::new();
+        let mut buf = vec![0u8; FILTER_READ.min(stop - start)];
+        let mut at = start;
+        while at < stop {
+            let n = buf.len().min(stop - at);
+            file.read_exact_at(&mut buf[..n], at as u64)
+                .map_err(|source| StoreError::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            crc.update(&buf[..n]);
+            at += n;
+        }
         let stored = u32::from_le_bytes(self.map[stop..].try_into().expect("four bytes"));
-        if crc32fast::hash(&self.map[start..stop]) != stored {
+        if crc.finalize() != stored {
             return Err(fail("the key filter checksum does not match its bytes"));
         }
         Ok(())
@@ -343,6 +366,10 @@ impl<K: Key> KeyRun<K> {
             keys.windows(2).all(|w| w[0] <= w[1]),
             "lookup_sorted takes keys in ascending order"
         );
+        // One key's probe reads one page whether or not it is prefetched.
+        if keys.len() > 1 {
+            self.prefetch_filter(keys);
+        }
         let held: Vec<usize> = (0..keys.len())
             .filter(|&i| self.may_hold(keys[i]))
             .collect();
@@ -377,40 +404,102 @@ impl<K: Key> KeyRun<K> {
     /// Ask the kernel to read, in the background, every page a lookup of `keys` (ascending, each one
     /// the run may hold) will read. The entry pages are mapped for random access, so without this a
     /// batch reads its pages one at a time, each waiting on the disk.
-    ///
-    /// Pages are advised in ranges, and a gap of up to [`PREFETCH_GAP`] pages between two ranges
-    /// is advised with them: reading a few unneeded pages costs less than a system call per range
-    /// when the pages are already resident.
     fn prefetch(&self, keys: impl Iterator<Item = K>) {
-        let advise = |(first, end): (u64, u64)| {
-            let _ = self.map.advise_range(
-                Advice::WillNeed,
-                (1 + first as usize) * PAGE_SIZE,
-                (end - first) as usize * PAGE_SIZE,
-            );
-        };
-        let mut pending: Option<(u64, u64)> = None;
         let mut from = 0;
-        for key in keys {
+        self.will_need_ranges(keys.map(|key| {
             from = self.start_page(key, from);
             let mut end = from + 1;
             while end < self.header.pages && self.index_key(end) <= key {
                 end += 1;
             }
+            (
+                (1 + from as usize) * PAGE_SIZE,
+                (1 + end as usize) * PAGE_SIZE,
+            )
+        }));
+    }
+
+    /// Ask the kernel to read, in the background, the pages of the key filter a probe of `keys` will
+    /// read and the page cache does not hold. The filter is mapped for random access, so without
+    /// this a batch whose filter has left the page cache probes it a page at a time.
+    fn prefetch_filter(&self, keys: &[K]) {
+        let shape = self.header.filter;
+        let Some((lo, hi)) = self.key_range() else {
+            return;
+        };
+        if shape.blocks == 0 {
+            return;
+        }
+        let page = page_size();
+        let mut pages: Vec<usize> = keys
+            .iter()
+            .filter(|&&key| lo <= key && key <= hi)
+            .map(|key| {
+                (shape.offset as usize + filter::block_offset(key.widen(), shape.blocks)) / page
+            })
+            .collect();
+        pages.sort_unstable();
+        pages.dedup();
+        let (Some(&first), Some(&last)) = (pages.first(), pages.last()) else {
+            return;
+        };
+        // Over a filter the page cache holds, the batch pays one `mincore` and gives no advice.
+        if let Some(resident) = self.resident(first * page, (last + 1) * page) {
+            pages.retain(|&p| resident[p - first] & 1 == 0);
+        }
+        self.will_need_ranges(pages.into_iter().map(|p| (p * page, (p + 1) * page)));
+    }
+
+    /// One byte for each page of the mapping from `start`, page-aligned, to `end`, its lowest bit
+    /// set where the page cache holds the page; `None` where the kernel does not say.
+    fn resident(&self, start: usize, end: usize) -> Option<Vec<u8>> {
+        let end = end.min(self.map.len());
+        let mut held = vec![0u8; (end - start).div_ceil(page_size())];
+        // SAFETY: the mapping starts on a page boundary, so `start` is one; `start..end` lies
+        // within the mapping and `held` has a byte for each of its pages.
+        let code = unsafe {
+            libc::mincore(
+                self.map.as_ptr().add(start) as *mut libc::c_void,
+                end - start,
+                held.as_mut_ptr(),
+            )
+        };
+        (code == 0).then_some(held)
+    }
+
+    /// Ask the kernel to read, in the background, the file's bytes in `ranges`, each `(start,
+    /// end)`, ascending by `start`. A gap of up to [`PREFETCH_GAP`] pages between two ranges is
+    /// advised with them: reading a few unneeded pages costs less than a system call per range
+    /// when the pages are already resident.
+    fn will_need_ranges(&self, ranges: impl Iterator<Item = (usize, usize)>) {
+        let gap = PREFETCH_GAP as usize * PAGE_SIZE;
+        let mut pending: Option<(usize, usize)> = None;
+        for (from, end) in ranges {
             pending = match pending {
-                Some((first, last_end)) if from <= last_end + PREFETCH_GAP => {
+                Some((first, last_end)) if from <= last_end + gap => {
                     Some((first, last_end.max(end)))
                 }
                 other => {
-                    if let Some(range) = other {
-                        advise(range);
+                    if let Some((first, end)) = other {
+                        self.will_need(first, end - first);
                     }
                     Some((from, end))
                 }
             };
         }
-        if let Some(range) = pending {
-            advise(range);
+        if let Some((first, end)) = pending {
+            self.will_need(first, end - first);
+        }
+    }
+
+    /// Ask the kernel to read `len` bytes of the file from `offset` in the background, in requests
+    /// of at most [`READ_AHEAD`] bytes.
+    fn will_need(&self, offset: usize, len: usize) {
+        let end = offset + len;
+        for at in (offset..end).step_by(READ_AHEAD) {
+            let _ = self
+                .map
+                .advise_range(Advice::WillNeed, at, READ_AHEAD.min(end - at));
         }
     }
 

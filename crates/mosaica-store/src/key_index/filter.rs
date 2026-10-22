@@ -49,6 +49,11 @@ fn place(key: u128, blocks: u64) -> (usize, u64) {
     (block * BLOCK, mix(x ^ C))
 }
 
+/// The offset of `key`'s block in a filter of `blocks` blocks.
+pub(super) fn block_offset(key: u128, blocks: u64) -> usize {
+    place(key, blocks).0
+}
+
 /// The `hashes` bits of a block `y` chooses.
 #[inline]
 fn bits(y: u64, hashes: u32) -> impl Iterator<Item = usize> {

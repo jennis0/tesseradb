@@ -7,6 +7,9 @@ GeoNames-sized and the first half of the 2²⁶ runs, and 7 to 14 after. Each sh
 its raw line. The bench is one thread, run under `nice -n 10`. Every figure is measured unless
 marked modelled.
 
+Tables 1 to 4 were measured with the run reader at ed2e5a742. The reader then changed how it reads
+the filter at open and for a batch; Table 5 measures it before and after, at a load of about 2.
+
 This is the key filter item of §8.5 of [the sharding plan](../../docs/sharding.md). A unique `eq`
 lookup, and a write resolving a unique value, reads every live run of the column's index in every
 shard and the one base run per shard whose key range holds the value (§4.2). A run's key filter is
@@ -44,7 +47,12 @@ public so the bench can count the filter's answers. The default is unchanged. Se
   three).
 - **Open.** `KeyRun::open` with the whole file dropped from the page cache. The open checks the
   filter's checksum, so it reads every filter byte. It was timed again with
-  `posix_fadvise(WILLNEED)` over the filter first.
+  `posix_fadvise(WILLNEED)` over the filter first. The bench also counts the major page faults of
+  the cold open and of the cold batches (`getrusage`).
+- **Before and after.** [`run-reads.sh`](run-reads.sh) runs the bench built at four points on a
+  2²⁶ run and a 233 million one, with no filter and at 10:7, three rounds in turn, each run waiting
+  until no serve benchmark or bundle build is running; `python3 tables_reads.py` prints Table 5
+  from the `raw-reads-*.txt` beside it.
 
 ## Findings
 
@@ -76,19 +84,27 @@ filter passes reads two pages, about 320 µs. Over 14 runs: 2.6 ms without a fil
 
 **A write resolving new values gains most.** A batch of 10,000 absent keys against one 2²⁶ run takes
 11.6 ms warm without a filter and 0.36 ms at 10 bits; with the entry pages cold, 101 ms and 2.6 ms
-(Table 3). Across 14 runs that is 160 ms against 5 ms warm. With the filter's pages cold a batch is
-slower with a filter: 1.6 s at 10 bits against 78 ms without, and 13 to 60 times the time without
-a filter at every size and shape. A batch prefetches the entry pages it needs in ranges, and the
-filter's probes fault one page at a time.
+(Table 3). Across 14 runs that is 160 ms against 5 ms warm. With the filter's pages cold, the
+reader at ed2e5a742 was slower with a filter: 1.6 s at 10 bits against 78 ms without, and 13 to 60
+times the time without a filter at every size and shape. A batch prefetched the entry pages it
+needed in ranges, and the filter's probes faulted one page at a time. A batch now asks the kernel
+for the filter pages it will probe that the page cache lacks, and a cold batch takes 30 ms on a 2²⁶
+run against 48 to 54 ms without a filter (Table 5).
 
-**Opening a run reads its filter one page at a time.** The run is mapped for random access and the
-open checks the filter's checksum through the mapping, so with the file out of the page cache each
-4 KiB of filter is one fault and one read. A 2²⁶ run opens in 1.1 ms without a filter and 3.7 s at
-10 bits; at 233 million keys, 9 ms and 10 s (Table 2). Advising `WILLNEED` first brought the 13.5
-million run from 1.0 s to 0.38 s and did not help at 2²⁶ or above. A sequential read of 88 MB, about
-the size of a 2²⁶ run's filter at 10 bits, took 31 ms from a cold page cache on this host. The first
-unique lookup after a cold start opens one run per shard plus the live runs, so on GBIF at 14
-shards it would spend about 50 s in opens at 10 bits (modelled: 14 × 3.7 s).
+**Opening a run read its filter one page at a time.** The run is mapped for random access and the
+open checked the filter's checksum through the mapping, so with the file out of the page cache each
+4 KiB of filter was one fault and one read. A 2²⁶ run opened in 1.1 ms without a filter and 3.7 s
+at 10 bits; at 233 million keys, 9 ms and 10 s (Table 2). The open now reads the filter through the
+file in 1 MiB reads, which the kernel reads ahead: 31 ms for a 2²⁶ run and 0.1 s at 233 million
+keys, with one major fault where there were 20,481 and 71,107 (Table 5). A sequential read of 88
+MB, about the size of a 2²⁶ run's filter at 10 bits, took 31 ms from a cold page cache on this host.
+
+**A request to read ahead reads at most the device's read-ahead size.** `WILLNEED` over 84 MB of a
+cold file left 8 MB resident, this disc's `read_ahead_kb`, whether given through `posix_fadvise` or
+`madvise` (checked with `fincore`). That is why advising the filter before the open helped the 13.5
+million run, whose filter is 17 MB, and did not help at 2²⁶ or above. Linux's default
+`read_ahead_kb` is 128 KiB, so the reader asks in requests of at most 128 KiB. The page index's
+advice at open and a batch's entry prefetch go through the same requests.
 
 **Writing a filter adds about 0.1 µs a key, whatever its size.** A 2²⁶ run writes in 1.3 s without
 a filter and in 6.4 to 13.7 s with one, from 6 to 16 bits, with no order between the sizes beyond
@@ -107,13 +123,13 @@ new values from 160 ms to 5 ms warm. No figure argues for another size. Between 
 cost of a lookup moves by 1 to 2 µs a run, under the noise of the one read the run holding the key
 costs, while the filter's memory moves by 0.25 bytes a key.
 
-Two costs come from how the filter is read, and are left for a decision. A cold open reads the
-filter page by page, about 3.7 s for each 2²⁶ run at 10 bits. A filter whose pages have been
-evicted makes a batch 13 to 60 times slower than no filter. An open that read the filter
-sequentially into memory the process holds would remove both, at the price of that memory: 4.4 GB
-of filters on GBIF at 10 bits, counted against the server's memory cap instead of the page cache.
-Not measured: that
-change.
+The two costs of how the filter was read are gone without holding the filters in the process's
+memory; they stay in the page cache. A cold open of a 2²⁶ run at 10 bits takes 31 ms, the time of a
+sequential read of its filter, against 2.2 s. A batch of 10,000 absent keys with the filter cold
+takes 30 ms, against 0.99 s and against 48 to 54 ms without a filter. The price is paid by a batch
+whose filter is resident: one `mincore` over the pages its keys hash to and the hashing, 0.79 ms
+warm against 0.35 ms on a 2²⁶ run, and 2.4 ms against 1.3 ms with the entry pages cold. Single
+lookups are unchanged (Table 5).
 
 The measurement assumed every run's key range holds the key. Within a shard only the base run whose
 range holds the key is read. Where record numbers arrive in order, each shard's runs cover a narrow
@@ -164,7 +180,8 @@ One unique column's filters over a whole corpus, modelled as items × bits ÷ 8,
 | 16 | 0.03 | 0.47 | 7.00 |
 | index | 0.06 | 1.00 | 14.98 |
 
-Cold open of one run, ms; in brackets, with the filter advised `WILLNEED` first:
+Cold open of one run with the reader at ed2e5a742, ms; in brackets, with the filter advised
+`WILLNEED` first. Table 5 has the open as it reads now.
 
 | Bits:hashes | 13.5 M | 2²⁶ | 233 M | 2²⁶ spread |
 |---|---|---|---|---|
@@ -247,3 +264,44 @@ Entry pages and filter cold:
 
 The same model on the 13.5 M run's medians gives, over 128 runs with the entry pages cold, 20.0 ms
 without a filter and 0.37 ms at 10 bits.
+
+## Table 5: reading the filter, before and after
+
+The bench built at four points, each run three times in turn; every cell is the median of the
+three rounds' figures, and each round's figure is itself a median where the bench takes several.
+Single lookups are 2,000 warm and 300 cold; batches are 10,000 absent keys, warm fastest of five and
+cold median of three. "Cold batch major faults" is per batch.
+
+- **before**: the reader at ed2e5a742.
+- **1: sequential open**: the open reads the filter for its checksum through the file in 1 MiB
+  reads into one buffer, instead of through the mapping a page at a time. Read-ahead requests (the
+  page index at open, a batch's entry pages) go out in pieces of at most 128 KiB.
+- **2a: and advise every page**: a lookup of more than one key first asks the kernel for every
+  filter page its keys hash to, merged into ranges as the entry prefetch is.
+- **2: and advise pages not held**: the same, after one `mincore` over the span of those pages,
+  advising only the ones the page cache does not hold. This is the reader as committed.
+
+The 233 million run is four times the largest run a unique index writes, so its `mincore` spans
+four times the pages one ever will.
+
+| run | step | filter | open cold ms | open major faults | cold batch major faults | batch warm ms | batch, pages cold, ms | batch cold ms | present warm µs | refused warm µs | refused cold µs | present cold µs | rounds | load |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2²⁶ | before | 0 | 0.91 | 1 | 161 | 8.28 | 51.9 | 54.5 | 1.69 | – | – | 142 | 3 | 2.1 |
+| 2²⁶ | before | 10:7 | 2,161 | 20,481 | 7,864 | 0.35 | 1.27 | 992 | 1.83 | 0.07 | 120 | 252 | 3 | 2.0–2.1 |
+| 2²⁶ | 1: sequential open | 0 | 0.72 | 1 | 161 | 8.75 | 51.4 | 47.7 | 1.71 | – | – | 160 | 3 | 2.0–2.1 |
+| 2²⁶ | 1: sequential open | 10:7 | 30.9 | 1 | 7,889 | 0.35 | 1.19 | 965 | 1.79 | 0.06 | 144 | 250 | 3 | 2.0–2.1 |
+| 2²⁶ | 2a: and advise every page | 0 | 0.80 | 1 | 162 | 8.27 | 56.0 | 52.1 | 1.70 | – | – | 151 | 3 | 2.0–2.4 |
+| 2²⁶ | 2a: and advise every page | 10:7 | 32.1 | 1 | 4.33 | 1.71 | 2.83 | 27.6 | 1.91 | 0.06 | 125 | 246 | 3 | 2.0–2.3 |
+| 2²⁶ | 2: and advise pages not held | 0 | 0.78 | 1 | 162 | 7.84 | 52.2 | 47.4 | 1.71 | – | – | 156 | 3 | 2.0–2.3 |
+| 2²⁶ | 2: and advise pages not held | 10:7 | 31.0 | 1 | 4.33 | 0.79 | 2.41 | 29.9 | 1.96 | 0.07 | 147 | 301 | 3 | 2.0–2.3 |
+| 233 M | before | 0 | 2.33 | 1 | 87.3 | 11.1 | 69.0 | 73.8 | 1.74 | – | – | 152 | 3 | 2.0–2.2 |
+| 233 M | before | 10:7 | 7,094 | 71,107 | 9,298 | 0.35 | 1.13 | 1,266 | 1.98 | 0.07 | 130 | 284 | 3 | 2.0–2.2 |
+| 233 M | 1: sequential open | 0 | 1.61 | 1 | 87.3 | 11.6 | 69.9 | 74.1 | 1.78 | – | – | 159 | 3 | 2.0–2.1 |
+| 233 M | 1: sequential open | 10:7 | 105 | 1 | 9,264 | 0.36 | 1.81 | 1,145 | 2.11 | 0.12 | 154 | 306 | 3 | 2.0–2.1 |
+| 233 M | 2a: and advise every page | 0 | 1.70 | 1 | 87.7 | 11.8 | 67.2 | 75.1 | 1.83 | – | – | 157 | 3 | 2.0–2.1 |
+| 233 M | 2a: and advise every page | 10:7 | 100 | 1 | 1.67 | 4.38 | 5.96 | 52.8 | 2.13 | 0.07 | 138 | 312 | 3 | 2.0–2.1 |
+| 233 M | 2: and advise pages not held | 0 | 1.57 | 1 | 87.7 | 11.1 | 67.7 | 71.5 | 1.79 | – | – | 145 | 3 | 2.0–2.2 |
+| 233 M | 2: and advise pages not held | 10:7 | 102 | 1 | 1.67 | 3.50 | 8.14 | 57.5 | 2.05 | 0.07 | 150 | 275 | 3 | 2.1–2.2 |
+
+Every open takes one major fault, with a filter or without. Without a filter a cold batch takes
+about 160 major faults on a 2²⁶ run and 87 on the 233 million one, at every step.
