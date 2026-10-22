@@ -80,8 +80,8 @@ pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, Segment
 pub use read::{
     first_code_at_or_past, highest_published_n, highest_side_manifest_n, newest_publication,
     open_bundle, open_written_prefix, open_written_prefix_carrying, read_publication, tile_ranges,
-    tile_ranges_all, tile_ranges_within, Bundle, TileOrder, ColumnsRef, CutIndex, MortonSlice, PartitionData,
-    ScalarSlice, SegmentData, ShardData, ViewData,
+    tile_ranges_all, tile_ranges_within, Bundle, ColumnsRef, CutIndex, MortonSlice, PartitionData,
+    ScalarSlice, SegmentData, ShardData, TileOrder, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};

@@ -118,9 +118,10 @@ pub struct StageTimings {
     /// `tiles_for_bbox` — pure geometry, no data touched. Serial-prefix: computed once, before
     /// the parallel tile sweep, so this keeps its wall-clock meaning at every `compute_threads`.
     pub tiles_for_bbox_ns: u64,
-    /// `tile_ranges` binary searches — one sweep over every tile (`tile_ranges_all`), computed
-    /// once before the parallel section. Serial-prefix, same wall-clock meaning at every
-    /// `compute_threads` — not to be confused with the genuinely per-tile fields below.
+    /// Resolving every tile's row ranges — the tiles put in Morton order once, then one sweep of
+    /// each segment of every shard (`mosaica_store::TileOrder`), computed once before the parallel
+    /// section. Serial-prefix, same wall-clock meaning at every `compute_threads` — not to be
+    /// confused with the genuinely per-tile fields below.
     pub tile_ranges_ns: u64,
     /// The tiles' counts: one `EffectiveMask::count_ranges` over every tile's parts, before the
     /// fan-out, and each tile's filtered counts, summed over tiles.

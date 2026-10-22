@@ -543,14 +543,14 @@ fn tile_counts_match_brute_force_at_a_non_degenerate_zoom_and_bbox_subset() {
 /// **The response's tile order is `tiles_for_bbox`'s raster order, not Morton order — and the
 /// points are a flat concatenation in exactly that order.**
 ///
-/// `Engine::viewport` resolves every tile's row range in one bounded sweep
-/// (`mosaica_store::tile_ranges_all`), and that sweep visits tiles in ascending Morton code
-/// order, which `tiles_for_bbox`'s `(ty outer, tx inner)` enumeration is *not*. If the sweep's
-/// order ever leaked into the response, this test is what catches it: both `ViewportOut.tiles`
-/// and the point concatenation the wire format splits by the `served` column depend on the
-/// caller's order, and so does the reference oracle.
+/// `Engine::viewport` resolves every tile's row ranges in one bounded sweep of each segment
+/// (`mosaica_store::TileOrder`), and that sweep visits tiles in ascending Morton code order,
+/// which `tiles_for_bbox`'s `(ty outer, tx inner)` enumeration is *not*. If the sweep's order
+/// ever leaked into the response, this test is what catches it: both `ViewportOut.tiles` and the
+/// point concatenation the wire format splits by the `served` column depend on the caller's
+/// order, and so does the reference oracle.
 ///
-/// The oracle here deliberately bypasses `tile_ranges_all` and goes tile-by-tile through
+/// The oracle here deliberately bypasses the sweep and goes tile-by-tile through
 /// `tile_ranges` — the untouched full-column search — so a sweep that is internally
 /// self-consistent but differently ordered cannot satisfy both sides.
 #[test]

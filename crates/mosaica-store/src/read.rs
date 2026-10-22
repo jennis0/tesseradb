@@ -2971,39 +2971,12 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// rather than per row. A tile holds whole cells, so the cell found maps back to the row it
 /// begins at.
 ///
-/// # Why it is correct
-///
-/// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
-/// **non-decreasing in `t`** — a larger threshold can only admit more codes. The cell codes
-/// ascend strictly: [`crate::bands::CellCodes::open`] refuses a file whose codes do not, and
-/// `mosaica verify --deep` checks that each is its cell's Morton code.
-///
-/// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
-/// `from` is at or below the answer. This sweep establishes that in both places it calls it:
-///
-/// - `start`: the floor begins at 0, and thereafter is the previous tile's `start`. Tiles are
-///   visited in ascending `code_range().0`, so by the lemma their starts are ascending too.
-/// - `end`: floored at this tile's own `start`, and `lo <= hi` for every tile's code range, so
-///   by the lemma `start <= end`.
-///
-/// # The three traps
-///
-/// **Sort by the code-range low bound, never by `prefix`.** Prefixes are only comparable at
-/// equal depth — prefix 1 at depth 1 covers a lower code range than prefix 3 at depth 16, but
-/// compares greater. `tiles_for_bbox` happens to hand back one depth, but this function is
-/// public and its correctness must not rest on its caller's habits. Ordering by `lo` assumes
-/// nothing about the tiles at all: not equal depth, not disjointness, not uniqueness.
-///
-/// **The floor for the next tile is this tile's `start`, not its `end`.** `end` would be
-/// tighter, and is sound only while no two tiles share a code range; a repeated tile would then
-/// be searched from beyond its own start and silently come back empty. `start` is monotone
-/// whatever the tile set contains, and the extra ground a gallop re-covers is one tile's worth
-/// of rows — logarithmic, and not the cost this function exists to remove.
+/// # The order it answers in
 ///
 /// **`tiles_for_bbox`'s raster order is not Morton order**, and the response's tile order is
 /// load-bearing: `ViewportOut.tiles` orders the wire payload's flat point concatenation and the
-/// reference oracle's comparison. The sweep therefore reorders an index vector, never `tiles`,
-/// and writes each result back at its caller-supplied index.
+/// reference oracle's comparison. The sweep therefore visits the tiles in [`TileOrder`]'s
+/// order without reordering `tiles`, and writes each result back at its caller-supplied index.
 pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
     let mut out = vec![0u32..0u32; tiles.len()];
     TileOrder::of(tiles).sweep(seg, false, |i, range| out[i] = range);
@@ -3022,6 +2995,7 @@ pub struct TileOrder {
 }
 
 impl TileOrder {
+    /// `tiles` ordered by their code ranges' low bounds, each keeping its index in `tiles`.
     pub fn of(tiles: &[Tile]) -> Self {
         let mut ranges: Vec<(u64, u64, usize)> = tiles
             .iter()
@@ -3052,7 +3026,48 @@ impl TileOrder {
         out
     }
 
-    /// Every tile's range in sweep order, or with `skip` only those holding a cell of `seg`.
+    /// Every tile's range in this order. With `skip`, a tile holding no cell of `seg` may be passed
+    /// over unvisited, and that happens only where the high bounds ascend; otherwise every tile is
+    /// visited, empty or not.
+    ///
+    /// # Why it is correct
+    ///
+    /// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
+    /// **non-decreasing in `t`** — a larger threshold can only admit more codes. The cell codes
+    /// ascend strictly: [`crate::bands::CellCodes::open`] refuses a file whose codes do not, and
+    /// `mosaica verify --deep` checks that each is its cell's Morton code.
+    ///
+    /// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
+    /// `from` is at or below the answer. This sweep establishes that in both places it calls it:
+    ///
+    /// - `start`: the floor begins at 0, and thereafter is the previous tile's `start`. Tiles are
+    ///   visited in ascending `code_range().0`, so by the lemma their starts are ascending too.
+    /// - `end`: floored at this tile's own `start`, and `lo <= hi` for every tile's code range, so
+    ///   by the lemma `start <= end`.
+    ///
+    /// # The two traps
+    ///
+    /// **Sort by the code-range low bound, never by `prefix`.** Prefixes are only comparable at
+    /// equal depth — prefix 1 at depth 1 covers a lower code range than prefix 3 at depth 16, but
+    /// compares greater. `tiles_for_bbox` happens to hand back one depth, but this type is
+    /// public and its correctness must not rest on its caller's habits. Ordering by `lo` assumes
+    /// nothing about the tiles at all: not equal depth, not disjointness, not uniqueness.
+    ///
+    /// **The floor for the next tile is this tile's `start`, not its `end`.** `end` would be
+    /// tighter, and is sound only while no two tiles share a code range; a repeated tile would then
+    /// be searched from beyond its own start and silently come back empty. `start` is monotone
+    /// whatever the tile set contains, and the extra ground a gallop re-covers is one tile's worth
+    /// of rows — logarithmic, and not the cost this sweep exists to remove.
+    ///
+    /// # Passing over empty tiles
+    ///
+    /// Let `next` be the first cell at or above this tile's low bound. Where `next` is at or past
+    /// this tile's high bound the tile is empty, and so is every later tile whose high bound is at
+    /// or below `next`: its low bound is at or above this one's, so a cell it held would lie at or
+    /// above this low bound and below `next`, and there is none. Where the high bounds ascend,
+    /// those tiles are one run, found in one binary search. Where they do not, a tile nested in an
+    /// earlier one can end before a tile between them, so the run is not contiguous and every tile
+    /// is visited.
     fn sweep(&self, seg: &SegmentData, skip: bool, mut visit: impl FnMut(usize, Range<u32>)) {
         let codes = seg.cell_codes.codes();
         let skip = skip && self.highs_ascend;
