@@ -9,7 +9,7 @@ use std::path::Path;
 
 use croaring::Bitmap;
 
-use mosaica_spatial::{split32, tiles_for_bbox, Bounds, Tile};
+use mosaica_spatial::{split32, tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use mosaica_store::manifest::{CurrentPointer, EntitySet};
 use mosaica_store::{open_bundle, tile_ranges, StoreError};
 use mosaica_types::EntityId;
@@ -909,7 +909,7 @@ fn assert_matches_per_tile_search(seg: &mosaica_store::SegmentData, tiles: &[Til
         .collect();
     let mut parts = mosaica_store::TileOrder::of(tiles).parts(seg);
     parts.sort_by_key(|(i, _)| *i);
-    assert_eq!(parts, held, "{what}: the tiles holding a row, each with its range");
+    assert_eq!(parts, held, "{what}: the tiles holding a row");
 }
 
 #[test]
@@ -925,15 +925,101 @@ fn the_tiles_holding_a_row_are_found_where_most_of_a_request_is_empty() {
         ("interior", [0.10, 0.20, 0.16, 0.26]),
         ("past the last row", [0.97, 0.97, 1.0, 1.0]),
         ("full extent", [0.0, 0.0, 1.0, 1.0]),
+        ("a few cells", [0.10, 0.20, 0.102, 0.202]),
     ] {
-        for depth in [7u8, 9, 12] {
-            let tiles = tiles_for_bbox(bbox, depth, &extent);
-            if tiles.len() > 70_000 {
+        for depth in [7u8, 9, 12, 16] {
+            if tiles_for_bbox_count(bbox, depth, &extent) > 70_000 {
                 continue;
             }
+            let tiles = tiles_for_bbox(bbox, depth, &extent);
             assert_matches_per_tile_search(seg, &tiles, &format!("{label} d{depth}"));
         }
     }
+}
+
+#[test]
+fn a_cell_just_past_an_empty_tile_is_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_items, mut codes) = build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.only_shard().views["main"].segments[0];
+    codes.sort_unstable();
+    codes.dedup();
+    // A depth-16 tile is one cell: the empty cell below an occupied one, then the occupied one.
+    for c in codes.into_iter().filter(|&c| c > 0).map(u64::from) {
+        let tiles = [
+            Tile {
+                prefix: c - 1,
+                depth: 16,
+            },
+            Tile {
+                prefix: c,
+                depth: 16,
+            },
+        ];
+        assert_matches_per_tile_search(seg, &tiles, &format!("cell {c} after cell {}", c - 1));
+    }
+}
+
+#[test]
+fn nested_tiles_among_empty_ones_are_each_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.only_shard().views["main"].segments[0];
+    // A sparse depth-12 request with each tile's sixteen depth-14 children beside it: the first
+    // child shares its parent's low bound, and the children end before the parent does, so the
+    // high bounds do not ascend.
+    let parents = tiles_for_bbox([0.10, 0.20, 0.16, 0.26], 12, &unit_extent());
+    let mut tiles = parents.clone();
+    for parent in &parents {
+        tiles.extend((0..16).map(|child| Tile {
+            prefix: parent.prefix << 4 | child,
+            depth: 14,
+        }));
+    }
+    assert_matches_per_tile_search(seg, &tiles, "parents then children");
+    tiles.reverse();
+    assert_matches_per_tile_search(seg, &tiles, "children then parents");
+}
+
+#[test]
+fn a_tile_is_found_when_a_tile_nested_in_it_ends_before_its_first_cell() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_items, mut codes) = build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.only_shard().views["main"].segments[0];
+    codes.sort_unstable();
+    codes.dedup();
+    let codes: Vec<u64> = codes.into_iter().map(u64::from).collect();
+    let mut checked = 0;
+    // For each depth-12 tile whose first cell `c` is at least two cells in, with the cell below
+    // the tile empty: that empty cell, the tile, and the empty cell one past the tile's low bound,
+    // which lies inside the tile and ends before `c`. In code order the high bounds do not ascend.
+    for (at, &c) in codes.iter().enumerate() {
+        let low = c >> 8 << 8;
+        let first_in_tile = at == 0 || codes[at - 1] < low;
+        if !first_in_tile || low == 0 || c < low + 2 || codes.binary_search(&(low - 1)).is_ok() {
+            continue;
+        }
+        let tiles = [
+            Tile {
+                prefix: low - 1,
+                depth: 16,
+            },
+            Tile {
+                prefix: c >> 8,
+                depth: 12,
+            },
+            Tile {
+                prefix: low + 1,
+                depth: 16,
+            },
+        ];
+        assert_matches_per_tile_search(seg, &tiles, &format!("the depth-12 tile holding {c}"));
+        checked += 1;
+    }
+    assert!(checked > 0, "the fixture has such a tile");
 }
 
 /// A random depth and an in-range prefix for it.
