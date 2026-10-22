@@ -43,7 +43,7 @@ use mosaica_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use mosaica_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
 use mosaica_store::read::{ScalarSlice, SegmentData, ViewData};
 use mosaica_store::vocabulary::Vocabularies;
-use mosaica_store::tile_ranges_all;
+use mosaica_store::TileOrder;
 use mosaica_types::layer::ComputedProperty;
 use mosaica_types::{
     EntityId, GenerationStamp, RowId, ShardId, ShardRow, TermId, MosaicaId, API_VERSION,

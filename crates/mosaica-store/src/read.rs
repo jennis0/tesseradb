@@ -3006,33 +3006,91 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// and writes each result back at its caller-supplied index.
 pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
     let mut out = vec![0u32..0u32; tiles.len()];
-    if tiles.is_empty() {
-        return out;
-    }
-    let codes = seg.cell_codes.codes();
-
-    let mut order: Vec<usize> = (0..tiles.len()).collect();
-    order.sort_unstable_by_key(|&i| tiles[i].code_range().0);
-
-    let mut floor = 0usize;
-    // The last tile's end, as a cell and its row: in a run of adjacent tiles it is the next one's
-    // start, and the cut index is then read once a tile.
-    let mut last = (usize::MAX, 0u32);
-    let mut row_of = |cell: usize| {
-        if cell != last.0 {
-            last = (cell, cell_row(seg, cell));
-        }
-        last.1
-    };
-    for i in order {
-        let (lo, hi) = tiles[i].code_range();
-        let start = gallop(codes, floor, lo);
-        let end = gallop(codes, start, hi);
-        floor = start;
-        let first = row_of(start);
-        out[i] = first..row_of(end);
-    }
+    TileOrder::of(tiles).sweep(seg, false, |i, range| out[i] = range);
     out
+}
+
+/// A tile set's code ranges in the order [`tile_ranges_all`] sweeps them, computed once and swept
+/// against any number of segments with [`TileOrder::parts`].
+pub struct TileOrder {
+    /// Each tile's code range, ascending by the low bound, with the tile's index in the caller's
+    /// list.
+    ranges: Vec<(u64, u64, usize)>,
+    /// Whether the high bounds ascend too, as they do for tiles that do not nest. Only then can a
+    /// sweep pass over a run of empty tiles in one search.
+    highs_ascend: bool,
+}
+
+impl TileOrder {
+    pub fn of(tiles: &[Tile]) -> Self {
+        let mut ranges: Vec<(u64, u64, usize)> = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, tile)| {
+                let (lo, hi) = tile.code_range();
+                (lo, hi, i)
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|&(lo, _, _)| lo);
+        let highs_ascend = ranges.windows(2).all(|w| w[0].1 <= w[1].1);
+        TileOrder {
+            ranges,
+            highs_ascend,
+        }
+    }
+
+    /// The tiles holding a row of `seg`, each as its index in the caller's list and its row range,
+    /// ascending by the code range's low bound. A tile `seg` holds nothing of is absent, and a run
+    /// of such tiles costs one search where the high bounds ascend.
+    pub fn parts(&self, seg: &SegmentData) -> Vec<(usize, Range<u32>)> {
+        let mut out = Vec::new();
+        self.sweep(seg, true, |i, range| {
+            if range.start < range.end {
+                out.push((i, range));
+            }
+        });
+        out
+    }
+
+    /// Every tile's range in sweep order, or with `skip` only those holding a cell of `seg`.
+    fn sweep(&self, seg: &SegmentData, skip: bool, mut visit: impl FnMut(usize, Range<u32>)) {
+        let codes = seg.cell_codes.codes();
+        let skip = skip && self.highs_ascend;
+        let mut floor = 0usize;
+        // The last tile's end, as a cell and its row: in a run of adjacent tiles it is the next
+        // one's start, and the cut index is then read once a tile.
+        let mut last = (usize::MAX, 0u32);
+        let mut row_of = |cell: usize| {
+            if cell != last.0 {
+                last = (cell, cell_row(seg, cell));
+            }
+            last.1
+        };
+        let mut k = 0;
+        while k < self.ranges.len() {
+            let (lo, hi, i) = self.ranges[k];
+            let start = gallop(codes, floor, lo);
+            floor = start;
+            if skip {
+                // No cell at or past this tile's low bound: no later tile holds one either.
+                let Some(&next) = codes.get(start) else {
+                    return;
+                };
+                let next = u64::from(next);
+                if next >= hi {
+                    // The next cell is past this tile, so every tile ending at or before it is
+                    // empty: a tile after this one starts at or above `lo`, and the first cell at
+                    // or above `lo` is `next`.
+                    k += 1 + self.ranges[k + 1..].partition_point(|&(_, hi, _)| hi <= next);
+                    continue;
+                }
+            }
+            let end = gallop(codes, start, hi);
+            let first = row_of(start);
+            visit(i, first..row_of(end));
+            k += 1;
+        }
+    }
 }
 
 /// Whether the streaming passes issue `madvise(MADV_SEQUENTIAL)` on the mappings they open —

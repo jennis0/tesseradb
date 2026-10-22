@@ -900,6 +900,40 @@ fn assert_matches_per_tile_search(seg: &mosaica_store::SegmentData, tiles: &[Til
         );
         assert_eq!(tile_ranges(seg, tile), column, "{what}: tile {i} ({tile:?})");
     }
+    // `TileOrder::parts` is the same sweep, keeping only the tiles that hold a row.
+    let held: Vec<(usize, std::ops::Range<u32>)> = swept
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, range)| range.start < range.end)
+        .collect();
+    let mut parts = mosaica_store::TileOrder::of(tiles).parts(seg);
+    parts.sort_by_key(|(i, _)| *i);
+    assert_eq!(parts, held, "{what}: the tiles holding a row, each with its range");
+}
+
+#[test]
+fn the_tiles_holding_a_row_are_found_where_most_of_a_request_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 5,000 items on a 100x100 position grid: at depth 12 nearly every tile is empty, so the sweep
+    // passes over long runs of empty tiles between the occupied ones.
+    build_bundle(dir.path(), 5_000);
+    let bundle = open_bundle(dir.path()).expect("open_bundle");
+    let seg = &bundle.only_shard().views["main"].segments[0];
+    let extent = unit_extent();
+    for (label, bbox) in [
+        ("interior", [0.10, 0.20, 0.16, 0.26]),
+        ("past the last row", [0.97, 0.97, 1.0, 1.0]),
+        ("full extent", [0.0, 0.0, 1.0, 1.0]),
+    ] {
+        for depth in [7u8, 9, 12] {
+            let tiles = tiles_for_bbox(bbox, depth, &extent);
+            if tiles.len() > 70_000 {
+                continue;
+            }
+            assert_matches_per_tile_search(seg, &tiles, &format!("{label} d{depth}"));
+        }
+    }
 }
 
 /// A random depth and an in-range prefix for it.

@@ -369,10 +369,11 @@ impl Engine {
 /// a few hundred independent `log2(rows)` searches is where a sparse request's time actually goes,
 /// flat in density because it is the searching rather than the rows found.
 ///
-/// `tile_ranges_all` returns ranges positionally aligned with `tiles`, preserving the response's
-/// tile order, which the wire payload's points are a flat concatenation in; the sweep's own Morton
-/// order stays inside `tile_ranges_all`. One sweep per segment of every shard, transposed below
-/// into per-tile part lists, because a tile is the union of its parts across segments and shards.
+/// The tiles are put in Morton order once, and each segment of every shard is swept in that order
+/// for the tiles it holds a row of ([`TileOrder::parts`]), so a segment with nothing in the request
+/// costs a search rather than a step per tile. The parts are gathered into per-tile lists, because
+/// a tile is the union of its parts across segments and shards, and `ranges` keeps the response's
+/// tile order, which the wire payload's points are a flat concatenation in.
 ///
 /// `rows_in_ranges` is summed here, before any mask is consulted, so the figure is mask-free by
 /// construction: summing it inside [`tile_sweep`] instead let a tile that failed its
@@ -388,23 +389,13 @@ pub(super) fn tile_ranges<'a>(
         underlay_offset,
         underlay_cells_demanded,
     } = set;
-    let per_segment: Vec<Vec<Range<u32>>> = segments
-        .segments
-        .iter()
-        .map(|held| tile_ranges_all(held.segment, &tiles))
-        .collect();
-    let ranges: Vec<Vec<(usize, Range<u32>)>> = (0..tiles.len())
-        .map(|t| {
-            per_segment
-                .iter()
-                .enumerate()
-                .filter_map(|(s, sweep)| {
-                    let range = sweep[t].clone();
-                    (range.start < range.end).then_some((s, range))
-                })
-                .collect()
-        })
-        .collect();
+    let order = TileOrder::of(&tiles);
+    let mut ranges: Vec<Vec<(usize, Range<u32>)>> = vec![Vec::new(); tiles.len()];
+    for (s, held) in segments.segments.iter().enumerate() {
+        for (t, range) in order.parts(held.segment) {
+            ranges[t].push((s, range));
+        }
+    }
     let mut starts = Vec::with_capacity(tiles.len());
     let mut by_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); segments.sides.len()];
     let mut at = 0;
@@ -703,7 +694,7 @@ impl Engine {
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
     ) -> Result<Swept<'a>> {
-        // `Σ range.len()`, already materialised by the `tile_ranges_all` sweep above, plus
+        // `Σ range.len()`, already materialised by the sweep in [`tile_ranges`], plus
         // `underlay_cells_demanded`: the underlay's per-cell cost is the same shape of operation
         // `count_range` performs per row-range, so the two combine into one predictor.
         let total_rows_in_ranges = tiling.rows_in_ranges + tiling.underlay_cells_demanded;
