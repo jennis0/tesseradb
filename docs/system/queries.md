@@ -740,11 +740,3 @@ filters or suggests one column at a time.
 **Not built yet:** reading one result in parallel. A bulk read is one chain of requests, each
 continuing from the cursor the one before it returned, and one result cannot be split into slices
 read at once.
-
-## Sources
-
-`docs/design/architecture.md` §7, §8; `docs/design/filter-index.md` §1, §2, §6;
-`docs/design/filter-surface.md` §1–§3, §5, §8; `docs/design/selection-operand.md`;
-`docs/design/records-and-search.md` §4.4, §4.5; `docs/design/value-suggestion.md` §1–§3, §8;
-`docs/design/highlight-and-hierarchy.md` §1–§4; `docs/openapi/mosaica.yaml`; decisions 0062, 0063,
-0066, 0069, 0104, 0114, 0118–0124.

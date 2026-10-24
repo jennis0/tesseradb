@@ -154,7 +154,7 @@ one level of the taxonomy layer took:
 | 25% | 3.6 s | 2.2 s | 3.2 s |
 | everything | 8.8 s | 10.7 s | 12.5 s |
 
-*One run each, from `probes/2026-10-06-first-open-fills/`. The layer serves a centroid and a box.*
+*One run each. The layer serves a centroid and a box.*
 
 So a viewer who sees 1% of that corpus waits between a fifth of a second and a second for each level
 the first time, and one who sees everything waits 9 to 12 seconds. A request that shows several

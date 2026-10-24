@@ -362,9 +362,3 @@ The data model lives in `mosaica-types` (the declared shapes: a view, a vocabula
 `mosaica-build` (compiling a declaration into a bundle), `mosaica-spatial` (the projection and
 frame transforms), `mosaica-store` (vocabularies and each view's own files on disc), and
 `mosaica-engine` (viewport reads and category serving).
-
-## Sources
-
-`docs/design/architecture.md` §5; `docs/design/views.md` §1–§6; `docs/design/projections.md`;
-`docs/design/records-and-search.md` §1–§4, §8; `docs/design/per-point-attributes.md`;
-`docs/design/configuration.md` §1; decision 0072.

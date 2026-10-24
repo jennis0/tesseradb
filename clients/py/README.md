@@ -1,8 +1,7 @@
 # `mosaica`
 
 Mosaica's Python package: one package whether you want the widget, the SDK or
-both. The widget and the SDK are here; the in-process instance joins them later. It shares no
-code with `reference/`, the test-only oracle.
+both.
 
 ```
 pip install mosaica            # read, create, declare, insert, commit; with pyarrow and the binary
@@ -622,13 +621,13 @@ state. What remains is a token in the browser's memory for its lifetime.
 
 ## Where the widget's requests go: two arms, one built
 
-The page's JavaScript calls the viewer plane directly from the notebook page's origin —
-**browser-direct**, the arm that is built. The viewer plane must therefore allow that origin:
-today the development-only `serve.dev_cors_origins` (the demo lists `http://localhost:5173`);
-a production list is design D10, not yet ruled. This arm can only ever be enumerated for
-JupyterLab and Marimo on a known origin — a VS Code notebook renders in `vscode-webview://` and
-Colab in a sandboxed iframe, which no origin list can name — and it needs a browser that can
-reach Mosaica, which a remote JupyterHub often cannot.
+The page's JavaScript calls the viewer plane directly from the notebook page's origin. This is
+**browser-direct**, the arm that is built. The viewer plane must therefore allow that origin.
+`serve.cors_origins` lists origins by name, and `serve.cors_loopback` admits a page served from
+`localhost`, `127.0.0.1` or `[::1]` on any port, which the deployment file the SDK writes sets. No
+origin list can name a VS Code notebook, which renders in `vscode-webview://`, or Colab, which
+renders in a sandboxed iframe. The arm also needs a browser that can reach Mosaica, which a remote
+JupyterHub often cannot.
 
 **⊘ The proxy arm — documented, not built.** The widget's `url` becomes a path on the notebook
 server (`/mosaica/<name>/`), and a small Jupyter server extension answers it:
@@ -644,7 +643,7 @@ server (`/mosaica/<name>/`), and a small Jupyter server extension answers it:
   off the pan path because the proxy is not the kernel.
 
 The widget under this arm sends no `ready`, since the page holds no token; the protocol above is
-skipped and `Map(url)` takes no `token`. D4 chooses which arm ships first, conditional on D10.
+skipped and `Map(url)` takes no `token`.
 
 ## The protocol, for a reader of both halves
 

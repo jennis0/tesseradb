@@ -300,7 +300,7 @@ centroid and a box, measured:
 | 25% | 873,932,430 | 3.6 s | 2.2 s | 3.2 s |
 | all | 3,495,729,729 | 8.8 s | 10.7 s | 12.5 s |
 
-*One run each, from `probes/2026-10-06-first-open-fills/`. After a restart over the kept cache, the
+*One run each. After a restart over the kept cache, the
 same requests filled nothing.*
 
 A grant pays the walk once per level, the first time it reads that level, and keeps the result
@@ -404,19 +404,3 @@ tile are walked in `mosaica-engine`'s `viewport::tiled` module and streamed by `
 `row_members` module. A bulk read's pages,
 stretches and cursors live in `mosaica-engine`'s `records` module, and its admission and streaming
 in `mosaica-server`'s `records` module.
-
-Coverage of the properties this chapter describes is stated in `conformance.md`'s coverage matrix.
-
-## Sources
-
-`docs/design/streamed-serving.md`; `docs/design/delta-serving.md` §1–§6; `docs/design/caching.md`;
-`docs/design/filter-result-cache.md` §1–§2; `docs/design/tile-addressed-integration.md`;
-`docs/design/concurrency-lifecycle.md` §7.2; `docs/design/system-architecture.md` §5, §6.3, §9;
-decisions 0058, 0059, 0060, 0061; `docs/system/write-path.md`; `docs/system/queries.md`;
-`docs/system/access-control.md`; `crates/mosaica-server/src/health.rs`;
-`crates/mosaica-server/src/viewer.rs`; `crates/mosaica-server/src/state.rs`;
-`crates/mosaica-server/src/error.rs`; `crates/mosaica-engine/src/cache.rs`;
-`crates/mosaica-engine/src/refresh.rs`; `crates/mosaica-cache/`;
-`crates/mosaica-engine/src/viewport/`; `crates/mosaica-engine/src/figures/`;
-`crates/mosaica-server/src/artifact_tiles.rs`; `crates/mosaica-wire/src/payload.rs`;
-`probes/2026-10-06-first-open-fills/README.md`.

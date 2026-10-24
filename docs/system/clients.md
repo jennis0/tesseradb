@@ -425,10 +425,3 @@ is covered by unit tests; rules 8 to 12 are not screen-checkable and are not cov
 
 The bulk reads live in `@mosaicajs/client`'s `records` module, in the Python package's viewer
 reader, and in the CLI's `records` module.
-
-## Sources
-
-`docs/design/client-interaction.md` §2–§5, §7, §9; `docs/design/client-architecture.md` §1–§4;
-`docs/design/client-components.md` §1–§5, §8; `docs/design/client-obligations.md`;
-`docs/design/view-switching.md` §1–§5; `clients/ts/README.md`; `clients/py/README.md`;
-`clients/ts/core/src`; decisions 0095, 0096, 0097, 0098, 0099, 0100, 0101, 0102.

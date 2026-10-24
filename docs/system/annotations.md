@@ -583,14 +583,3 @@ membership requirement, because nothing yet defines what that layer's full membe
 fraction to be taken against; the total changes with every write, unlike an enumerated layer's
 fixed member count. `all` is the fraction form at its highest value, so it is excluded along with
 every other fraction. Such a layer can declare any, a count, or none instead.
-
-## Sources
-
-`docs/design/artifact-system.md`; `docs/design/annotations.md` §1–§6;
-`docs/design/annotation-representation.md` §2, §4, §6; `docs/design/annotation-write-cycle.md`
-§2, §3, §4.1, §4.2, §7; `docs/design/artifacts-from-points.md` §1–§3, §5–§6;
-`docs/design/artifact-shapes.md` §1, §4–§6, §10; `docs/design/polygon-membership.md` §1–§4, §8;
-`docs/design/dag-hierarchies.md` §1–§6; `docs/design/artifact-serving-at-scale.md` §1, §6.1, §9;
-`docs/design/artifact-fetch-protocol.md` §1–§4, §9; `docs/design/highlight-and-hierarchy.md` §2,
-§5; `docs/design/configuration.md` §1, §5, §6, §7; `docs/design/write-path.md` §5.4;
-decisions 0047, 0072, 0075, 0076, 0080, 0081, 0084, 0086, 0088, 0089, 0091, 0107, 0114.

@@ -2,19 +2,16 @@
 
 Three things a power user who installs nothing needs, and where each is:
 
-| | where | kept true by |
-|---|---|---|
-| The API | [`mosaica.yaml`](mosaica.yaml), OpenAPI 3.1 for the viewer, session and control planes | `crates/mosaica-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
-| The framing, to the byte | [The framing](#the-framing) and [the worked decodes](#the-worked-decodes) below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
-| What the server cannot enforce | [The twelve rules](../system/clients.md#the-twelve-rules) in the clients chapter | reading it |
+| | where |
+|---|---|
+| The API | [`mosaica.yaml`](mosaica.yaml), OpenAPI 3.1 for the viewer, session and control planes |
+| The framing, to the byte | [The framing](#the-framing) and [the worked decodes](#the-worked-decodes) below |
+| What the server cannot enforce | [The twelve rules](../system/clients.md#the-twelve-rules) in the clients chapter |
 
 ## What the description is, and is not
 
-`mosaica.yaml` is **hand-authored**. The JSON DTOs live in `mosaica-server`, some private, the
-control plane's answers built with `json!`, and the Arrow-facing structs carry a deliberate *no
-serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
-every closed DTO is declared `additionalProperties: false`, and a field added to a response and not
-to the file fails the test rather than surfacing on a stranger's screen.
+`mosaica.yaml` describes every route and every JSON body. A JSON object declared
+`additionalProperties: false` has only the fields listed.
 
 What it can say only in prose: the bodies of `/v1/viewport`, `/v1/artifacts/viewport`,
 `/v1/items`, `/v1/artifacts` and `/v1/aggregate` are not JSON, and are declared as
@@ -246,9 +243,7 @@ const { head, tables, trailer } = decodeItems(new Uint8Array(await response.arra
 ```
 
 `mosaica_id` arrives as a `uint64`, which Arrow JS reads as a `BigInt`; narrowing it to a `number`
-loses bits. Both decoders were run against zstd-compressed and uncompressed bodies from a release
-server, and without the registered codec Arrow JS refuses the compressed one. Neither has a test of
-its own, as the viewport decodes do.
+loses bits. Without the registered codec, Arrow JS refuses a zstd-compressed body.
 
 ## The aggregate read
 

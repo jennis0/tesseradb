@@ -96,23 +96,17 @@ single machine: one box with 47 GB of RAM, no cluster.
 | Corpus | Points | What it declares | Build time | Build rate | Peak RSS | Bundle | Viewport p50 |
 |---|---|---|---|---|---|---|---|
 | Synthetic, current build pipeline | 10⁹ | a category vocabulary, averaging 1.7 terms per item | 6 m 46 s | 2.5 M points/s | 27.6 GB | not measured | not measured |
-| Synthetic, earlier build pipeline | 10⁹ | a category vocabulary of 47,968 terms, averaging 1.7 per item | 2 h 37 m | 106 k points/s | 27.5 GB | 47.0 GB | 135–164 ms |
 | Overture places and divisions | 73,631,092 | 625,754 division polygons drawn as regions, a text index over names, and category filters | 31 m 18 s | 39 k points/s | 26.75 GB | 12.57 GB | not measured |
 | MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 headings over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | not measured |
 | GeoNames | 13,463,857 | 8 vocabularies, 13 attributes, 2 layers | 2 m 59 s | 75 k points/s | 3.55 GB | 1.34 GB | not measured |
 | arXiv | 2,422,486 | two embedding views (kNN and PCA) with two clusterings each, clusters titled from their own text | 54 s | 44 k points/s | not measured | 1.5 GB | not measured |
-
-The two synthetic rows are one corpus built twice: the bundle size and viewport latency were
-measured on the earlier build, and the build pipeline was then reworked, which cut the build to
-under seven minutes.
 
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because
 the row order the geometry is written in, Morton order, is the index. A build plans its memory
 layout before the pass starts, from the corpus's declared term cardinality, and peak memory follows
 that plan and the number of distinct terms rather than the point count. Build rate falls with what
 a corpus declares rather than with its size: the synthetic corpus carries categories only, and the
-real corpora carry text indexes, polygons and hierarchy layers. Sustained ingest rate into a
-running service has not been measured since the write path was reworked.
+real corpora carry text indexes, polygons and hierarchy layers.
 
 ## What it consists of
 
@@ -177,16 +171,3 @@ any framework, with a deck.gl layer and React bindings alongside them.
 - Evaluating the approach: the data model, access control, queries and write-path chapters.
 - Operating a deployment: the guide.
 - Building against the client, or against the wire directly: the clients chapter and the guide.
-
-## Sources
-
-`README.md`; `docs/design/architecture.md`; `docs/design/configuration.md`;
-`docs/design/conformance.md`; `docs/guide/README.md`; `docs/ingest-campaign.md`;
-`docs/evidence/prior-art/prior-art-synthesis.md`;
-`docs/evidence/prior-art/prior-art-2-visual-analytics.md`;
-`docs/evidence/memos/2026-07-30-viewport-hot-path-and-bundle-size-review.md`;
-`probes/dataset.md`; `probes/2026-07-30-1e9-rebuild/build-time-rss.txt`;
-`test_corpora/geonames/corpus.toml`; `test_corpora/medcpt/mesh.py`;
-`clients/ts/README.md`; `clients/py/README.md`; `docs/openapi/mosaica.yaml`;
-`crates/mosaica-server/src/control.rs`; `docs/system/access-control.md`;
-`docs/system/security.md`; `docs/system/write-path.md`.

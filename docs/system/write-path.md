@@ -797,8 +797,7 @@ how flush and allocation order have diverged from each other.
 
 ## Where this is tested and where it lives
 
-Coverage of the invariants this chapter turns on is stated in `conformance.md` §4.6 and nowhere
-else. The properties this chapter states are pinned as integration tests across the write path's
+The properties this chapter states are pinned as integration tests across the write path's
 crates:
 
 - random sequences of ingest batches, changes, flushes, compactions, restarts, resent batches

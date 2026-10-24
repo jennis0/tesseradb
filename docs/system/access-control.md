@@ -99,8 +99,7 @@ one directly.
 
 A probe of the two layouts measured authorise on 9.3 million per-document labels at 100 to 800 ms
 through the graph and 1.4 to 95 ms through each term's item list, and on 500,000 compartmented
-labels at 20 to 95 ms through the graph, which term lists cannot express
-(`probes/2026-09-30-label-dag-authorise/results.md`). Indexing terms in term lists and only
+labels at 20 to 95 ms through the graph, which term lists cannot express. Indexing terms in term lists and only
 conjunctions through the graph takes the faster figure for each. The probe indexed whole labels;
 the per-operand rule has not been measured separately. Authorise runs once per session, so these figures are paid at
 session start and never by a map request.
@@ -274,16 +273,3 @@ against the overlay, the row-space projection it feeds, and the background refre
 resident projection current live in `mosaica-engine`. The catalogue lives in `mosaica-catalogue`.
 Login, the session plane, OIDC token checks, the session registry that ends sessions on a
 catalogue change, and the catalogue's verbs on the control plane live in `mosaica-server`.
-
-## Sources
-
-`docs/design/architecture.md` §2.2, §2.3, §2.4, §2.6, §6; `docs/design/system-architecture.md`
-§2.2, §4.2, §4.3; `docs/design/concurrency-lifecycle.md` §1.1, §2.4, §3.3;
-`docs/design/core-access-expressions.md`; `docs/system/write-path.md`; `docs/system/security.md`;
-`docs/system/data-model.md`; `docs/system/queries.md`; decisions 0005, 0014, 0020, 0025, 0027,
-0102; `docs/users-and-access.md`; `crates/mosaica-access/src/lib.rs`;
-`crates/mosaica-authz/src/label/index.rs`; `crates/mosaica-authz/src/fragment.rs`;
-`crates/mosaica-engine/src/session.rs`; `crates/mosaica-engine/src/compose.rs`;
-`crates/mosaica-engine/src/refresh.rs`; `crates/mosaica-server/src/session.rs`;
-`crates/mosaica-server/src/viewer.rs`; `crates/mosaica-server/src/error.rs`;
-`crates/mosaica-store/src/manifest.rs`; `crates/mosaica-cli/src/main.rs`.
