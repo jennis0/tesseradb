@@ -155,7 +155,7 @@ Each value is stored as a numeric code, drawn at random unless you pin it in the
 | Items | Insert, edit, delete, suppress and lift a suppression |
 | Fields | Declare a new field. Its type, `render` and `index` are fixed once declared. `unique` can be turned on or off |
 | Plain views | Declare a new view. A view cannot be changed or dropped |
-| View groups | Declare a group, and create and drop its views. A group's view cannot be changed: drop it, create it again empty, and insert its points again. Items that were in no other view come back as new items |
+| View groups | Declare a group, and create and drop its views. A group declared while running cannot carry category-typed facts about its views. A group's view cannot be changed: drop it, create it again empty, and insert its points again. Items that were in no other view come back as new items |
 | Annotation layers | Declare a layer, publish artifacts into it, and drop it |
 | Vocabularies | Declare one, add values, and change values' titles |
 
@@ -169,4 +169,5 @@ Anything else about these needs a rebuild from files.
 - **Fields holding a list of values.** A field holds at most one value per item.
 - **Declaring a rendered field at a running server.** Declare it at a build.
 - **Dropping a plain view.** A view in a view group can be dropped.
+- **Category-typed view facts in a group declared at a running server.** A group declared at a build can carry a category fact about each view, such as a region drawn from a vocabulary. A group declared at a running server is refused if it does. Declare such a group at a build.
 - **Titles of plain views, fields and vocabularies.** A declaration may give one, but it is not yet sent to clients. Titles of view groups, layers, levels and category values are sent.

@@ -437,6 +437,12 @@ lives in a row's drawn columns and a column declared live has no rows written fo
 be declared at a build, which breaks the rule that a build is an ingest into an empty database.
 Left as it is for the first release. No issue exists.
 
+**Category-typed view metadata in a view group declared at a running server.** A view group
+declared at a build can carry metadata of type `category` for each of its views; the same
+declaration sent to `PUT /control/view_groups/{name}` is refused with `422`. This breaks the rule
+that a build is an ingest into an empty database. Left as it is for the first release. No issue
+exists.
+
 [#3]: https://github.com/jennis0/tessera-index/issues/3
 [#4]: https://github.com/jennis0/tessera-index/issues/4
 [#73]: https://github.com/jennis0/tessera-index/issues/73
