@@ -10,6 +10,7 @@
 // through a fetch that runs in a worker thread, so the times it records (counts frame, first
 // points frame, last byte) are when the bytes arrived, not when this thread, busy decoding, got
 // round to reading them.
+import {AsyncLocalStorage} from 'node:async_hooks';
 import {readFileSync, writeFileSync} from 'node:fs';
 import {Worker} from 'node:worker_threads';
 
@@ -23,6 +24,16 @@ if (!cred) throw new Error('set MOSAICA_BENCH_SESSION_CRED to the deployment ope
 const now = () => performance.timeOrigin + performance.now();
 /** Every `at_ms` in the output is measured from here. */
 const origin = now();
+
+/**
+ * When the timer whose callback began the work now running fired, or `undefined` outside every
+ * timer's work. Every `setTimeout` callback runs inside it, so a request the store sends from its
+ * own timers (the artifact channel's settle, the in-view rest, the driver's debounce and idle) is
+ * known as one, however many awaits after the timer it is sent.
+ */
+const fired = new AsyncLocalStorage();
+const nativeSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => nativeSetTimeout((...a) => fired.run(now(), fn, ...a), ms, ...args);
 
 // ---------------------------------------------------------------------------------------------
 // The wire: fetch in a worker thread, timing each response's frames as they arrive
@@ -106,22 +117,51 @@ let lastActivity = now();
 /** Every request, in issue order, with what was sent and when its parts arrived. */
 const log = [];
 let step = null;
-/** Called on every arrival on the wire: a replay waits on them. */
+/** Called on every arrival on this thread: a replay waits on them. */
 const waiters = new Set();
 const changed = () => new Promise((r) => waiters.add(r));
 function notify() {
   for (const w of waiters) w();
   waiters.clear();
 }
+/** The latest response part this thread has been handed, which the store could have acted on. */
+let lastSeen = null;
+
+/**
+ * A response part reaching this thread, `arrived` when the worker read it off the wire: this is
+ * when the store could first see it.
+ */
+function seen(record, part, arrived) {
+  const at = now();
+  record.seen[part] ??= at;
+  record.arrived[part] ??= arrived;
+  lastSeen = {record, part, at, arrived};
+  notify();
+}
+
+/**
+ * Why a request is sent now, as a replay repeats it: from one of the store's timers (`timer`), so
+ * on the step's clock; else after the latest part of this step's responses the store had seen
+ * (`after`, `part`), by `gap_ms` from when it saw it and `wire_gap_ms` from when it arrived; else,
+ * with nothing seen yet, on the step's clock.
+ */
+function causeNow() {
+  const at = now();
+  const timer = fired.getStore();
+  const last = lastSeen && step && lastSeen.record.step === step.id ? lastSeen : null;
+  if (timer !== undefined && (!last || last.at < timer)) return {timer: true};
+  if (!last) return null;
+  const ms = (x) => Math.round(x * 10) / 10;
+  return {after: last.record.id, part: last.part, gap_ms: ms(at - last.at), wire_gap_ms: ms(at - last.arrived)};
+}
 
 wire.on('message', (m) => {
   const p = pending.get(m.id);
   if (!p) return;
   if (m.frame) {
-    p.record.events[m.frame] = m.t;
-    notify();
+    seen(p.record, m.frame, m.t);
   } else if (m.head) {
-    p.record.events.headers = m.t;
+    seen(p.record, 'headers', m.t);
     const body = new ReadableStream({
       start(c) {
         p.stream = c;
@@ -152,11 +192,10 @@ wire.on('message', (m) => {
       shed: m.done && p.record.framed ? !t.trailer : false,
       error: m.error ?? null
     });
-    p.record.events.last_byte = t.lastByte ?? now();
     pending.delete(m.id);
     inFlight -= 1;
     lastActivity = now();
-    notify();
+    seen(p.record, 'last_byte', t.lastByte ?? now());
   }
 });
 
@@ -169,16 +208,19 @@ function send(url, init = {}, fields = {}) {
   const body = typeof init.body === 'string' ? init.body : init.body ? new TextDecoder().decode(init.body) : null;
   const headers = Object.fromEntries(new Headers(init.headers ?? {}));
   const t0 = now();
-  const record = {id, ...fields, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0};
+  const {pathname, search} = new URL(url);
+  const record = {id, ...fields, step: step?.id ?? null, path: pathname, query: search, method: init.method ?? 'GET', body, t0};
   record.at_ms = Math.round((t0 - origin) * 10) / 10;
+  record.cause = causeNow();
   record.headers = placeholders(headers);
   record.start_ms = step?.t0 === undefined ? null : Math.round((t0 - step.t0) * 10) / 10;
   record.kind = kindOf(record);
   record.whole_level = wholeLevel(record, step?.zoom ?? 0);
   record.extra = fields.extra ?? beyondReference(record);
   record.framed = FRAMED.has(record.path);
-  // When each part arrived, on this thread's clock, for a replay to wait on.
-  record.events = {};
+  // When each part reached this thread, and when it arrived on the wire, for a replay to wait on.
+  record.seen = {};
+  record.arrived = {};
   log.push(record);
   inFlight += 1;
   lastActivity = now();
@@ -280,11 +322,25 @@ async function show(store, q, s) {
   const t0 = now();
   step = {id: s.id, ...s, t0};
   // Map zoom 0 fits the extent's height, 512 world units, in H pixels.
+  const cause = causeNow();
   store.setView({bbox: boxAt(q, s.centre, s.zoom), zoom: s.zoom + Math.log2(H / 512), width: W, height: H});
   const ok = await settled(t0);
-  const result = summarise(s, t0, ok);
+  markBesideLayers(s.id);
+  const result = {...summarise(s, t0, ok), cause};
   step = null;
   return result;
+}
+
+/**
+ * Marks each points request of a step that ran beside one of its artifacts requests, as
+ * `beside_layers`; in a replay, each that did in the reference, so both time the same requests.
+ */
+function markBesideLayers(id) {
+  const viewed = log.filter((r) => r.step === id && !r.extra);
+  const layers = viewed.filter((r) => r.kind === 'artifacts');
+  const span = (r) => [r.t0, r.t0 + (r.last_byte_ms ?? 0)];
+  const overlaps = (r) => layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]);
+  for (const r of viewed) if (r.kind === 'marks') r.beside_layers = r.ref_beside_layers ?? overlaps(r);
 }
 
 /** A step's figures from the requests it sent, timed from `t0`. */
@@ -304,12 +360,7 @@ function summarise(s, t0, ok) {
   const extraAt = extra.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   const layers = viewed.filter((r) => r.kind === 'artifacts');
   const layersAt = layers.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  // The points requests in flight at some moment an artifacts request of the view was; in a
-  // replay, those that were in the reference, so both time the same requests.
-  const span = (r) => [r.t0, r.t0 + (r.last_byte_ms ?? 0)];
-  const overlaps = (r) => layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]);
-  const beside = viewed.filter((r) => r.kind === 'marks' && (r.ref_beside_layers ?? overlaps(r)));
-  for (const r of viewed) if (r.kind === 'marks') r.beside_layers = beside.includes(r);
+  const beside = viewed.filter((r) => r.kind === 'marks' && r.beside_layers);
   const besideAt = beside.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   return {
     ...s,
@@ -345,6 +396,7 @@ async function open(principal, label, keepIds) {
   const t0 = now();
   const session = await client.authorise({terms: principal.terms});
   const tToken = now();
+  const tokenCause = causeNow();
   const meta = await client.meta(session.token);
   const view = meta.views[0];
   const q = view.quantisation;
@@ -381,17 +433,22 @@ async function open(principal, label, keepIds) {
   if (plan.title_field) store.setPointColumns('map#1', [plan.title_field]);
   const centre = [(q.xMin + q.xMax) / 2, (q.yMin + q.yMax) / 2];
   const opened = await show(store, q, {id: `${principal.label}/${label}`, kind: 'open', region: 'world', zoom: 0, centre});
-  return {store, q, view, ids, token: session.token, result: openResult(opened, t0, tToken)};
+  return {store, q, view, ids, token: session.token, result: openResult(opened, t0, tToken, tokenCause, opened.cause)};
 }
 
-/** An opening's figures: from the token's arrival, and the moments a replay times it from. */
-function openResult(opened, t0, tToken) {
+/**
+ * An opening's figures: from the token's arrival. With the moments a replay times it by: when it
+ * began, when the token arrived and when the store was shown the extent, and why at each.
+ */
+function openResult(opened, t0, tToken, tokenCause, showCause) {
   const rel = (x) => (x === null ? null : Math.round((x + (opened.t0 - tToken)) * 10) / 10);
   const at = (x) => Math.round((x - origin) * 10) / 10;
   return {
     start_at_ms: at(t0),
     token_at_ms: at(tToken),
+    token_cause: tokenCause,
     show_at_ms: at(opened.t0),
+    show_cause: showCause,
     authorise_ms: Math.round((tToken - t0) * 10) / 10,
     counts_ms: rel(opened.counts_ms),
     first_points_ms: rel(opened.first_points_ms),
@@ -484,26 +541,25 @@ function script(principal, regions, q) {
 /** A session a replayed step authorises, and the token and meta it receives. */
 function newSession() {
   const session = {meta: null, value: null};
-  session.token = new Promise((resolve, reject) => {
+  session.token = new Promise((resolve) => {
     session.resolve = (token) => resolve((session.value = token));
-    session.reject = reject;
   });
   return session;
 }
 
 /** Send one reference request again, under `session`'s token or the session credential. */
 function issue(ref, session) {
-  const entry = {record: null};
+  const entry = {record: null, controller: new AbortController()};
   entry.done = (async () => {
     const headers = {...ref.headers};
     if (headers.authorization === 'Bearer <credential>') headers.authorization = `Bearer ${cred}`;
     else if (headers.authorization === 'Bearer <token>') headers.authorization = `Bearer ${await session.token}`;
     const base = ref.path.startsWith('/session/') ? plan.session : plan.viewer;
-    const controller = new AbortController();
-    const sent = send(base + ref.path, {method: ref.method, headers, body: ref.body ?? undefined, signal: controller.signal}, {ref_id: ref.ref_id, extra: ref.extra, ref_beside_layers: ref.beside_layers});
+    const fields = {ref_id: ref.ref_id, extra: ref.extra, ref_beside_layers: ref.beside_layers};
+    const sent = send(base + ref.path + (ref.query ?? ''), {method: ref.method, headers, body: ref.body ?? undefined, signal: entry.controller.signal}, fields);
     entry.record = sent.record;
     // The reference's store cancelled this one part-way: so does the replay, as long after it began.
-    if (ref.abort_after_ms != null) setTimeout(() => controller.abort(), ref.abort_after_ms);
+    if (ref.abort_after_ms != null) setTimeout(() => entry.controller.abort(), ref.abort_after_ms);
     let r;
     try {
       r = await sent.response;
@@ -528,43 +584,66 @@ function issue(ref, session) {
   return entry;
 }
 
+/** A promise that settles after `ms`, and a way to stop its timer. */
+function timeout(ms) {
+  let handle;
+  const done = new Promise((r) => (handle = nativeSetTimeout(r, ms)));
+  return {done, clear: () => clearTimeout(handle)};
+}
+
 /**
- * Send one step's reference requests, each as late after the step began as it was sent in the
- * reference, and later by as much as anything it followed there arrived later here: a request
- * waits for every part of another request (its headers, first counts, first points, last byte)
- * that had arrived before it was sent. What ran together in the reference runs together here,
- * and what waited still waits. Then wait for quiet, as a camera step does.
+ * Send one step's reference requests again, each for the reason the store sent it there: one the
+ * store had sent from a timer, or before seeing any part of this step's responses, as long after
+ * the step began as it was in the reference; any other once the latest response part the store
+ * had seen then (headers, first counts, first points, last byte) has reached this thread here,
+ * and as long after that part arrived on the wire as it was there. Timing the gap from the wire,
+ * not from this thread, keeps the time the reference's store spent decoding before it saw the
+ * part, which a replay does not spend. So what ran together runs together, what waited still
+ * waits, and a faster bundle sends sooner. Then wait for quiet, as a camera step does, the whole
+ * step under the camera step's deadline.
  */
 async function replayStep(sp, session) {
   const S = now();
   step = {...sp.spec, t0: S};
-  const reqs = sp.requests;
-  const entries = [];
-  const happened = (i, name) => {
-    const r = entries[i]?.record;
-    return r ? r.events[name] ?? r.events.last_byte ?? null : null;
+  const planned = new Set(sp.requests.map((r) => r.ref_id));
+  const entries = new Map();
+  let cancelled = false;
+  // When a part reached this thread, or `arrived` on the wire; the last byte for one that never came.
+  const seenAt = (refId, part, of = 'seen') => {
+    const r = entries.get(refId)?.record;
+    return r ? r[of][part] ?? r[of].last_byte ?? null : null;
   };
-  // The reference parts that had arrived `off` ms into the step, of the first `upto` requests.
-  const before = (off, upto) => {
-    const out = [];
-    for (let i = 0; i < upto; i++) for (const [name, e] of Object.entries(reqs[i].events)) if (e !== null && e < off) out.push({i, name, e});
-    return out;
-  };
-  const delay = (parts) => Math.max(0, ...parts.map(({i, name, e}) => happened(i, name) - (S + e)));
-  for (const [j, ref] of reqs.entries()) {
-    const parts = before(ref.offset, j);
-    while (!parts.every(({i, name}) => happened(i, name) !== null)) await changed();
+  // When a moment of the reference step falls here: after the part it followed, or on the clock.
+  const dueAt = (cause, offset) =>
+    cause?.after !== undefined && planned.has(cause.after)
+      ? Math.max(seenAt(cause.after, cause.part), seenAt(cause.after, cause.part, 'arrived') + cause.wire_gap_ms)
+      : S + offset;
+  const ready = (cause) => !(cause?.after !== undefined && planned.has(cause.after)) || seenAt(cause.after, cause.part) !== null;
+  const tasks = sp.requests.map(async (ref) => {
+    while (!ready(ref.cause)) {
+      if (cancelled) return;
+      await changed();
+    }
     // A timer waits whole milliseconds and at least one, so a wait is rounded down, not up.
-    const wait = Math.floor(S + ref.offset + delay(parts) - now());
+    const wait = Math.floor(dueAt(ref.cause, ref.offset) - now());
     if (wait > 0) await sleep(wait);
-    entries.push(issue(ref, session));
+    if (cancelled) return;
+    const entry = issue(ref, session);
+    entries.set(ref.ref_id, entry);
+    await entry.done;
+  });
+  const deadline = timeout(plan.step_timeout_ms - (now() - S));
+  const finished = await Promise.race([Promise.all(tasks).then(() => true), deadline.done.then(() => false)]);
+  deadline.clear();
+  if (!finished) {
+    cancelled = true;
+    notify();
+    for (const entry of entries.values()) entry.controller.abort();
   }
-  await Promise.all(entries.map((x) => x.done));
-  const ok = await settled(S);
+  const ok = (await settled(S)) && finished;
+  markBesideLayers(sp.spec.id);
   step = null;
-  // A moment of the reference step, such as the token's arrival, moved as its requests were.
-  const moment = (off) => S + off + delay(before(off, reqs.length));
-  return {ok, S, moment};
+  return {ok, S, moment: (cause, offset) => (ready(cause) ? dueAt(cause, offset) : S + offset)};
 }
 
 /** Every principal's steps, replayed in the reference's order. */
@@ -577,7 +656,11 @@ async function replay(rp) {
         console.error(`${principal.label}: replaying ${sp.open}`);
         const session = (sessions[sp.open] = newSession());
         const {ok, S, moment} = await replayStep(sp, session);
-        entry[sp.open] = openResult(summarise(sp.spec, moment(sp.show_off), ok), S, moment(sp.token_off));
+        const shown = moment(sp.show_cause, sp.show_off);
+        const token = moment(sp.token_cause, sp.token_off);
+        // As an opening times its requests: from the store's showing the extent, and none before.
+        for (const r of log) if (r.step === sp.spec.id) r.start_ms = r.t0 < shown ? null : Math.round((r.t0 - shown) * 10) / 10;
+        entry[sp.open] = openResult(summarise(sp.spec, shown, ok), S, token, sp.token_cause, sp.show_cause);
         if (sp.open === 'again' && principal.densest) {
           // The bench's own counts request between opening and the map, as the reference made it.
           const view = session.meta.views[0];
@@ -598,7 +681,7 @@ async function replay(rp) {
 }
 
 /** The request log as written: every time relative, and nothing of this process's clock. */
-const written = () => log.map(({t0, events, ...r}) => r);
+const written = () => log.map(({t0, seen, arrived, ...r}) => r);
 
 const out = {principals: []};
 if (plan.replay) {

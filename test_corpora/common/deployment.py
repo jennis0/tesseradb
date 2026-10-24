@@ -61,6 +61,20 @@ def read_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+def viewer_session(session_base: str, credential: str, terms: list[str]) -> requests.Session:
+    """A viewer's HTTP session, authorised for `terms` with `credential` on the session plane."""
+    r = requests.post(
+        f"{session_base}/session/authorise",
+        json={"terms": terms},
+        headers={"Authorization": f"Bearer {credential}"},
+        timeout=120,
+    )
+    r.raise_for_status()
+    http = requests.Session()
+    http.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    return http
+
+
 def minted_credentials(source_dir: Path) -> dict[str, str]:
     """A value for the operator credential variable this deployment names, where the environment
     and the deployment's own `.env` do not carry one, minted for this run only.
@@ -143,16 +157,7 @@ class Deployment:
 
     def viewer_session(self, terms: list[str]) -> requests.Session:
         """A viewer's HTTP session, authorised for `terms` with the operator credential."""
-        r = requests.post(
-            f"{self.session}/session/authorise",
-            json={"terms": terms},
-            headers=self.control_headers(),
-            timeout=120,
-        )
-        r.raise_for_status()
-        http = requests.Session()
-        http.headers["Authorization"] = f"Bearer {r.json()['token']}"
-        return http
+        return viewer_session(self.session, self.operator_credential(), terms)
 
     def figures_status(self) -> dict:
         """`/control/status`'s `masked_count_cache`."""

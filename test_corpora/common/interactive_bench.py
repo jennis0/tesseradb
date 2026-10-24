@@ -31,20 +31,25 @@ With `--prefetch`, `--reference` names a run of the same script with prefetch of
 beyond what that run sent at the same step is the prefetch's work (`extra`): it is kept out of
 the step's points and layers, timed as `extra`, and counted, and `settled` still includes it.
 
-With `--replay`, the session and map sections send an earlier run's requests again in place of
-the store: the same bodies and headers, step by step, each session authorised with the same
-terms. Two bundles of one corpus, such as one built at several shard counts, serve slightly
-different points, so the store asks each for different things next; a replay asks each for the
-same. A request is sent as long after its step began as it was in the reference, and later by as
-much as any response part that had arrived before it there (headers, first counts, first points,
-last byte) arrives later here, so what ran together runs together and what waited still waits.
-A step then waits for quiet as a camera step does. The figures are named and computed as in a
-normal run; `points_beside_layers` times the points requests that ran beside an artifacts request
-in the reference. Ids the server issued cannot be sent verbatim: artifact ids are mapped by
+With `--replay` (and `--start`), the session and map sections send an earlier run's requests
+again in place of the store: the same routes, query strings, bodies and headers, step by step,
+each session authorised with the same terms. Two bundles of one corpus, such as one built at
+several shard counts, serve different points, so the store asks each for different things next;
+a replay asks each for the same. Each request is sent for the reason the store sent it, as the
+reference recorded it: one the store sent from one of its timers, or before it had seen any part
+of the step's responses, goes as long after the step began as it did there; any other waits for
+the latest response part the store had seen then (headers, first counts, first points, last
+byte) and goes as long after that part arrived on the wire as it did there, which keeps the time
+the reference's store spent decoding. What ran together runs together, what waited still waits,
+and a faster bundle answers sooner. A step then waits for
+quiet as a camera step does. The figures are named and computed as in a normal run;
+`points_beside_layers` times the points requests that ran beside an artifacts request in the
+reference. Values the server issued are never sent as they were: artifact ids are mapped by
 layer, level and key, and lookups by the unique field's value, both found before the measured
-run, which then starts again from an empty cache; a request naming an id with no match here is
-left out and counted under `replay`. Lookups send the reference's filter values. A run records
-what a replay of it needs, so any run can be replayed.
+run, which then starts again from an empty cache. A request naming an id with no match, or on a
+route or with a field that could carry another issued value, is left out and counted under
+`replay`. Lookups send the reference's filter values. A run records what a replay of it needs, so
+any run can be replayed.
 
 The core is `clients/ts/core` of this checkout unless `--core` names another build of it, so an
 older server is measured with the client of its own commit. A newer core draws layers only with a
@@ -88,7 +93,7 @@ from pathlib import Path
 import requests
 from pyarrow import ipc
 
-from .deployment import Deployment, read_env_file, tomllib
+from .deployment import Deployment, read_env_file, tomllib, viewer_session
 from .serve_battery import FRAME_TRAILER, Evictor, compose_ladder, frames
 
 REPO = Path(__file__).resolve().parents[2]
@@ -230,22 +235,7 @@ def write_plan(
 # Replay: a reference run's requests, sent again to another bundle of the same corpus
 # ---------------------------------------------------------------------------------------------
 
-#: The parts of a response a replayed request can wait for, as the Node side names them.
-PARTS = ("headers", "counts", "points", "last_byte")
-
-
-def authorise(session: str, credential: str, terms: Sequence[str]) -> str:
-    r = requests.post(
-        f"{session}/session/authorise",
-        json={"terms": list(terms)},
-        headers={"Authorization": f"Bearer {credential}"},
-        timeout=120,
-    )
-    r.raise_for_status()
-    return r.json()["token"]
-
-
-def read_records(viewer: str, token: str, path: str, body: dict) -> list[dict]:
+def read_records(viewer: str, http: requests.Session, path: str, body: dict) -> list[dict]:
     """Every row of a records read (`/v1/items`, `/v1/artifacts`), following `next` to the end,
     waiting out the bulk admission limit."""
     rows: list[dict] = []
@@ -253,12 +243,7 @@ def read_records(viewer: str, token: str, path: str, body: dict) -> list[dict]:
     while True:
         sent = {**body, "cursor": cursor} if cursor else body
         for _ in range(60):
-            r = requests.post(
-                f"{viewer}{path}",
-                json=sent,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=600,
-            )
+            r = http.post(f"{viewer}{path}", json=sent, timeout=600)
             if r.status_code != 429:
                 break
             time.sleep(float(r.headers.get("retry-after") or 1))
@@ -274,7 +259,7 @@ def read_records(viewer: str, token: str, path: str, body: dict) -> list[dict]:
             return rows
 
 
-def artifact_keys(viewer: str, token: str, log_: list[dict]) -> dict:
+def artifact_keys(viewer: str, http: requests.Session, log_: list[dict]) -> dict:
     """The level and key of every artifact a `/v1/artifacts` request named by `mosaica_id`, by
     layer, so a replay can name the same artifacts in another bundle."""
     asked: dict[tuple[str, str], set[str]] = {}
@@ -293,24 +278,26 @@ def artifact_keys(viewer: str, token: str, log_: list[dict]) -> dict:
                 "ids": ids_[at : at + 1000],
                 "fields": ["key", "level"],
             }
-            for row in read_records(viewer, token, "/v1/artifacts", body):
+            for row in read_records(viewer, http, "/v1/artifacts", body):
                 out.setdefault(layer, {})[str(row["mosaica_id"])] = [row["level"], row["key"]]
     return out
 
 
-def artifacts_here(viewer: str, token: str, reference: dict) -> dict:
+def artifacts_here(viewer: str, http: requests.Session, reference: dict) -> dict:
     """This bundle's `mosaica_id` for each layer, level and key the reference's artifact ids
     name, where exactly one artifact carries it."""
     keys = reference["artifact_keys"]
-    view = next(
+    if not keys:
+        return {}
+    views = [
         json.loads(r["body"])["view"]
         for r in reference["requests"]
         if r["path"] == "/v1/artifacts" and r.get("body")
-    ) if keys else None
+    ]
     found: dict[tuple, list[str]] = {}
     for layer, level in sorted({(layer, lk[0]) for layer, m in keys.items() for lk in m.values()}):
-        body = {"view": view, "layer": layer, "level": level, "fields": ["key", "level"]}
-        for row in read_records(viewer, token, "/v1/artifacts", body):
+        body = {"view": views[0], "layer": layer, "level": level, "fields": ["key", "level"]}
+        for row in read_records(viewer, http, "/v1/artifacts", body):
             if row["key"] is not None:
                 key = (layer, row["level"], row["key"])
                 found.setdefault(key, []).append(str(row["mosaica_id"]))
@@ -318,7 +305,7 @@ def artifacts_here(viewer: str, token: str, reference: dict) -> dict:
 
 
 def lookups_here(
-    viewer: str, token: str, view_id: str, field: str, cards: list
+    viewer: str, http: requests.Session, view_id: str, field: str, cards: list
 ) -> list[str | None]:
     """This bundle's `mosaica_id` for each item the reference looked up, by its unique field's
     value: `None` where the reference's card failed or the value answers other than one item."""
@@ -334,23 +321,65 @@ def lookups_here(
             "page_rows": 2,
             "pages": 1,
         }
-        rows = read_records(viewer, token, "/v1/items", body)
+        rows = read_records(viewer, http, "/v1/items", body)
         out.append(str(rows[0]["mosaica_id"]) if len(rows) == 1 else None)
     return out
 
 
+#: The routes a replay sends again, and the body fields each may carry: none of them a value the
+#: server issued, but `/v1/artifacts`' `ids`, which are mapped. A filter may only name a region.
+REPLAYED_FIELDS = {
+    ("POST", "/session/authorise"): {"terms"},
+    ("GET", "/v1/meta"): set(),
+    ("POST", "/v1/viewport"): {
+        "view", "zoom", "bbox", "k", "layers", "levels", "point_rows", "computed",
+        "artifact_budget", "filters",
+    },
+    ("POST", "/v1/artifacts/viewport"): {
+        "view", "zoom", "per_tile", "tiles", "layers", "levels", "palette_size", "filters",
+    },
+    ("POST", "/v1/aggregate"): {"view", "filters", "reference", "groupings"},
+    ("POST", "/v1/artifacts"): {"view", "layer", "level", "ids", "fields", "palette_size"},
+}
+
+
+def unreplayable(r: dict) -> str | None:
+    """Why a reference request cannot be sent again as it was, but for its artifact ids, or
+    `None`: a route or a field that may carry a value the server issued, which differs between
+    bundles and is never sent unchanged."""
+    fields = REPLAYED_FIELDS.get((r["method"], r["path"]))
+    if fields is None:
+        return f"{r['method']} {r['path']} is not a route a replay sends"
+    if r.get("query"):
+        return f"{r['path']} with a query string"
+    b = json.loads(r["body"]) if r.get("body") else {}
+    other = sorted(set(b) - fields)
+    if other:
+        return f"{r['path']} with {', '.join(other)}"
+    for name in ("filters", "reference"):
+        if set(b.get(name) or {}) - {"region"}:
+            return f"{r['path']} with a {name} on more than a region"
+    if any(g for g in b.get("groupings") or []):
+        return f"{r['path']} with a named grouping"
+    return None
+
+
 def replayed_body(r: dict, keys: dict, here: dict) -> str | None:
     """The body to send again: the reference's, with each artifact id it names replaced by this
-    bundle's id for the same layer, level and key, or `None` where one has no such id."""
+    bundle's id for the same layer, level and key, or `None` where one has no such id or its key
+    names more than one artifact the reference asked for."""
     if r["path"] != "/v1/artifacts" or not r.get("body"):
         return r.get("body")
     b = json.loads(r["body"])
     if not b.get("ids"):
         return r["body"]
+    named = Counter(tuple(lk) for lk in keys.get(b["layer"], {}).values())
     ids = []
     for i in b["ids"]:
         level_key = keys.get(b["layer"], {}).get(str(i))
-        mapped = here.get((b["layer"], *level_key)) if level_key else None
+        if not level_key or named[tuple(level_key)] > 1:
+            return None
+        mapped = here.get((b["layer"], *level_key))
         if mapped is None:
             return None
         ids.append(mapped if isinstance(i, str) else int(mapped))
@@ -374,9 +403,13 @@ def replay_plan(reference: dict, phase: str, here: dict) -> tuple[dict, list[dic
         used.add(spec["id"])
         planned = []
         for r in by_step.get(spec["id"], []):
+            why = unreplayable(r)
+            if why:
+                left_out.append({**r, "why": why})
+                continue
             body = replayed_body(r, reference["artifact_keys"], here)
             if body is None and r.get("body") is not None:
-                left_out.append({**r, "why": "an artifact id with no layer, level and key here"})
+                left_out.append({**r, "why": "an artifact id with no single layer, level and key"})
                 continue
             offset = r["at_ms"] - origin
             planned.append(
@@ -384,13 +417,11 @@ def replay_plan(reference: dict, phase: str, here: dict) -> tuple[dict, list[dic
                     "ref_id": r["id"],
                     "method": r["method"],
                     "path": r["path"],
+                    "query": r["query"],
                     "body": body,
                     "headers": r["headers"],
                     "offset": offset,
-                    "events": {
-                        part: None if r.get(f"{part}_ms") is None else offset + r[f"{part}_ms"]
-                        for part in PARTS
-                    },
+                    "cause": r["cause"],
                     "extra": bool(r.get("extra")),
                     "beside_layers": r.get("beside_layers"),
                     "abort_after_ms": r["last_byte_ms"] if r.get("error") == "aborted" else None,
@@ -412,7 +443,9 @@ def replay_plan(reference: dict, phase: str, here: dict) -> tuple[dict, list[dic
                     o["start_at_ms"],
                     open=which,
                     token_off=o["token_at_ms"] - o["start_at_ms"],
+                    token_cause=o["token_cause"],
                     show_off=o["show_at_ms"] - o["start_at_ms"],
+                    show_cause=o["show_cause"],
                 )
             )
         if phase != "reopen":
@@ -436,22 +469,23 @@ def replay_plan(reference: dict, phase: str, here: dict) -> tuple[dict, list[dic
 
 def replayed(reference: dict) -> str | None:
     """Why `reference` cannot be replayed, or `None`."""
-    if "artifact_keys" not in reference or any("at_ms" not in r for r in reference["requests"]):
+    if "artifact_keys" not in reference or any("cause" not in r for r in reference["requests"]):
         return (
-            "the reference run predates replay: it records no request start times or artifact "
-            "keys; run it again with this bench and replay that"
+            "the reference run predates this replay: it records no artifact keys or why each "
+            "request was sent; run it again with this bench and replay that"
         )
     return None
 
 
-def replay_summary(reference: dict, result: dict, left_out: list[dict]) -> dict:
+def replay_summary(reference: dict, result: dict, left_out: list[dict], reopen: bool) -> dict:
     """What a replay sent of its reference: how many requests, which were left out and why, how
     many went with another body (artifact ids of this bundle) or got another status, and the
     principals whose densest regions here are not the reference's."""
     sent = {(r.get("phase"), r["ref_id"]): r for r in result["requests"] if "ref_id" in r}
+    replayed_ = [r for r in reference["requests"] if reopen or r.get("phase") != "reopen"]
     pairs = [
         (r, sent[(r.get("phase"), r["id"])])
-        for r in reference["requests"]
+        for r in replayed_
         if (r.get("phase"), r["id"]) in sent
     ]
 
@@ -459,11 +493,13 @@ def replay_summary(reference: dict, result: dict, left_out: list[dict]) -> dict:
         return dict(sorted(Counter(rows).items()))
 
     return {
-        "reference_requests": len(reference["requests"]),
+        "reference_requests": len(replayed_),
         "sent": len(sent),
         "left_out": count(r["kind"] for r in left_out),
         "left_out_why": count(r["why"] for r in left_out),
-        "bodies_changed": sum(1 for r, s in pairs if r.get("body") != s.get("body")),
+        "bodies_changed": sum(
+            1 for r, s in pairs if (r.get("body"), r["query"]) != (s.get("body"), s["query"])
+        ),
         "status_differs": count(
             f"{r['kind']} {r.get('status')}->{s.get('status')}"
             for r, s in pairs
@@ -632,6 +668,7 @@ def lookups(
     return {
         "asked": len(ids),
         "filter_rows": {str(n): rows.count(n) for n in sorted(set(rows))},
+        "view": view_id,
         "field": field,
         # Each card asked for: its `mosaica_id`, the field's value, and whether it answered.
         "cards": cards,
@@ -847,7 +884,7 @@ def sent(r: dict) -> tuple:
     body = r.get("body")
     if r["path"] == "/session/authorise":
         body = "<body>" if body else body
-    return (r.get("step"), r["method"], r["path"], body)
+    return (r.get("step"), r["method"], r["path"] + r.get("query", ""), body)
 
 
 def diff_requests(old: list[dict], new: list[dict]) -> str:
@@ -962,9 +999,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ap.error("--reopen needs --start, since it restarts the server")
     reference = None
     if args.replay:
+        if not args.start:
+            ap.error(
+                "--replay needs --start: finding this bundle's ids warms the server, so the "
+                "replay restarts it from an empty cache"
+            )
         if args.reference or args.prefetch:
             ap.error(
-                "--replay sends the reference's requests as they were sent; drop --prefetch and --reference"
+                "--replay sends the reference's requests as sent; drop --prefetch and --reference"
             )
         reference = json.loads(Path(args.replay).read_text())
         why = replayed(reference)
@@ -972,7 +1014,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ap.error(f"--replay {args.replay}: {why}")
         if args.reopen and not any(r.get("phase") == "reopen" for r in reference["requests"]):
             ap.error(
-                f"--replay {args.replay} has no reopen phase; drop --reopen or replay a run made with it"
+                f"--replay {args.replay} has no reopen phase; drop --reopen, "
+                "or replay a run made with it"
             )
         # The settings the reference's requests were made under.
         args.per_tile = reference["settings"]["per_tile"]
@@ -1056,23 +1099,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             # This bundle's ids for what the reference named by id, found before the measured
             # run, which then starts again from an empty cache with the bundle's pages evicted.
             log("replay: finding this bundle's ids for the reference's artifacts and lookups")
-            token = authorise(args.session, cred, broadest)
-            here = artifacts_here(args.viewer, token, reference)
+            http = served.viewer_session(broadest)
+            here = artifacts_here(args.viewer, http, reference)
             lookup_here: dict[str, list] = {}
             for p in people:
                 done = reference["lookups"].get(p["label"])
                 if done:
                     lookup_here[p["label"]] = lookups_here(
                         args.viewer,
-                        authorise(args.session, cred, p["terms"]),
-                        check_unique_field(args.viewer, token, done["field"]),
+                        served.viewer_session(p["terms"]),
+                        done["view"],
                         done["field"],
                         done["cards"],
                     )
-            if served is not None:
-                served.stop()
-                served.clear_scratch()
-                start_fresh()
+            served.stop()
+            served.clear_scratch()
+            start_fresh()
             plan, left_out = replay_plan(reference, "run", here)
             named = [
                 (layer, *level_key)
@@ -1224,13 +1266,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             result["server"]["memory_after_reopen"] = process_memory(served.pid)
             result["server"]["cache_bytes_after_reopen"] = directory_bytes(served.cache)
 
-        # After every measured phase: what a replay of this run needs to name its artifacts.
-        result["artifact_keys"] = artifact_keys(
-            args.viewer, authorise(args.session, cred, broadest), result["requests"]
-        )
         if reference is not None:
-            replay_out.update(replay_summary(reference, result, left_out))
+            replay_out.update(replay_summary(reference, result, left_out, args.reopen))
             result["replay"] = replay_out
+        # After every measured phase: what a replay of this run needs to name its artifacts. A
+        # failure leaves this run unreplayable but keeps its figures.
+        try:
+            result["artifact_keys"] = artifact_keys(
+                args.viewer, viewer_session(args.session, cred, broadest), result["requests"]
+            )
+        except (requests.RequestException, OSError, ValueError) as e:
+            result["artifact_keys_failed"] = f"{type(e).__name__}: {e}"[:400]
+            log(f"artifact keys not recorded, so this run cannot be replayed: {e}")
     finally:
         if served is not None and not args.keep_serving:
             served.stop()
