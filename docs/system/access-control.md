@@ -97,12 +97,9 @@ request. The pass visits only the nodes reachable from the credential's terms. A
 starts with a control character, which a credential's terms cannot hold, so no credential names
 one directly.
 
-A probe of the two layouts measured authorise on 9.3 million per-document labels at 100 to 800 ms
-through the graph and 1.4 to 95 ms through each term's item list, and on 500,000 compartmented
-labels at 20 to 95 ms through the graph, which term lists cannot express. Indexing terms in term lists and only
-conjunctions through the graph takes the faster figure for each. The probe indexed whole labels;
-the per-operand rule has not been measured separately. Authorise runs once per session, so these figures are paid at
-session start and never by a map request.
+Each term is indexed in its own item list, and only conjunctions, which term lists cannot express,
+go through the graph. Authorise runs once per session, so its cost is paid at session start and
+never by a map request.
 
 A view's, a group's, a layer's and an artifact's own labels are evaluated against the credential's
 terms directly, so a label no item carries is still one a credential can satisfy.

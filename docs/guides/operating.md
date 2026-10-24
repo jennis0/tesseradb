@@ -144,24 +144,8 @@ listing its artifacts reads its levels. Colouring points by a layer reads them w
 reads the artifacts its points are tagged with. Every later request under that grant reads the
 result, corrected for whatever has been deleted, suppressed or ingested since.
 
-The walk takes longer the more of the corpus the grant sees. On a bundle of the 3,495,729,729 GBIF
-occurrences, with 12 threads, under a 24 GB memory cap and starting with nothing in the page cache,
-one level of the taxonomy layer took:
-
-| viewer sees | family | genus | species |
-|---|---:|---:|---:|
-| 1% | 0.29 s | 0.24 s | 1.1 s |
-| 25% | 3.6 s | 2.2 s | 3.2 s |
-| everything | 8.8 s | 10.7 s | 12.5 s |
-
-*One run each. The layer serves a centroid and a box.*
-
-So a viewer who sees 1% of that corpus waits between a fifth of a second and a second for each level
-the first time, and one who sees everything waits 9 to 12 seconds. A request that shows several
-levels for the first time fills them one after another. In the same runs, opening the map at its
-widest view with the family level took 1.8, 4.0 and 9.1 seconds for the three viewers, and the
-first view at zoom 9, which shows genus and species, took 2.7, 6.2 and 24.5 seconds. Most of the 1%
-viewer's 1.8 seconds went on testing which artifacts lie in each tile, not on the walk.
+The walk takes longer the more of the corpus the grant sees. A request that shows several levels
+for the first time fills them one after another.
 
 A viewer's first request for a layer's colours, with a `palette_size`, also costs one pass over
 the layer: the server works out a colour slot for every cluster the viewer is served, over the
@@ -171,42 +155,12 @@ reads the centroids the map fills when it draws the level, so it adds no walk of
 viewer whose first view of a `tiered` taxonomy is at genus or species therefore also fills the
 counts and centroids of every coarser level, since each level's slots are worked out from its own
 centroids whichever level is asked first. The fill is kept for each grant, so it is paid once
-per grant. These
-figures are from samples, not from a full-scale corpus, each with its files in the page cache and
-for the viewer who sees everything. On a 25,846,007-row sample of the GBIF occurrences, whose
-`tiered` taxonomy layer holds 251,907 taxa in three levels, the pass took 0.26 to 0.28 s for each
-palette size, and 0.62 s in a process that had not yet drawn the layer, since it then also fills
-the three levels' counts and centroids as drawing does. Any route that names a `palette_size`,
+per grant. Any route that names a `palette_size`,
 browse and the bulk reads included, fills those same counts and centroids where nothing has yet;
-without a `palette_size` no route fills them for colours. On 1,000,000 Tree of Life images with
-69,872 taxa in seven `tiered` levels it took 0.06 s, and 0.21 s with the fill. The process's peak
-resident memory, mapped files included, was 1.5 GB. *One run each, with `mosaica-bench`'s
-`slot_cost`.*
-
-On the full GBIF bundle, under the conditions of the table above, a viewer asked for the taxonomy
-layer as the explorer does, with a palette of ten colours, from a newly opened server. Each row is
-the time until the whole answer had arrived, split into the walks that fill a level's counts and
-centroids, the colouring itself, and everything else:
-
-| viewer sees | first view | whole answer | map's own fill | coarser fill for colours | colouring | rest |
-|---|---|---:|---:|---:|---:|---:|
-| everything | world, family | 11.0 s | 10.5 s | | 0.02 s | 0.4 s |
-| everything | then zoom 9, genus and species | 28.9 s | 24.4 s | | 2.7 s | 1.8 s |
-| everything | zoom 9 straight away | 39.9 s | 25.9 s | 9.4 s | 2.7 s | 1.9 s |
-| 1% | world, family | 1.7 s | 0.27 s | | 0.01 s | 1.5 s |
-| 1% | then zoom 9, genus and species | 2.4 s | 1.0 s | | 0.21 s | 1.1 s |
-| 1% | zoom 9 straight away | 2.7 s | 1.2 s | 0.10 s | 0.22 s | 1.2 s |
-
-So colouring adds about 2.7 seconds to the first view at zoom 9 for a viewer who sees everything,
-most of it on the 1.4 million species, and a fifth of a second for one who sees 1%. A first view at
-zoom 9 also pays for the family level's fill, 9.4 seconds for the broad viewer. That viewer would
-pay it anyway on zooming out, and it is paid once per grant. The process's peak resident memory
-was 23.6 GB, of which at most 6.7 GB was its own and the rest pages of the bundle held under the
-cap. *One run each, with the server's own log of each fill and
-each colouring; zoom 9 is at each viewer's densest cell.*
+without a `palette_size` no route fills them for colours.
 
 The slots are then held for that credential, layer and palette size, shared by every session
-holding the credential, and read back in under a millisecond. After a deletion, a suppression or
+holding the credential. After a deletion, a suppression or
 an unsuppression, an edit, a publication, or a change to the layer's registration or edges, the
 viewer's next request that colours the layer pays the pass again before it is answered, and so
 does every change on a layer whose criterion is a fraction or whose content has a generating set.
@@ -370,8 +324,7 @@ Between compactions, a write can stall the write side in one case. When a growth
 flush or a merge leaves an item with a second artifact in a level the server answers from one label
 per row, and the server holds that level in memory, it rewrites the level's column as a list, and
 its member file with it, on the thread that applies writes. Other writes wait until it finishes.
-The member file alone takes about two and a half minutes a level at the scale of a 3.5-billion-row
-corpus. A level whose layer declares `layout = "column"`, and whose rows the server holds artifact
+A level whose layer declares `layout = "column"`, and whose rows the server holds artifact
 by artifact, is served by artifact instead, with no rewrite. A level the server does not hold is
 composed as a list by the next request that reads it. The next compaction records the level as a
 list and writes both files again.

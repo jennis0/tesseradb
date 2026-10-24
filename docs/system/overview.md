@@ -35,22 +35,6 @@ the same aggregate.
 - **Embeddable clients**: web components, a deck.gl layer, React bindings, and a Python notebook
   widget, or the HTTP API directly.
 
-## Compared with other systems
-
-Other systems reach one of these at a time: scale, per-viewer masking, live ingest, or a fast build
-at 10⁹ points.
-
-| System | Scale reached | Per-viewer masking | Live ingest and delete | Build at 10⁹ | What leaks or costs |
-|---|---|---|---|---|---|
-| Nanocubes / imMens | up to 210 million objects | No: one shared index for every viewer | No | 6 hours, at 210 million objects (Nanocubes); not published (imMens) | No per-viewer view; nothing updates once the index is built |
-| deepscatter / Nomic Atlas | ~10⁸–10⁹ points | No (deepscatter); dataset-level only (Atlas) | No | not published | One set of tiles served to every viewer |
-| Datashader / tippecanoe | corpus-scale, rasterised or tiled | No | No | not published | Nothing computed per viewer; the same image or tiles serve everyone |
-| Elasticsearch with document-level security | any size the cluster holds; each tile is a query | Yes, per query | Yes | not published | Speed: a documented case went from 30 ms to 26 s once document-level filtering was applied, and interactive spatial aggregation at 10⁸ points and above needs a cluster. Counting how many inaccessible documents contain a given term is a documented limitation |
-| PostgreSQL with row-level security | any size the database holds; each tile is a query | Yes, per query | Yes | not published | Speed: a measured policy over a spatial predicate abandoned its index and ran 3,340× slower. `EXPLAIN` discloses excluded-row counts |
-| Mosaica | 10⁹ points measured, synthetic, low-cardinality labels; 7.4×10⁷ measured in a real corpus | Yes: every served quantity | Yes: ingest, deletion and suppression while serving | 2 h 37 m, the synthetic corpus below | A leak register enumerates what is accepted; anything not in it is a bug |
-
-We know of no system that does all of these at once.
-
 ## How it works
 
 An operator declares an access label on each item: an expression over terms, such as
@@ -89,24 +73,13 @@ in full, the threat model they answer to, and the disclosures accepted rather th
 
 ## How it scales
 
-Mosaica has been built and served against a synthetic 10⁹-point corpus with a low-cardinality
-label set, and against three real corpora at smaller scale. All were measured on the same class of
-single machine: one box with 47 GB of RAM, no cluster.
-
-| Corpus | Points | What it declares | Build time | Build rate | Peak RSS | Bundle | Viewport p50 |
-|---|---|---|---|---|---|---|---|
-| Synthetic, current build pipeline | 10⁹ | a category vocabulary, averaging 1.7 terms per item | 6 m 46 s | 2.5 M points/s | 27.6 GB | not measured | not measured |
-| Overture places and divisions | 73,631,092 | 625,754 division polygons drawn as regions, a text index over names, and category filters | 31 m 18 s | 39 k points/s | 26.75 GB | 12.57 GB | not measured |
-| MedCPT / PubMed | 35,920,666 | an embedding view, titles indexed for text search, a MeSH hierarchy layer of 30,217 headings over 41,321 edges with 1.66×10⁹ membership entries | 12 m 10 s | 49 k points/s | 16.03 GB | 11.15 GB | not measured |
-| GeoNames | 13,463,857 | 8 vocabularies, 13 attributes, 2 layers | 2 m 59 s | 75 k points/s | 3.55 GB | 1.34 GB | not measured |
-| arXiv | 2,422,486 | two embedding views (kNN and PCA) with two clusterings each, clusters titled from their own text | 54 s | 44 k points/s | not measured | 1.5 GB | not measured |
+Mosaica runs on one machine, with no cluster.
 
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because
 the row order the geometry is written in, Morton order, is the index. A build plans its memory
 layout before the pass starts, from the corpus's declared term cardinality, and peak memory follows
-that plan and the number of distinct terms rather than the point count. Build rate falls with what
-a corpus declares rather than with its size: the synthetic corpus carries categories only, and the
-real corpora carry text indexes, polygons and hierarchy layers.
+that plan and the number of distinct terms rather than the point count. Build rate depends more on
+what a corpus declares, such as text indexes, polygons and hierarchy layers, than on its size.
 
 ## What it consists of
 
@@ -155,7 +128,7 @@ any framework, with a deck.gl layer and React bindings alongside them.
 
 | Feature | Status |
 |---|---|
-| The engine and the map: build, serve, ingest, live delete and suppress | Built. Build time, memory, bundle size and viewport latency measured at 10⁹ points (above) |
+| The engine and the map: build, serve, ingest, live delete and suppress | Built |
 | Filters and search: categories, numbers, dates, keywords, text | Built. Filtering on list-valued fields is not built yet |
 | Several coordinate systems over one corpus | Built |
 | Annotation layers: clusters, hierarchies, regions, hulls | Built |

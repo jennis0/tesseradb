@@ -146,8 +146,7 @@ The server refuses a configuration that sets `serve.max_page_rows` or `serve.max
 `serve.max_page_bytes` above 2 GiB, or `serve.bulk_response_bytes` below `serve.max_page_bytes`.
 
 The server allows seven pages of `serve.max_page_bytes` for each bulk read. Building a page takes
-about three: the engine's memory test, reading notes of 8 bytes and then of 100 KB under a 256 KiB
-ceiling, measured 3.13 in the engine alone and holds it below eight. Encoded pages on their way to
+about three, and an engine test holds it below eight. Encoded pages on their way to
 the socket take at most two more, one in the body channel and one being written. All bulk reads
 together can hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`, 896 MiB at the defaults. The
 server has no memory cap of its own to hold that against, so it logs the figure at startup as
@@ -289,19 +288,7 @@ each side, whichever shards they are in, and the first of them D does not hold b
 Where D holds all eight on a side, or the artifact has no more than sixteen placed rows, its box is
 worked out from its member bitmap and the visible set in every shard.
 
-The walk is the cost a new grant pays. On GBIF's 3,495,729,729 occurrences, with 12 threads, under
-a 24 GB memory cap, starting with the bundle's pages out of memory and with the machine's
-one-minute load between 2.1 and 7.4, one fill of a level of its taxonomy layer, which serves a
-centroid and a box, measured:
-
-| viewer sees | rows walked | family | genus | species |
-|---|---:|---:|---:|---:|
-| 1% | 34,956,939 | 0.29 s | 0.24 s | 1.1 s |
-| 25% | 873,932,430 | 3.6 s | 2.2 s | 3.2 s |
-| all | 3,495,729,729 | 8.8 s | 10.7 s | 12.5 s |
-
-*One run each. After a restart over the kept cache, the
-same requests filled nothing.*
+The walk is the cost a new grant pays. Its time grows with the number of rows the grant may see.
 
 A grant pays the walk once per level, the first time it reads that level, and keeps the result
 across restarts until a compaction, or until the bound on the cache directory removes it. A

@@ -614,13 +614,6 @@ depends only on its size and the sample size, both counted inside the visible se
 between the band and a scan reads the same items, so the answer never depends on rows the viewer
 cannot see. The head then says the set was not sampled.
 
-Measured on the 3.5-billion-item GBIF bundle with its files in the page cache, a 100,000-item
-sample of the whole map takes 4 ms from the bands, and a viewer seeing 2.1% of the map is sampled
-in 44 ms by scanning its rows against 109 ms from the band: about 0.6 ns a scanned row and 15 ns a
-band entry. At that rate a scan of all 3.5 billion rows would take about 2 seconds, a modelled
-figure. Measured cold, under a 24 GB memory cap, a scan of every row read the whole 28 GB identity
-column from disk and took 18 to 20 seconds.
-
 A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to 16
 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper cells
 divide a tile down to the stored position. A cell level can name an area, a bbox as the viewport
@@ -694,26 +687,9 @@ flowchart LR
 extreme rows on each side, or from a walk of F − D where D holds all eight.*
 
 A build and a fold tally the base in entity order, a span of 2^18 entities at a time, so they read
-each entity's key list and held values in the order they are stored and ask one rank a span.
-Measured with `mosaica-bench`'s `field_tallies_scale` on a synthetic corpus, a 12-thread machine
-with the files in the page cache, two held fields and 384 key lists, the tally pass took 0.23 s
-over 10 million rows, 1.9 s over 100 million and 18.6 s over a billion, 19 to 23 ns a row. The
-entity terms reader finds an entity's rank from a table of each block's rank below it, which took
-0.9 to 1.4 µs a lookup at all three sizes against croaring's own rank's 1.6 µs, 1.8 µs and 10 µs.
-An item card reads its labels through the same table.
-
-| corpus | key lists × fields tallied | file | open | compose one field |
-|---|---|---|---|---|
-| a GBIF subset, 25.8 million items | 252 × 1 | 93,063 B | in the bundle's open | first summary 0.9 ms, served |
-| Overture, 73.6 million items | 405 × 2 | 296–300 KB | 0.16–0.22 ms | 0.07–0.16 ms |
-| Tree of Life, 233 million items | 474 × 0, 433 × 0 | 3.8 KB, 3.5 KB | 0.03 ms | none |
-
-The key lists are each corpus's distinct access labels, counted from its sources; its views carry
-one label an item. The Overture and Tree of Life rows were measured with `field_tallies_shape` on a
-file of their shape, each tally full, not on a built bundle. A tally takes about 370 bytes on
-disk; 100,000 key lists of two fields measured 74 MB, opened in 220 ms and composed one field in
-44 ms. Building that GBIF subset took 70 to 79 s with the tallies and 70 to 79 s without,
-the difference within the spread of two runs of each.
+each entity's key list and held values in the order they are stored and ask one rank a span. The
+entity terms reader finds an entity's rank from a table of each block's rank below it. An item card
+reads its labels through the same table. A tally takes about 370 bytes on disk.
 
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
 each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and

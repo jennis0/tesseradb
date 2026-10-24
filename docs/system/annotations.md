@@ -396,20 +396,7 @@ the artifacts drawn beside one whose slot changed, and their neighbours. The rea
 ring of neighbours for each depth below the change, and a change of heir near the root recolours
 that heir's subtree.
 
-Two neighbours that both give up what they asked for can still take one slot. Counting every pair
-of artifacts drawn beside each other at any depth, the share given one slot was:
-
-| corpus and layer | artifacts | centred by | 8 colours | 10 | 20 | 22 |
-|---|---:|---|---:|---:|---:|---:|
-| GBIF sample, 25.8 million occurrences, three-level taxonomy (`tiered`) | 251,907 | figures | 1.8% | 0.87% | 0.11% | 0.08% |
-| Tree of Life, 1 million images, seven-level taxonomy (`tiered`) | 69,872 | figures | 1.7% | 0.84% | 0.10% | 0.07% |
-| arXiv, 2.4 million papers, HDBSCAN (`nested`) | 192 | sample | 0.13% | 0.26% | 0% | 0.13% |
-| arXiv, k-means (`flat`) | 64 | sample | 1.7% | 0.56% | 0% | 0% |
-
-*One run each, with `mosaica-bench`'s `slot_cost`, over every artifact the broadest viewer is
-served. Every artifact had a centre of its own members. Centred by the sample instead, the GBIF
-sample's taxonomy has 172,885 taxa placed beside an ancestor and 21,868 with no centre, and clashes
-at 2.0%, 0.93%, 0.11% and 0.08%.*
+Two neighbours that both give up what they asked for can still take one slot.
 
 The slots of a layer are held for each credential and palette size, so sessions holding one
 credential share them. A deletion, a suppression or an unsuppression, an edit, a fold, a

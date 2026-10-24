@@ -496,8 +496,7 @@ A deny, a declaration and an operator's own publication or growth of artifacts r
 the first opportunity, as soon as the deny queue is empty. Memberships that arrived as a column of
 an ingest batch wait for the next flush cadence instead. Those batches come in runs, and
 a manifest for each one would put an extent, a manifest and their syncs on the writer's thread
-while the next batch waits: measured at a fifth of a second per batch on a corpus whose batches
-carry two membership columns, more than closing the commit window itself cost. Nothing a caller was
+while the next batch waits. Nothing a caller was
 promised waits: the memberships are in the log when the batch is acknowledged and are served from
 that moment. What the manifest shortens is the restore, and until it is written the log keeps every
 record behind them, so a restart replays them and serves the same counts.
@@ -691,14 +690,7 @@ beside its range instead, and a lookup that finds no row in the base or a range 
 merge keeps the listed rows, and the
 compaction folds them into the base like any other.
 
-Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
-673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two
-rounds took 6,748 new ids each and every later round none, so the high water stayed at 13,477,353.
-Freed ids land among other terms' runs in the term index rather than in a run of their own, and
-the compacted base term index measured 82,866 bytes after each of the two rounds on new ids and
-82,674 to 82,930 bytes after the rounds on freed ones; they were 52,018 bytes before the first
-edit. Ingest ran at 128,000 to 139,000 rows a second, a flush took 2.0 s and a compaction 146 to
-149 s in every round.
+Freed ids land among other terms' runs in the term index rather than in a run of their own.
 
 A compaction runs off the request path, over files a viewport is also reading. Its duration
 is not bounded: nothing observes it directly, so the compaction is designed to disturb a live viewport
