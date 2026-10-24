@@ -47,3 +47,12 @@ unknown-git = "deny"
 # A vulnerability anywhere in the graph fails the check. An unmaintained crate fails it only where a
 # workspace crate depends on it directly, which is where it can be replaced.
 unmaintained = "workspace"
+# A crate version its authors withdrew fails the check.
+yanked = "deny"
+ignore = [
+  # The Marvin timing attack recovers an RSA private key from decryption or signing timings. The
+  # server builds RSA keys only from the identity provider's public JWKs, to verify token signatures
+  # (crates/mosaica-server/src/oidc.rs, DecodingKey::from_jwk), and never decrypts or signs, so the
+  # attack does not apply. rsa reaches the graph through jsonwebtoken.
+  { id = "RUSTSEC-2023-0071", reason = "rsa is used only to verify signatures with public JWKs; the private-key timing attack does not apply" },
+]
