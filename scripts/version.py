@@ -5,8 +5,8 @@
     python3 scripts/version.py set 0.2.0    write 0.2.0 into Cargo.toml and every copy
     python3 scripts/version.py check        fail when a copy differs from Cargo.toml
     python3 scripts/version.py check --tag v0.2.0
-                                            also fail when the tag is not v<version> or
-                                            CHANGELOG.md has no section for the version
+                                            also fail when the tag is not v<version>, or
+                                            CHANGELOG.md has no dated section for it
     python3 scripts/version.py notes        print CHANGELOG.md's section for the version
 
 The copies are the workspace crates' exact pins in Cargo.toml and their entries in Cargo.lock, both
@@ -108,9 +108,14 @@ def check(tag: str | None) -> int:
             print(f"version.py: the tag is {tag} and Cargo.toml says {version}; tag v{version} or "
                   "set the version to match the tag.", file=sys.stderr)
             failed = True
-        if notes(version) is None:
+        heading = changelog_heading(version)
+        if heading is None:
             print(f"version.py: CHANGELOG.md has no `## [{version}]` section; add one before "
                   "tagging.", file=sys.stderr)
+            failed = True
+        elif "unreleased" in heading.lower():
+            print(f"version.py: CHANGELOG.md's section is headed `{heading}`; write the release "
+                  f"date, as in `## [{version}] - YYYY-MM-DD`, before tagging.", file=sys.stderr)
             failed = True
     if not failed:
         print(f"version.py: every copy says {version}")
@@ -149,6 +154,15 @@ def set_version(version: str) -> None:
     # The workspace members' entries in Cargo.lock; nothing outside the workspace moves.
     subprocess.run(["cargo", "update", "--workspace", "--offline"], cwd=ROOT, check=True)
     check(None)
+
+
+def changelog_heading(version: str) -> str | None:
+    """CHANGELOG.md's heading line for `version`, or None."""
+    path = ROOT / "CHANGELOG.md"
+    if not path.exists():
+        return None
+    m = re.search(rf"^## \[{re.escape(version)}\][^\n]*$", path.read_text(), re.M)
+    return m.group(0) if m else None
 
 
 def notes(version: str) -> str | None:
