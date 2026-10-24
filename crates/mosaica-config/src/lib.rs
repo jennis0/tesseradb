@@ -452,8 +452,10 @@ struct RawServe {
     /// Bytes of those counts, and of the labels of denied rows they are corrected with, kept in the
     /// engine's cache directory so a restart reads them back. In a bundle of several shards it also
     /// holds each shard's walk of each grant's items, up to 172 B for each artifact a shard holds a
-    /// member of, which a compaction of one shard reads back so as to walk that shard alone. Past
-    /// it, the files least recently written or read are removed.
+    /// member of, which a compaction of one shard reads back so as to walk that shard alone. A
+    /// shard holds a walk for each level version it was walked at, a growth that its steps cannot
+    /// follow adding one, until this bound removes the older. Past it, the files least recently
+    /// written or read are removed.
     ///
     /// Default: `8589934592` (8 GiB).
     figures_disk_bytes: Option<u64>,

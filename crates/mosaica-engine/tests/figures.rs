@@ -969,8 +969,8 @@ fn counts_are_kept_where_their_reserve_is_too_large_for_the_bound() {
     let mut fx = Fixture::new(Corpus::SingleKey);
     let engine = fx.open_published();
     fold(&engine);
-    // Above the two levels' counts and sums and the list level's reserve, below the flat level's
-    // counts and sums with its reserve.
+    // Above the two levels' counts and sums, below the flat level's counts and sums with its
+    // reserve.
     engine.set_masked_count_cache_bytes(3_500);
     let reader = Principal::ReadAll;
     assert!(check_one(&fx, &engine, &reader, "under a small bound"));

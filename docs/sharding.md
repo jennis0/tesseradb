@@ -562,10 +562,11 @@ shard whose identity a compaction rotated, a shard that opened, and a shard whos
 do not lead to the version a request reads: each is walked again. Every other shard's walk is
 read back from the cache directory at the level version it read, and what its growth has added
 since is kept as it was. The boxes and the eight most extreme rows on each side are taken again
-with the counts, since a side of a box is an extreme across shards. Each shard's walk is written
-to the cache directory under the shard's identity, keeping each ordinal it counts a row of, with
-its box and its eight most extreme rows on each side. A shard whose walk is not on disc is walked
-again too.
+with the counts, since a side of a box is an extreme across shards. Where a sum covers more than
+one shard, each shard's walk is written to the cache directory under the shard's identity,
+keeping each ordinal it counts a row of, with its box and its eight most extreme rows on each
+side. A sum over one shard writes none, so when a second shard opens, shard 0 is walked again. A
+shard whose walk is not on disc is walked again too.
 
 A level whose forms all hold their own rows, as one published and not yet folded does, is summed
 without positions, and its centroids and boxes are worked out per artifact. Where only some
