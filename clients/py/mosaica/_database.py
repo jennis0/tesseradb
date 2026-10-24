@@ -82,9 +82,9 @@ class Database:
     needs. `commit` makes what was inserted part of the database: the first commit builds it
     and starts a server over it, and each later one sends only what was inserted since.
 
-    Reading goes through that server, as a reader holding every access term the database's
-    rows carry. `view(name)` starts a count, a sample or a map; `viewer(terms)` reads as
-    someone holding only those terms.
+    Reading goes through that server, with the operator's own token, which holds `read-all`
+    and sees every item that is not deleted or suppressed. `view(name)` starts a count, a
+    sample or a map; `viewer(terms)` reads as someone holding only those terms.
 
         db = mosaica.create()
         db.declare_view("papers")
@@ -98,8 +98,6 @@ class Database:
     - `temporary`: `True` for a database `create()` made without a path, which `close()`
       deletes.
     - `built`: `True` once the first commit has built the database.
-    - `terms`: the access terms `viewer()` and `token()` hold when given none: every term the
-      database's access labels name, and the terms of each view's default label.
     - `inserts`: the `Insert` records made before the first commit, which it builds from.
     - `pending`: the `Insert` records made since the last commit, which the next one sends.
     - `listening`: the addresses the server listens on, as `serve()` returns them, or `None`

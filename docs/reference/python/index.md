@@ -26,7 +26,9 @@ The package's calls return these types too. They are not imported by name.
 | `Declared`, `DeclaredColumn` | What `Database.declare_columns` declared | [Declaring](declaring.md) |
 | `Insert` | What `Database.insert` handed over | [Inserting and committing](inserting.md) |
 | `Report`, `CommitReport`, `PagedReport` | What `Database.check` and `Database.commit` found or did | [Inserting and committing](inserting.md) |
+| `Finding` | One problem the pre-flight of `Database.check` or `Database.commit` found | [Inserting and committing](inserting.md) |
 | `ChangeReport` | What a deletion, a suppression or `Database.leave` did | [Operating](operating.md) |
 | `Listening` | The server's addresses | [Operating](operating.md) |
+| `ServeRefused` | The exception for a server a `Database` started that reported no addresses | [Operating](operating.md) |
 
 The methods of `Database` are on four pages: [declaring](declaring.md), [inserting and committing](inserting.md), [reading](reading.md) and [operating](operating.md). The rest are on [connecting and creating](connecting.md).

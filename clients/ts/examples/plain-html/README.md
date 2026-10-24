@@ -2,9 +2,11 @@
 
 One page with no build step. `index.html` loads the single-file bundle by relative path with its integrity hash, and mounts `<mosaica-explorer>` with a `viewer-url` and a `token`. `server.mjs` is the app server beside it: it serves the page and the bundle, mints tokens, and proxies the viewer routes.
 
+Run these in this directory. npm finds the workspace from here, so the first command runs here as it would in `clients/ts`. If `clients/ts/node_modules` is absent, run `npm ci` in `clients/ts` first.
+
 ```bash
 npm run bundle -w @mosaicajs/components    # writes components/dist/mosaica-components.js and its .sri
-node server.mjs                            # http://localhost:5180
+MOSAICA_API_KEY=$(cat ../../../../mosaica-demo/presets/2m4.key) node server.mjs    # http://localhost:5180
 ```
 
 The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585` and a session listener on `127.0.0.1:49303`. `MOSAICA_API_KEY` is an API key whose principal holds `authorise-as`; `run_demo.sh` writes one to `mosaica-demo/presets/2m4.key` at the repository root. `users.json` lists the signed-in users the page offers and the Mosaica principal each reads as. Those principals are the ones `run_demo.sh` creates when it measures the 2m4 presets, named `holding-` and a digest of their terms; `mosaica principal list` shows them. `MOSAICA_VIEWER_URL` and `MOSAICA_SESSION_URL` point the server at another deployment, whose principals `users.json` then has to name, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.

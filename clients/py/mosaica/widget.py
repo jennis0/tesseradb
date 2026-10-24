@@ -43,7 +43,12 @@ _BUNDLE = "mosaica-components.js"
 
 
 def bundle_path() -> Optional[pathlib.Path]:
-    """Where the bundle is: packaged by the wheel's build hook, or the checkout's own build."""
+    """The path of the components' single-file bundle that `Map` loads, or `None` where there
+    is none.
+
+    The bundle the wheel's build hook packaged under `mosaica/static/` comes first, then the
+    checkout's own build in `clients/ts/components/dist/`.
+    """
     packaged = _HERE / "static" / _BUNDLE
     if packaged.exists():
         return packaged
@@ -184,8 +189,9 @@ class Map(anywidget.AnyWidget):
     `any_of`, `none_of` or two tests on one column, is refused by the page: nothing is applied,
     and `last_error` and a warning say why.
 
-    The map needs the components' bundle, which `pip install 'mosaica[widget]'` installs; a
-    `Map` made without it raises `RuntimeError` naming what to install.
+    The map needs the components' bundle, which the package's build hook builds with Node into
+    every wheel and every install from a checkout, and `bundle_path()` finds; a `Map` made
+    without it raises `RuntimeError` naming what to install.
 
         m = mosaica.Map(viewer_url, token=token, colour_by="venue")
         m

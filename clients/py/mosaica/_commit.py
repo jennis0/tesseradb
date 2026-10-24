@@ -53,11 +53,16 @@ from ._refusal import Refusal
 
 @dataclass
 class Finding:
-    """One pre-flight finding.
+    """One pre-flight finding. `check()` lists them in its report's `findings`. A `commit()`
+    they stop raises `Refusal`, whose text lists them; after the first commit its `report`
+    lists them in `findings` too.
+
+    - `what`: the problem, in a few words.
+    - `detail`: what was found and what to change.
 
     A finding refuses the commit. The pre-flight reports and sends nothing while one stands, and
     it never drops a row or a column to make the rest sendable: what the user inserted is what a
-    commit sends, or the commit does not happen.
+    commit sends, or the commit does not happen. A finding's text starts `refused:`.
     """
 
     what: str

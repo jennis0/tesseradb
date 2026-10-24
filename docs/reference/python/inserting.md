@@ -29,3 +29,5 @@
 ::: mosaica._reports.PagedReport
     options:
       show_bases: false
+
+::: mosaica._commit.Finding

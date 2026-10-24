@@ -59,7 +59,14 @@ temporary: set[Path] = set()
 
 
 class ServeRefused(Refusal):
-    """The child did not announce three bound addresses."""
+    """The `mosaica serve` process a database started did not report its three addresses.
+
+    `Database.serve()` raises it, and so does every call that starts the server, such as the
+    first `commit()`, when the process prints no line naming its viewer, session and control
+    addresses within `MOSAICA_SERVE_TIMEOUT` seconds (30 by default), or prints one that leaves
+    an address out. The process is stopped. The message holds the last lines it wrote to its
+    output and its error stream. It is a kind of `Refusal`.
+    """
 
 
 @dataclass

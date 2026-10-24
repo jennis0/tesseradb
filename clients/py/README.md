@@ -1,24 +1,38 @@
 # `mosaica`
 
 Mosaica's Python package: one package whether you want the widget, the SDK or
-both.
+both. It needs Python 3.10 or later.
+
+Not published yet: neither `mosaica` nor `mosaica-native`, the companion wheel that carries the
+`mosaica` binary and the `_mosaica` extension module, is on PyPI, so `pip install mosaica` finds
+nothing. Install both from a checkout of the repository, `mosaica-native` first:
 
 ```
-pip install mosaica            # read, create, declare, insert, commit; with pyarrow and the binary
-pip install 'mosaica[widget]'  # + anywidget and the notebook widget, Map
+pip install -e clients/py-native     # the mosaica binary and the extension module; runs cargo
+pip install -e 'clients/py[widget]'  # read, create, declare, insert, commit, and the notebook widget, Map
 ```
+
+The order matters. On an x86_64 or ARM64 machine (a `platform_machine` of `x86_64`, `AMD64`,
+`aarch64` or `arm64`), `mosaica` depends on `mosaica-native==0.1.0`, and pip can satisfy that
+only from the copy already installed. `mosaica-native`'s build hook runs cargo, so it needs a
+Rust toolchain. `mosaica`'s build hook (`hatch_build.py`) runs `npm ci` (when the install is
+stale) and `npm run bundle -w @mosaicajs/components` in `clients/ts`, and copies the single-file
+bundle into `mosaica/static/`, so it needs Node 20 or later, with or without `[widget]`. Leave out
+`[widget]` to install the package without anywidget and the map. Nothing built is committed.
+`check.sh` is the package's half of the gate: the tests, and a wheel built and opened to prove
+the bundle is inside it.
+
+`.github/workflows/wheels.yml` builds `mosaica-native` wheels for Linux on x86_64 and aarch64
+(glibc 2.28 or later, or musl 1.2 or later), macOS 11 or later on arm64, macOS 10.12 or later on
+x86_64, and Windows on x86_64. Each serves every Python from 3.10 up, through the stable ABI.
+The workflow uploads them as build artifacts and publishes nothing. On a machine the dependency's
+marker leaves out, `mosaica` installs without `mosaica-native`, and making or serving a database
+needs a `mosaica` binary on `PATH` or named by `MOSAICA_BIN`.
 
 Every table the package returns is a pyarrow table; `.to_pandas()` on it gives a DataFrame where
-pandas is installed. `pip install mosaica --no-deps` installs neither pyarrow nor the
-`mosaica-native` wheel that carries the `mosaica` binary: install `pyarrow>=14` by hand, and
-put a `mosaica` binary on `PATH` or name it with `MOSAICA_BIN` to make or serve a database.
-
-From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
-(`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run bundle -w
-@mosaicajs/components` in `clients/ts` and copies the single-file bundle into
-`mosaica/static/`, which is why a checkout install needs Node and a PyPI install does not.
-Nothing built is committed. `check.sh` is the package's half of the gate: the tests, and a wheel
-built and opened to prove the bundle is inside it.
+pandas is installed. `pip install --no-deps -e clients/py` installs neither pyarrow nor
+`mosaica-native`: install `pyarrow>=14` by hand, and put a `mosaica` binary on `PATH` or name it
+with `MOSAICA_BIN` to make or serve a database.
 
 ## Try it
 
@@ -35,13 +49,20 @@ narrower readers; filters and counts; one view per year with a clustering of eac
 new papers into the database while it serves, with a suppression; and the database saved and
 reopened.
 
-They need `pip install -e 'clients/py[widget]'`, a `mosaica` binary on `PATH` or named by
-`MOSAICA_BIN`, and the corpus at `data/notebook-2m4-live/`, or `data/notebook-sample/` with
-`SCALE = "sample"`, which `MOSAICA_NOTEBOOK_DATA` names elsewhere.
-Three things are in no extra, because the package needs none of them: `pandas`, which the first
-section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
-`pip install pandas marimo` for the first notebook, `pip install pandas jupyterlab` for the
-second.
+They need the two installs above and an arXiv corpus: `data/notebook-2m4-live/`, all 2.4
+million papers, or `data/notebook-sample/`, 200,000 of them, with `SCALE = "sample"`. The notebook
+looks for `data/<corpus>/` in the working directory, in its own directory and in every directory
+above them, and `MOSAICA_NOTEBOOK_DATA` names one elsewhere. Neither directory is in git.
+`python -m test_corpora.arxiv.sample --source data/notebook-2m4-live --out data/notebook-sample
+--papers 200000 --seed 0`, run at the repository root, makes the sample from the whole corpus.
+Nothing in the repository makes `data/notebook-2m4-live/` itself, so the notebooks run only where
+a copy of it is at hand.
+
+The notebooks also import packages `mosaica` does not use: `pandas`, which the first section's
+frame is built with; `scikit-learn`, whose k-means clusters each year; and the front end you are
+running, `marimo` or `jupyterlab`. The `widget` extra holds none of them, and the `dev` extra
+holds all but `jupyterlab`. So `pip install pandas scikit-learn marimo` for the first notebook,
+and `pip install pandas scikit-learn marimo jupyterlab` for the second.
 
 `notebook.ipynb` is generated from the marimo file with `marimo export ipynb`.
 The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
@@ -59,9 +80,9 @@ what was inserted since the last commit and forgets it: the first time through t
 that through the control plane. `check()` is `commit()` with nothing sent.
 
 ```python
-import mosaica as td
+import mosaica
 
-db = td.create()                                   # a temporary directory, on /dev/shm where there is one
+db = mosaica.create()                              # a temporary directory, on /dev/shm where there is one
 db.declare_view("map")
 db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
 db.declare_attribute("paper", type="keyword", unique=True)  # every table names a row's item by it
@@ -115,9 +136,9 @@ surprise.
 | a view | `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column |
 | a view group | as a view, plus `view=`, the column saying which view each row belongs to, or `view_key=`, one view for the whole table; its roster is `insert(group, roster=table, key=, **metadata)` |
 | an attribute | `value=`; on a group-scoped attribute also `view=` |
-| a layer, by key | `key=`: one key per row |
-| a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)` |
-| a layer, members | `insert(layer, members=table, key=, rank=, level=)` |
+| a layer, by key | `key=`: one key per row; on a layer scoped to a group also `view=` |
+| a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=, access=, view=)`; `access=` is the column of each annotation's own access labels, required on a layer that reads them, and `view=` is required on a layer scoped to a group |
+| a layer, members | `insert(layer, members=table, key=, rank=, level=, view=)`, with `view=` required on a layer scoped to a group |
 | a label set | a mapping `{key: text}`, or a table with `key=` and `text=` or `contents=`, with `attached_layer=`, `attached_key=` and `level=` where it carries them; its members are `insert(labels, members=table, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
@@ -149,10 +170,11 @@ first commit reads each attribute from one table, the allocation view's frame or
 own insert, and that table holds a row for every item, with nulls where it has no value; the build
 refuses an item it has none for, naming it.
 
-`declare_columns(frame, skip=, render=, index=, keyword=, category=)` declares every column of a
+`declare_columns(frame, skip=, render=, index=, keyword=, category=, unique=)` declares every column of a
 frame from its dtype, as details: stored in the record blob, shown at drill-down, neither rendered
 nor indexed. `render` and `index` apply their flags to the columns named, and `keyword` and
-`category` choose those families for string columns, which are `text` otherwise. A categorical
+`category` choose those families for string columns, which are `text` otherwise. `unique` declares
+the columns named unique, as `declare_attribute(..., unique=True)` does. A categorical
 column (a pandas `Categorical` or an Arrow dictionary column of strings) is declared as a
 category unless `keyword=` names it. Every category it declares reads a new open vocabulary of
 the column's name, with codes of width `u16`, so at most 65,535 values; that width cannot be
@@ -223,7 +245,7 @@ that makes it visible.
 db.insert("s0", new_papers, x="x", y="y", access="categories")
 db.insert("clusters/kmeans", artifacts=new_clusters, key="key", level="level")
 db.insert("clusters/kmeans", members=new_members, key="key", level="level",
-          columns={"entity_id": "entity"})
+          columns={"paper": "paper_id"})
 db.check()                                     # the plan and the pre-flight, with nothing sent
 db.commit()                                    # the report
 ```
@@ -294,19 +316,23 @@ neither is not sent, and the report names it in `ignored_columns`; a table with 
 refused before anything is sent, as is a bare string, a list of dicts, or a dict whose columns
 differ in length. A row naming no item, or two, is refused and listed in the report's `refused` by
 its position, and the other rows are applied; a `None` in a list, or a row whose cells are all
-null, names no item; with `strict=True` the whole request is refused instead, and a call that applied
-nothing raises `Refusal`. A removed item names nothing after, so its value inserted again creates a
-new item. `leave(layer, key, items, rank, strict=False)` shrinks a content's generating set, which
-is the one set that may shrink, and names its items the same way.
+null, names no item; with `strict=True` the whole request is refused instead. A call whose every
+request the server refused raises `Refusal`, with the report as its `report`; a strict call naming
+a row it refuses is one. A removed item names nothing after, so its value inserted again creates a
+new item. `leave(layer, key, items, rank=0, level=0, view=None, strict=False)` shrinks a content's
+generating set, which is the one set that may shrink, and names its items the same way: `rank` is
+which of the label's texts, `level` the level the label is at, and `view` the view it belongs to
+on a layer scoped to a group.
 
 ```python
 db.remove([mosaica_id])
-db.suppress({"entity_id": [17, 23]})
-db.unsuppress(frame[["entity_id"]])
+db.suppress({"paper": ["paper-17", "paper-23"]})
+db.unsuppress(frame[["paper"]])
 ```
 
-The binary is `MOSAICA_BIN` when set, else the first `mosaica` on `PATH`, else a checkout's target
-directory, release before debug; `create()` names the one it found. The database directory keeps
+The binary is `MOSAICA_BIN` when set, else the first `mosaica` on `PATH`, else the one the
+`mosaica-native` wheel installed, else a checkout's target directory, release before debug;
+`db.binary` names the one it found. The database directory keeps
 its own operator credential under `.mosaica/`, owner-only, and its catalogue of principals,
 credentials and grants under `.mosaica/catalogue`. The operator credential authenticates the
 server's superuser, and the database uses it for every write and to mint every token, so nobody
@@ -334,8 +360,8 @@ A reader is who is asking. It holds a set of access terms, and it sees an item w
 of the item's labels. Every count, map, cluster and label a reader is given is computed over the
 items it may see, so two readers can get different answers from the same database.
 
-`db` reads as a reader holding every label its rows carry, plus each view's default label, so it
-sees everything. `db.viewer(terms)` is a reader holding exactly the terms named. A term no row
+`db` reads with the operator's own token, which holds `read-all` and sees every item that is not
+deleted or suppressed. `db.viewer(terms)` is a reader holding exactly the terms named. A term no row
 carries is accepted and reaches nothing, and an empty list is refused.
 
 `map(view=None, layers=None, colour_by=None, filters=None, height=480)` is the notebook widget
@@ -510,9 +536,11 @@ v.browse_artifacts("s0", "clusters/kmeans")   # a page of a layer's annotations
 v.artifact(mosaica_id, "s0")                  # one annotation's record: its count and outline
 ```
 
-Each of these exists on `db` and on any reader, and answers as that reader.
+`meta`, `item` and `categories` exist on `db` and on any reader, and answer as that reader.
+`browse_artifacts` and `artifact` exist on a reader only; `db.viewer()` with no terms is a reader
+that sees what `db` sees.
 
-`categories(column, prefix=None, view=None, codes=None)` returns a pyarrow table of a category
+`categories(column, prefix=None, view=None, codes=None, filters=None)` returns a pyarrow table of a category
 column's values that the reader may see, one row each, with `key`, `code` and `title`. Without a
 prefix it is every value. With one it is the values whose key or title, or a word in either, starts
 with it, ignoring case, and each row adds `count`, the number of items the reader may see that carry
@@ -521,7 +549,8 @@ metadata `mosaica.more` says whether more matched and `mosaica.total` how many i
 taken over. With `codes`, such as the codes in a sample's category column, it is the values of those
 codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot be
 combined. A column declared for a view group holds different values in each view, so it takes
-`view=`.
+`view=`. `filters`, a filter expression given with `prefix` and `view`, counts only the items in
+the view that pass it; the values listed and their order do not change.
 
 `item()` returns `fields` by column name, `labels` (the item's labels that the reader also
 holds) and `views`. `lookup(view, field, values, fields=())` finds the items holding values of a
@@ -543,7 +572,7 @@ for a set of terms, since it is made for no principal of the catalogue.
 db.status()                                    # the watermarks, queues and pagination units
 db.compact()                                   # ask for the fold that removes a deletion's rows
 db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
-db.drop_view("slices", "a")                    # the inverse of create_view
+db.drop_view("slices", "a")                    # remove one view of a view group
 ```
 
 `db.control` is the control plane's client, with one method per route, each returning an
@@ -603,9 +632,27 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 unless you give others, are the fewest and the most a control for it offers; neither changes
 `budget`. `db.map`, `viewer.map` and `selection.map` all take the three and pass them on.
 
+`cluster_budget` is the most clusters a `nested` or `dag` layer is drawn with, met by drawing
+parents in place of their children. Its default is 1,000, and `0` draws every cluster.
+`cluster_budget_min` and `cluster_budget_max`, 10 and 10,000 by default, are the ends of the
+control for it, and neither changes `cluster_budget`.
+
+`palette` is the palette annotations are coloured from under `colour_by="cluster:<layer>"`:
+`"okabe-ito"`, `"tableau10"`, `"tableau20"` or `"kelly"`. `None` leaves the map's choice, Tableau
+10 until one is made. `value_colours`, `{column: {value: "#rrggbb"}}`, and `cluster_colours`,
+`{layer: {mosaica_id: "#rrggbb"}}`, colour single category values and single annotations in place
+of their palette colours; `None` leaves the colours chosen in the map, and `{}` gives every one its
+palette colour.
+
+`size_by` is a number column to size points by, and `None` draws every point at one size.
+`size_min` and `size_max` are the radii in pixels of the smallest and largest value, 2 and 9 until
+one is chosen, and `size_scale` places values between them: `"linear"`, `"log"` or `"rank"`,
+linear until one is chosen.
+
 `mosaica.authorise(session_url, credential, ...)` mints on the session plane: with an API key
 holding `authorise-as`, for a `principal` or an OIDC `access_token`, as an integrator's backend
-does; with the operator credential, for those or for `terms`. Either credential mints a token that
+does; with the operator credential, for those, for `terms`, or with `read_all=True` for the
+operator's own token, which holds `read-all`. Either credential mints a token that
 reads as anyone, and a notebook that holds it is the pooled-service-token anti-pattern in a cell.
 It is for the local case, where `db.token(terms)` and `db.viewer(terms)` call it with the
 database's own operator credential, and for the demo, where operator and analyst are one person.
@@ -655,7 +702,10 @@ skipped and `Map(url)` takes no `token`.
 | kernel → page | `{type: "refused", detail}` | the token source raised |
 | page → kernel | `{type: "error", what, detail}` | a `filters` expression the panel cannot hold |
 
-Traitlets: `url`, `view`, `explorer_layout`, `height`, `title_field`, `artifacts_per_tile`,
-`budget`, `budget_min`, `budget_max` down; `bbox`, `layers`, `colour_by`,
-`filters` both ways, synced up at the settle; `selected`, `selected_artifact`, `region` up.
+Traitlets: `url`, `explorer_layout`, `height`, `title_field`, `artifacts_per_tile`,
+`budget_min`, `budget_max`, `cluster_budget_min`, `cluster_budget_max` down; `view`, `bbox`,
+`layers`, `colour_by`, `palette`, `size_by`, `size_min`, `size_max`, `size_scale` and `filters`
+both ways, synced up at the settle; `budget` and `cluster_budget` both ways, up when the map's
+slider is let go; `value_colours` and `cluster_colours` both ways, up as each colour is chosen
+in the map, as `palette` also is; `selected`, `selected_artifact`, `region` up.
 `last_error` is kernel-side only. The JavaScript half is `clients/ts/components/src/widget.ts`.

@@ -1,11 +1,12 @@
 /**
- * Every `mosaica-*` element as a React component with typed props and event handlers, made with
- * `@lit/react`. `MosaicaMap` wraps `<mosaica-map>`, and so on. A prop that names an element
- * property is set as that property, so an object such as `store` reaches the element under React
- * 18, which sets a custom element's props as attributes. Each element's events are handler props,
- * such as `onPick` for `mosaica-pick`. The element classes are exported as types with an `Element`
- * suffix, such as `MapElement`, for typing a ref. Each element's attributes, properties, events,
- * slots and parts are on its page in the Components reference, which each wrapper's type links to.
+ * Every `mosaica-*` element except `<mosaica-filter>` and `<mosaica-cluster-filter>` as a React
+ * component with typed props and event handlers, made with `@lit/react`. `MosaicaMap` wraps
+ * `<mosaica-map>`, and so on. A prop that names an element property is set as that property, so
+ * an object such as `store` reaches the element under React 18, which sets a custom element's
+ * props as attributes. Each element's events are handler props, such as `onPick` for
+ * `mosaica-pick`. The element classes are exported as types with an `Element` suffix, such as
+ * `MapElement`, for typing a ref. Each element's attributes, properties, events, slots and parts
+ * are on its page in the Components reference, which each wrapper's type links to.
  *
  * `MosaicaStore`, `MosaicaMap` and `MosaicaExplorer` read their `authorise` prop through a ref, so
  * an inline function does not build a new store on every render. To show the map to another

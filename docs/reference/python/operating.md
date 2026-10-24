@@ -54,6 +54,8 @@ These methods change what a committed database serves, and reach the server unde
 
 ::: mosaica._instance.Listening
 
+::: mosaica._instance.ServeRefused
+
 ::: mosaica._control.Control
     options:
       merge_init_into_class: true

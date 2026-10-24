@@ -5,3 +5,5 @@
 ::: mosaica.widget.Map
     options:
       merge_init_into_class: true
+
+::: mosaica.widget.bundle_path

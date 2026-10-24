@@ -10,8 +10,8 @@ The TypeScript client is four packages in `clients/ts`. Each page below lists wh
 | [`@mosaicajs/deck`](typescript/deck.md) | `MosaicaLayer`, a deck.gl layer that draws the store, for a host that builds its own `Deck`. deck.gl and luma.gl are peer dependencies. |
 | [`@mosaicajs/components`](typescript/components.md) | The types of the `mosaica-*` elements' events, parts, context and theme. The elements are on the [Components](components.md) pages. |
 | [`@mosaicajs/react`](typescript/react.md) | `useMosaicaStore` and `useProjection`, the store as React hooks. |
-| [`@mosaicajs/react/components`](typescript/react/components.md) | Every element as a React component with typed props and event handlers. |
+| [`@mosaicajs/react/components`](typescript/react/components.md) | Every element except `<mosaica-filter>` and `<mosaica-cluster-filter>` as a React component with typed props and event handlers. |
 
 `@mosaicajs/client/internal` and `@mosaicajs/deck/internal` hold what the other packages use beyond these entries. They are not a public API and are not listed here.
 
-Not built yet: the packages are not published to npm. `npm run build` in `clients/ts` builds each into its `dist/` directory, and `npm pack` in a package's directory makes a tarball of it.
+Not built yet: the packages are not published to npm. The registry holds an empty placeholder, version 0.0.0, under each of the four names, so `npm install @mosaicajs/client` succeeds and installs no Mosaica code. `npm run build` in `clients/ts` builds each package into its `dist/` directory, and `npm pack` in a package's directory makes a tarball of it. `@mosaicajs/deck` and `@mosaicajs/components` depend on exactly version 0.1.0 of the Mosaica packages they import, which exists only in those tarballs, so install the tarballs together in one `npm install`. The client README in `clients/ts` gives the commands and each package's peer dependencies.

@@ -8,8 +8,8 @@ This directory holds the browser side of Mosaica: the client library, a deck.gl 
 |---|---|---|
 | `core/` | `@mosaicajs/client` | The headless store (`createStore`), the viewer and session client (`MosaicaClient`), the control-plane client (`Control`) and the bulk reads. No DOM. Depends on `apache-arrow` and `fzstd`. |
 | `deck/` | `@mosaicajs/deck` | `MosaicaLayer`, a deck.gl layer that draws a store, for a host with its own `Deck`. deck.gl and luma.gl are peer dependencies. |
-| `components/` | `@mosaicajs/components` | The `mosaica-*` custom elements, built with Lit, drawing through `@mosaicajs/deck`. One subpath per element, and a single-file bundle. |
-| `react/` | `@mosaicajs/react` | `useMosaicaStore` and `useProjection`. `@mosaicajs/react/components` wraps each element as a React component, behind optional peer dependencies, so the hooks alone pull in neither Lit nor deck.gl. |
+| `components/` | `@mosaicajs/components` | The `mosaica-*` custom elements, built with Lit, drawing through `@mosaicajs/deck`. A subpath for each element except `mosaica-filter` and `mosaica-cluster-filter`, the search boxes that other elements render, and a single-file bundle. |
+| `react/` | `@mosaicajs/react` | `useMosaicaStore` and `useProjection`. `@mosaicajs/react/components` wraps every element except `mosaica-filter` and `mosaica-cluster-filter` as a React component, behind optional peer dependencies, so the hooks alone pull in neither Lit nor deck.gl. |
 | `viewer/` | `@mosaicajs/viewer` | The demo: `<mosaica-explorer>` with dataset and principal pickers and measurement panels. Private. |
 | `examples/` | | Four host pages, described below. |
 | `harness/` | | Checks the elements' behaviour in a browser against a running page. |
@@ -20,17 +20,17 @@ The packages depend on each other in one line: `components` on `deck`, and both 
 
 `deck` and `components` also import `@mosaicajs/client/internal`, and `components` imports `@mosaicajs/deck/internal`. These entries hold what those packages share and a host does not use. They are not a public API and change without notice, so the packages that use them depend on an exact version of the package they import from.
 
-None of the packages is published to npm.
+None of the packages is published to npm. The registry holds an empty placeholder, version 0.0.0, under each of the four `@mosaicajs` names. `npm install @mosaicajs/client` installs that placeholder and reports no error, and the project then has no Mosaica code. To use the packages in another project, pack them from this checkout as [Using the packages in another project](#using-the-packages-in-another-project) describes.
 
 ## Building
 
-You need Node 20.19 or later (22.12 or later on the 22 line), which Vite 8 requires. Install from the lockfile:
+You need Node 22.15 or later. Vite 8 needs 20.19 or 22.12, and core's unit tests compress with `node:zlib`'s zstd, which Node added in 22.15. Install from the lockfile:
 
 ```bash
 npm ci
 ```
 
-Inside the workspace the packages resolve to their TypeScript sources, through the `mosaica-source` export condition. `tsconfig.base.json` names it, and so does every Vite and Vitest config that loads a workspace package, so the unit tests, the viewer and the examples run without a build. The components' browser config leaves it out, because that suite tests the built `dist/`; the plain-HTML, spike and wire-example configs load no workspace package.
+Inside the workspace the packages resolve to their TypeScript sources, through the `mosaica-source` export condition. `tsconfig.base.json` names it, and so does every Vite and Vitest config that loads a workspace package, so the unit tests, the viewer and the examples run without a build. The components' browser config leaves it out, because that suite tests the built `dist/`; the plain-HTML, spike and wire-example configs load no workspace package. The plain-HTML example needs one build all the same: it loads the single-file bundle, which `npm run bundle -w @mosaicajs/components` writes.
 
 ```bash
 npm run build
@@ -44,6 +44,33 @@ builds `client`, `deck`, `components` and `react`, in that order, into each pack
 `npm pack` in a package's directory makes a tarball. It drops the `mosaica-source` condition from the packed manifest and adds the licence (`scripts/pack.mjs`).
 
 The elements use standard decorators with `accessor`. Vite 8 does not lower them, so `components/vite-plugin-decorators.ts` runs esbuild over the component sources wherever Vite serves or bundles them: the viewer, the React example and the single-file bundle. `dist/` is lowered by `tsc`, so a host that installs the package needs no plugin.
+
+### Using the packages in another project
+
+Build the four packages, then pack them into a directory of your choice. `npm pack` does not create the directory. Run these in `clients/ts`:
+
+```bash
+npm run build
+mkdir -p ~/mosaica-packs
+npm pack -w @mosaicajs/client -w @mosaicajs/deck -w @mosaicajs/components -w @mosaicajs/react --pack-destination ~/mosaica-packs
+```
+
+That writes `mosaicajs-client-0.1.0.tgz`, `mosaicajs-deck-0.1.0.tgz`, `mosaicajs-components-0.1.0.tgz` and `mosaicajs-react-0.1.0.tgz`. `@mosaicajs/deck` and `@mosaicajs/components` depend on exactly version 0.1.0 of the Mosaica packages they import, and `@mosaicajs/react` on 0.1.0 or a later 0.1 release. Version 0.1.0 exists only in these tarballs. Install the tarballs together, in one `npm install` in the other project:
+
+```bash
+npm install ~/mosaica-packs/mosaicajs-client-0.1.0.tgz ~/mosaica-packs/mosaicajs-deck-0.1.0.tgz ~/mosaica-packs/mosaicajs-components-0.1.0.tgz ~/mosaica-packs/mosaicajs-react-0.1.0.tgz
+```
+
+Installing `@mosaicajs/components` without the client and deck tarballs fails with `No matching version found for @mosaicajs/client@0.1.0`, because npm looks for that version on the registry. The project's `package.json` records each tarball by its path, so leave the files where they are.
+
+The host provides these peer dependencies. npm 7 and later installs the required ones itself; the optional ones it leaves to the host.
+
+| Package | Peer dependencies |
+|---|---|
+| `@mosaicajs/client` | None. |
+| `@mosaicajs/deck` | `@deck.gl/core`, `@deck.gl/layers` and `@deck.gl/aggregation-layers` `^9.3.7`, and `@luma.gl/core` `^9.3.6`. |
+| `@mosaicajs/components` | The same four, and `lit` `^3.3.0`. |
+| `@mosaicajs/react` | `react` `^18.0.0` or `^19.0.0`. For the `/components` entry, also `@mosaicajs/components` `^0.1.0` and `@lit/react` `^1.0.0`, both optional. |
 
 ## Testing
 
@@ -104,9 +131,9 @@ The plain-HTML example's app server mints the tokens for all four, so start it a
 
 The elements are custom elements, so any framework can render them. Frameworks differ in how they set a property whose value is an object, and in whether they need telling that a tag is not one of their own components.
 
-Importing `@mosaicajs/components` defines every element. A subpath such as `@mosaicajs/components/count` defines one. The map, the explorer, the field card, the field column and the artifact card import `@mosaicajs/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
+Importing `@mosaicajs/components` defines every element. A subpath such as `@mosaicajs/components/count` defines one, and the elements it renders. `mosaica-filter` and `mosaica-cluster-filter` have no subpath: the field card, filter panel, colour editor and explorer subpaths define them. The map, the explorer, the field card, the filter panel and the colour editor import `@mosaicajs/deck` and so pull in deck.gl; the other subpaths do not. An element rendered before its module has loaded is an unknown element until it upgrades, which shows as blank space. Defining an element needs the browser's `customElements`, so a server-rendered app imports the package on the client only.
 
-An element takes its store from its `store` property, or else from the nearest `<mosaica-store>` or `<mosaica-explorer>` above it in the page. `<mosaica-map>`, `<mosaica-explorer>` and `<mosaica-store>` can also build their own from a `viewer-url` and a `token`, or an `authorise` function in place of the token. The component reference lists each element's attributes, properties and events.
+Every element except `<mosaica-count>` takes its store from its `store` property, or else from the nearest `<mosaica-store>` or `<mosaica-explorer>` above it in the page. `<mosaica-map>`, `<mosaica-explorer>` and `<mosaica-store>` can also build their own from a `viewer-url` and a `token`, or an `authorise` function in place of the token. The component reference lists each element's attributes, properties and events.
 
 ### A page with no build step
 
