@@ -414,6 +414,12 @@ range of rows, and that single property is what makes a masked count bitmap arit
 a scan. It holds because each item occupies one cell; a polygon spans many, at several depths,
 and has no single position. Every downstream property rests on it. No design exists.
 
+**OpenID Connect sign-in in the clients.** The server verifies an OIDC access token and maps its
+claims to terms and groups, but nothing in Mosaica runs the sign-in: no client sends the viewer to
+the provider's login page and collects the token afterwards, so the embedding application does it.
+The components and the Python client would run the authorization code flow with PKCE and hand the
+token to `/v1/login`. No issue or design exists.
+
 [#3]: https://github.com/jennis0/tessera-index/issues/3
 [#4]: https://github.com/jennis0/tessera-index/issues/4
 [#73]: https://github.com/jennis0/tessera-index/issues/73
