@@ -1,8 +1,25 @@
 {
   "name": "@mosaicajs/client",
   "version": "0.1.0",
+  "description": "The Mosaica browser client: a headless store over a Mosaica server's map, filters, counts, items and writes, with no DOM.",
+  "keywords": [
+    "mosaica",
+    "map",
+    "visualisation",
+    "arrow",
+    "client"
+  ],
+  "homepage": "https://github.com/jennis0/mosaica/tree/main/clients/ts/core#readme",
+  "bugs": {
+    "url": "https://github.com/jennis0/mosaica/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jennis0/mosaica.git",
+    "directory": "clients/ts/core"
+  },
   "license": "Apache-2.0",
-  "private": true,
+  "author": "Joe Ennis",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -45,5 +62,8 @@
     "rolldown": "^1.2.1",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

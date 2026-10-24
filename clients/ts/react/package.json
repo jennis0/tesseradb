@@ -1,10 +1,26 @@
 {
   "name": "@mosaicajs/react",
   "version": "0.1.0",
-  "license": "Apache-2.0",
-  "private": true,
-  "type": "module",
   "description": "React hooks over the headless store, and typed wrappers for the mosaica-* elements behind a separate entry.",
+  "keywords": [
+    "mosaica",
+    "react",
+    "hooks",
+    "map",
+    "visualisation"
+  ],
+  "homepage": "https://github.com/jennis0/mosaica/tree/main/clients/ts/react#readme",
+  "bugs": {
+    "url": "https://github.com/jennis0/mosaica/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jennis0/mosaica.git",
+    "directory": "clients/ts/react"
+  },
+  "license": "Apache-2.0",
+  "author": "Joe Ennis",
+  "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -56,5 +72,8 @@
     "react-dom": "^19.2.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -39,7 +39,7 @@ npm run build
 builds `client`, `deck`, `components` and `react`, in that order, into each package's `dist/`: ES2022 JavaScript and declarations from `tsc`. It also writes two things a host loads directly:
 
 - `core/dist/decode.worker.js`, the decode worker, with Arrow bundled into it. The decoder loads it from beside itself.
-- `components/dist/mosaica-components.js`, every element and its dependencies in one minified file with the decode worker inlined, and `mosaica-components.js.sri`, its `sha384` integrity hash.
+- `components/dist/mosaica-components.js`, every element and its dependencies in one minified file with the decode worker inlined, `mosaica-components.js.sri`, its `sha384` integrity hash, and `mosaica-components.js.LICENSE.txt`, the notices of every third-party package inside it (`components/vite-plugin-licences.ts`).
 
 `npm pack` in a package's directory makes a tarball. It drops the `mosaica-source` condition from the packed manifest and adds the licence (`scripts/pack.mjs`).
 

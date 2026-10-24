@@ -1,8 +1,25 @@
 {
   "name": "@mosaicajs/components",
   "version": "0.1.0",
+  "description": "The mosaica-* web components: a map, filters, counts, item cards and an explorer over a Mosaica server, plus a single-file bundle.",
+  "keywords": [
+    "mosaica",
+    "web-components",
+    "lit",
+    "map",
+    "visualisation"
+  ],
+  "homepage": "https://github.com/jennis0/mosaica/tree/main/clients/ts/components#readme",
+  "bugs": {
+    "url": "https://github.com/jennis0/mosaica/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jennis0/mosaica.git",
+    "directory": "clients/ts/components"
+  },
   "license": "Apache-2.0",
-  "private": true,
+  "author": "Joe Ennis",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -125,5 +142,8 @@
     "vite": "^8.2.0",
     "vitest": "^3.2.0",
     "esbuild": "^0.28.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
