@@ -954,7 +954,7 @@ time and peak memory of one shard's compaction against the whole corpus's, resta
 several at once. Today's evidence for its cost is one MedCPT compaction of 330 s over 36 million
 items, of which 48.1% was artifact structures (`probes/2026-09-04-epoch-shard-fold-decomposition/`),
 and one Tree of Life compaction of 1,313 s over 233 million items in two views, after its 50% ingest
-cell ([ingest campaign](ingest-campaign.md)). Both predate label columns, figures and term images.
+cell ([ingest campaign](../notes/ingest-campaign.md)). Both predate label columns, figures and term images.
 
 ### 8.4 Churn
 
@@ -991,7 +991,7 @@ settled the order pool ids are issued in (§4.1) until larger corpora are measur
 | a per-shard tile index alone is 6 to 8.8 times the bytes at N = 8 | measured, before label columns served most levels | `probes/2026-09-04-epoch-shard-tile-index/` |
 | projection is linear in rows from 10⁸; eight leaves cost 1.10 times the memory and 1.4 times the time of one | measured, synthetic, before term images | `probes/2026-09-04-epoch-shard-projection/` |
 | a compaction of MedCPT, 36 million items: 330 s, of which 1.5% corpus-wide, 50.5% per row, 48.1% artifact structures | measured, once | `probes/2026-09-04-epoch-shard-fold-decomposition/` |
-| a compaction of Tree of Life after its 50% ingest cell: 1,313 s | measured, once | [ingest campaign](ingest-campaign.md) |
+| a compaction of Tree of Life after its 50% ingest cell: 1,313 s | measured, once | [ingest campaign](../notes/ingest-campaign.md) |
 | a compaction of a shard of 2³² items in two views: about 6.7 hours | modelled, linear in items from the Tree of Life run | this document |
 | an id reaches the tenancy cap in about 1,100 years at 1% daily churn, 110 at 10% | modelled | §1.4 |
 | capacity: 2¹⁹ shards of about 2³² ids, about 2 × 10¹⁵ items | modelled | §2.1, §2.5 |
