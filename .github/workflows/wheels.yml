@@ -237,14 +237,14 @@ jobs:
           /tmp/smoke/bin/pip install "pyarrow>=14"
           /tmp/smoke/bin/pip install --no-index --find-links dist "mosaica==$version"
           cd /tmp
-          /tmp/smoke/bin/python - "$version" <<'PY'
+          /tmp/smoke/bin/python - "$version" "$(python3 scripts/version.py pep440)" <<'PY'
           import subprocess, sys
           import mosaica, mosaica_native
-          want = sys.argv[1]
+          want, want_python = sys.argv[1], sys.argv[2]
           printed = subprocess.run(
               [mosaica_native.binary_path(), "--version"], check=True, capture_output=True, text=True
           ).stdout.strip()
           print(mosaica.__version__, printed, sep="\n")
-          if mosaica.__version__ != want or not printed.startswith(f"mosaica {want}"):
+          if mosaica.__version__ != want_python or not printed.startswith(f"mosaica {want}"):
               sys.exit(f"the wheels report {mosaica.__version__} and {printed!r}; Cargo.toml says {want}")
           PY
