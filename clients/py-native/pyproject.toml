@@ -8,9 +8,32 @@ version = "0.1.0"
 description = "Mosaica's platform wheel: the `mosaica` executable and the `_mosaica` extension module."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Joe Ennis", email = "joe.ennis0@gmail.com" }]
+keywords = ["map", "visualisation", "spatial", "database", "server"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Topic :: Database :: Database Engines/Servers",
+  "Topic :: Scientific/Engineering :: Visualization",
+]
 requires-python = ">=3.10"
 # Two compiled artifacts and an `__init__.py` that says where they are. Nothing to depend on.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/jennis0/mosaica"
+Documentation = "https://github.com/jennis0/mosaica/tree/main/docs"
+Source = "https://github.com/jennis0/mosaica"
+Issues = "https://github.com/jennis0/mosaica/issues"
+Changelog = "https://github.com/jennis0/mosaica/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mosaica_native"]
@@ -29,7 +52,7 @@ path = "hatch_build.py"
 # An sdist carries no artifacts and cannot build them: the hook needs the Rust workspace, which an
 # sdist does not contain. Build the wheel from the repository.
 [tool.hatch.build.targets.sdist]
-include = ["mosaica_native", "hatch_build.py", "README.md"]
+include = ["mosaica_native", "hatch_build.py", "README.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 100

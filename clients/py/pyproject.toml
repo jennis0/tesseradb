@@ -6,7 +6,23 @@ build-backend = "hatchling.build"
 name = "mosaica"
 version = "0.1.0"
 description = "Read and map a Mosaica database from Python, and make one from data frames."
+readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Joe Ennis", email = "joe.ennis0@gmail.com" }]
+keywords = ["map", "visualisation", "spatial", "embeddings", "access control", "notebook", "widget"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Framework :: Jupyter",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Database",
+  "Topic :: Scientific/Engineering :: Visualization",
+  "Topic :: Scientific/Engineering :: GIS",
+]
 requires-python = ">=3.10"
 # Two dependencies. pyarrow carries every table the package reads or writes. The companion
 # platform wheel `mosaica-native` carries the `mosaica` binary and the `_mosaica` extension
@@ -22,6 +38,13 @@ dependencies = [
   "pyarrow>=14",
   "mosaica-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jennis0/mosaica"
+Documentation = "https://github.com/jennis0/mosaica/tree/main/docs"
+Source = "https://github.com/jennis0/mosaica"
+Issues = "https://github.com/jennis0/mosaica/issues"
+Changelog = "https://github.com/jennis0/mosaica/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # The notebook map: anywidget plus the components' single-file bundle, which the wheel's build
@@ -39,15 +62,19 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["mosaica"]
-# The bundle is produced by the hook, never committed (`static/` is gitignored but for its
+# The bundle and its notices are produced by the hook, never committed (`static/` is gitignored but for its
 # marker), so it is declared an artifact — hatchling would otherwise drop it as untracked.
-artifacts = ["mosaica/static/mosaica-components.js", "mosaica/static/mosaica-components.js.sri"]
+artifacts = [
+  "mosaica/static/mosaica-components.js",
+  "mosaica/static/mosaica-components.js.sri",
+  "mosaica/static/mosaica-components.js.LICENSE.txt",
+]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["mosaica", "hatch_build.py", "README.md", "tests"]
+include = ["mosaica", "hatch_build.py", "README.md", "LICENSE", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
