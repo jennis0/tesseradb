@@ -27,7 +27,8 @@ Third-party software in Mosaica
 
 Every third-party crate the Mosaica workspace depends on outside its tests, which includes
 everything compiled into the mosaica binary, the mosaica-native Python wheel and the container
-image. Each licence text below lists the crates it covers.
+image. Each licence text below lists the crates it covers, and the NOTICE files of the crates that
+ship one follow the licence texts.
 """
 
 
@@ -47,12 +48,24 @@ def render() -> str:
         used_by = "".join(f"  {name} {version}\n" for name, version in users)
         sections.append(f"{'=' * 80}\n{licence['name']} ({licence['id']})\n\nUsed by:\n{used_by}\n"
                         f"{licence['text'].strip()}\n")
+    # Apache-2.0 §4(d): a crate's NOTICE file travels with every redistributed copy. cargo-about
+    # reads licence files only, so the NOTICE files are read from each crate's source here.
+    notices = []
+    for krate in sorted(about["crates"], key=lambda c: (c["package"]["name"], c["package"]["version"])):
+        package = krate["package"]
+        if package["name"].startswith("mosaica"):
+            continue
+        source = Path(package["manifest_path"]).parent
+        for notice in sorted(source.iterdir()):
+            if notice.is_file() and notice.name.upper().startswith("NOTICE"):
+                notices.append(f"{'=' * 80}\nNOTICE of {package['name']} {package['version']}\n\n"
+                               f"{notice.read_text(errors='replace').strip()}\n")
     overview = "".join(
         f"{name}: {len(crates)} crate{'' if len(crates) == 1 else 's'}\n"
         for name, crates in sorted(counts.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     )
     # Some crates ship their licence with CRLF line endings; the file has LF throughout.
-    return (f"{HEADER}\n{overview}\n" + "\n".join(sections)).replace("\r\n", "\n")
+    return (f"{HEADER}\n{overview}\n" + "\n".join(sections + notices)).replace("\r\n", "\n")
 
 
 def main(argv: list[str]) -> int:

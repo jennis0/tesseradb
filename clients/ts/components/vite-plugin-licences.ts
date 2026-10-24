@@ -4,8 +4,8 @@ import type {Plugin, Rolldown} from 'vite';
 
 /**
  * Write the notices of every third-party package inside the single-file bundle to
- * `<bundle>.LICENSE.txt` beside it: each package's name, version, licence and licence text, read
- * from its directory under `node_modules`. MIT, BSD and Apache-2.0 require the notice to travel
+ * `<bundle>.LICENSE.txt` beside it: each package's name, version, licence, licence text and NOTICE
+ * file where it has one, read from its directory under `node_modules`. MIT, BSD and Apache-2.0 require the notice to travel
  * with a redistributed copy, and the bundle is redistributed inside the Python wheel.
  *
  * The decode worker is bundled separately and inlined, so the worker build gets its own collector
@@ -55,11 +55,17 @@ function notices(bundleFile: string, roots: Set<string>): string {
     };
     const key = `${manifest.name}@${manifest.version}`;
     const licence = manifest.license ?? 'unstated';
-    const file = readdirSync(root).find((f) => /^(licen[cs]e|copying)(\.|-|$)/i.test(f));
+    const files = readdirSync(root);
+    const file = files.find((f) => /^(licen[cs]e|copying)(\.|-|$)/i.test(f));
     const text = file
       ? readFileSync(join(root, file), 'utf8').trim()
       : `The package states the licence ${licence} and ships no licence file.`;
-    entries.set(key, `${key}\nLicence: ${licence}\n\n${text}\n`);
+    // Apache-2.0 §4(d): a package's NOTICE travels with every redistributed copy.
+    const notice = files
+      .filter((f) => /^notice(\.|-|$)/i.test(f))
+      .map((f) => `\n\n${f}:\n\n${readFileSync(join(root, f), 'utf8').trim()}`)
+      .join('');
+    entries.set(key, `${key}\nLicence: ${licence}\n\n${text}${notice}\n`);
   }
   const header =
     `${bundleFile} contains the following third-party packages, each listed with its version,\n` +
