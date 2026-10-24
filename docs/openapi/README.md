@@ -41,8 +41,11 @@ A decoder keeps two rules. **The trailer is the completeness signal**: a body wi
 kind-4 frame is incomplete whatever the transport said, though every prefix is sound to draw,
 since the counts are exact from the first frame. **An unknown kind is an error**, never skipped.
 
-The points batch is `(mosaica_id: u64, code: u64, …render columns)`, the render columns in
-`/v1/meta`'s `declared_scalars` order, each named by its column. A render column is nullable: a
+With `point_rows` absent or `"full"`, the points batch is `(mosaica_id: u64, code: u64, …render
+columns)`, the render columns in `/v1/meta`'s `declared_scalars` order, each named by its column.
+A `point_rows` list of render column names serves `mosaica_id`, `code` and those columns only.
+`point_rows: "highlight"` serves `(mosaica_id, highlighted)` only, and answers as `"full"` when
+the request has no `highlight`. A render column is nullable: a
 point whose item has no value in it is null, and a zero is a value. A category is the exception:
 it has no nulls, and its code 0 means no value. `code` is the position: 32 bits
 per axis, Morton-interleaved; deinterleave and scale against `/v1/meta`'s `quantisation` to
@@ -55,8 +58,8 @@ into tiles.
 
 A `POST /v1/artifacts/viewport` body has the same framing, with kind-5 artifacts frames: one for
 the nested and `dag` layers first, where it holds a row, and then exactly one for each tile, in the
-request's order with repeats removed. Each has seventeen columns ending in `tile`, which is null in
-the first. The trailer is exactly `{stream_us, arrow_serialise_ns, rows, frames}`. **A frame of no
+request's order with repeats removed. Each has eighteen columns ending in `tile` and `slot`. `tile` is null in
+the first frame, and `slot` is null unless the request names a `palette_size`. The trailer is exactly `{stream_us, arrow_serialise_ns, rows, frames}`. **A frame of no
 rows carries no reason**: no layer reached, none in the tile and none clearing its criterion are
 one outcome by design.
 
@@ -109,6 +112,7 @@ first artifacts rows: [
 
 That fixture answers a request for one layer of clusters at zoom 2 with a `per_tile` of 50. It holds
 one frame for each of the sixteen tiles, one of them empty, and no frame for nested or `dag` layers.
+Its frames have seventeen columns: the fixture has no `slot` column.
 The `u64` columns come off Arrow JS as `BigInt` and are printed as decimal strings; a decoder that
 narrows a `mosaica_id` to a JS `number` has already lost bits on this fixture's first id. Its test
 is `clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the
@@ -245,13 +249,20 @@ const { head, tables, trailer } = decodeItems(new Uint8Array(await response.arra
 `mosaica_id` arrives as a `uint64`, which Arrow JS reads as a `BigInt`; narrowing it to a `number`
 loses bits. Without the registered codec, Arrow JS refuses a zstd-compressed body.
 
+## The artifacts read
+
+A `POST /v1/artifacts` body uses the framing and the rules of the items read. Its head is
+`{page_rows, served?, matched?}`: it has no `order`, and it carries `served`, the artifacts the
+request selects that the principal is served, where the items head carries `visible`. `served` and
+`matched` are present when the request asks for `count`.
+
 ## The aggregate read
 
 A `POST /v1/aggregate` body uses the same framing, with no head of its own and one table per
 grouping, in the order of the request's `groupings`:
 
 ```
-kind 9  table head before a table's first page JSON {grouping, total, reference_total?, groups?, resumed}
+kind 9  table head before a table's first page JSON {grouping, total, reference_total?, groups?, sample?, resumed}
 kind 7  records    one or more per table        one Arrow IPC stream holding one batch of its rows
 kind 8  page end   one after each records frame JSON {next, ended_by}
 kind 4  trailer    exactly one, last            JSON {pages, rows, next, ended_by, recomposed?, stream_us}

@@ -3,7 +3,7 @@
 These pages state what each interface accepts and returns.
 
 - [HTTP API](http.md): the viewer, session and control planes, from the OpenAPI description.
-- [Wire framing](../openapi/README.md): the framed Arrow bodies of `POST /v1/viewport` and `POST /v1/items`, with decoders in Python and JavaScript.
+- [Wire framing](../openapi/README.md): the framed Arrow bodies of `POST /v1/viewport`, `POST /v1/artifacts/viewport`, `POST /v1/items`, `POST /v1/artifacts` and `POST /v1/aggregate`, with decoders in Python and JavaScript.
 - [Capabilities](capabilities.md): which route, function, method or command performs each core capability on each of the four surfaces.
 - [CLI](cli.md): the `mosaica` command and its subcommands.
 - [mosaica.toml](mosaica-toml.md): the deployment file, which says where the bundle is and how the server listens and bounds its work.

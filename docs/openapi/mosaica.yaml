@@ -11,8 +11,8 @@
 # `x-mosaica-route-prefix`, which `clients/ts/core/test/contract.test.ts` reads to send each
 # operation to its listener.
 #
-# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items`,
-# `POST /v1/artifacts` and `POST /v1/aggregate`, and the Arrow IPC forms of `POST /control/ingest` and
+# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`,
+# `POST /v1/artifacts/viewport`, `POST /v1/items`, `POST /v1/artifacts` and `POST /v1/aggregate`, and the Arrow IPC forms of `POST /control/ingest` and
 # `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
 # media type and described in prose on its route. `docs/openapi/README.md` carries worked decodes
 # of the framed bodies in Python and in JavaScript. The JSON frames of the paged reads have
@@ -1941,7 +1941,7 @@ paths:
             - An unknown `op`, or an item without `match`
             - No change names its item by an identifying column
             - A `mosaica_id` that is not a decimal string
-            - A `match` key that is neither `mosaica_id` nor a field declared unique, or a value that is not one of its field's
+            - A `match` value that is not one of its field's
             - A `delete` naming a layer by its own `mosaica_id`; the detail names the `DELETE /control/layers/{name}` to send instead
           content:
             application/json:
