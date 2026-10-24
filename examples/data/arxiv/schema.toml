@@ -1,8 +1,8 @@
 # The arXiv example dataset: 50,000 papers, two 2D layouts, Toponymy's named clusters and arXiv's
 # own classification.
 # `test_corpora/arxiv/example.py` writes the Parquet files beside this; NOTICE.md says where they
-# came from. The declaration is the notebook corpus's, without the abstracts and with the floors
-# scaled to a corpus a fiftieth of the size.
+# came from. The declaration is the notebook corpus's, without the abstracts, the k-means and
+# HDBSCAN layers, and with the floors scaled to a corpus a fiftieth of the size.
 
 # **Every file this declaration reads, named once.** A `source` anywhere below names one of these
 # keys rather than repeating a path, so staging one of them elsewhere is a single `--file` override

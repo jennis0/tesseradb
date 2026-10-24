@@ -423,7 +423,7 @@ function mirror(): void {
  * `held` is a session and meta already read for this principal, passed on so it is not authorised
  * again: each authorisation materialises the principal's visible set on the server. The store gets
  * a supplier that returns this token once and then mints new ones. `carried` is the layers and
- * colour to open on; without it the store opens on the dataset's first layer and colour.
+ * colour to open on; without it the store opens on the layer and colour chosen when meta arrived.
  */
 function openSession(
   preset: Dataset['presets'][number],
@@ -515,7 +515,6 @@ function openSession(
     }
   });
   dataStore.setColourBy(carried ? carried.colourBy : store.state.colourBy);
-  // The viewer opens with the first layer on.
   dataStore.setLayers(carried ? carried.layers : store.state.artifactLayer ? [store.state.artifactLayer] : []);
   unsubscribe = dataStore.subscribe(() => mirror());
   // The explorer takes the store by property; its map pushes the first view once meta lands.

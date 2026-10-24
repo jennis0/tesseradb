@@ -51,9 +51,9 @@
 # `arxiv` and `places` are the two example datasets, the only scales whose files are in git
 # (`examples/data/`), so they are the default and the only ones a fresh clone can build. `arxiv` is
 # 50,000 papers cut from `notebook-2m4`, with its Toponymy clusters and their names, arXiv's own
-# classification, a second layout as a second view, and no abstracts. `places` is 150,000 GeoNames features of every class, every populated place of 15,000
-# people or more and a sample of the rest, on a `web_mercator` map, each visible to a principal
-# holding its country. Each `NOTICE.md` says where the data came from and how to make it again.
+# classification, a second layout as a second view, and no abstracts. `places` is 150,000 GeoNames
+# features of every class, every populated place of 15,000 people or more and a sample of the
+# rest, on a `web_mercator` map, each visible to a principal holding its country. Each `NOTICE.md` says where the data came from and how to make it again.
 #
 # Every other scale reads `data/`, which is gitignored. `2m4`, `25m`, `250m` and `1b` publish one
 # flat k-means layer over the arXiv corpus and its synthetic scale-ups, and their principals are the
