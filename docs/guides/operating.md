@@ -7,7 +7,7 @@ write-ahead log and compaction. Putting the viewer address behind TLS has [a pag
 own](tls.md), and so does [rebuilding the bundle](rebuild.md).
 
 The examples use the systemd install, run as the `mosaica` user in `/srv/mosaica`. Under Docker,
-run them from `~/mosaica-docker`, use ports 9161 to 9163 in place of 9151 to 9153, and write
+run them from `~/mosaica-docker`, use ports 9161 and 9162 in place of 9151 and 9152, and write
 `http://127.0.0.1:9163` where the examples reach the control socket with
 `--unix-socket /run/mosaica/control.sock http://localhost`.
 
@@ -76,7 +76,7 @@ The server holds these caches, each with a limit you can set under `[serve]`:
 
 | Key | Default | What it holds |
 |---|---|---|
-| `row_projection_cache_bytes` | 2 GiB | For each session, which rows of the bundle it may see |
+| `row_projection_cache_bytes` | 2 GiB | For each grant, view and shard, which rows of the bundle the grant may see, shared by every session with that grant |
 | `fragment_cache_bytes` | 1 GiB | For each distinct set of granted labels, the items it covers. Copies on disc in the cache directory outlive the memory |
 | `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation levels served from a column, one entry per grant and level, whatever the number of shards. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 128 B for each artifact with more than sixteen placed rows, 256 B in a bundle of several shards. A level of 1.4 million artifacts is 56 MB a grant counted with geometry, and a layer serving a box keeps at most 185 MB more of reserves in the same entry, 364 MB over several shards, so the default holds the counts of about nineteen such grant-levels, and at least four with their reserves, two over several shards. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, and an entry that fits only without its reserve is kept without it; `masked_count_cache.not_admitted` on `/control/status` counts both. Empty in a corpus without such a layer |
 | `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory, so a restart reads them back and does not walk each grant's rows again. In a bundle of several shards it also keeps each shard's walk of each grant's items, which a compaction of one shard reads back so as to walk that shard alone: up to 172 B for each artifact a shard holds a member of, for each level version the shard was walked at, until this bound removes the older ones. Size it as the memory bound above times the number of grant-levels a restart should find, plus those walks, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
@@ -92,7 +92,7 @@ and the labels of denied rows, under fixed limits that come to 1.5 GiB.
 The paged reads, `POST /v1/items` and `POST /v1/artifacts`, share one limit. Two may run at once
 (`bulk_admission`), each holding up to seven pages of at most 64 MiB (`max_page_bytes`). The server
 logs what that comes to when it starts, as `bulk_read_memory_bytes=939524096`. With the defaults,
-the limits on the caches and the paged reads add up to about 8.7 GiB.
+the limits on the caches and the paged reads add up to about 7.7 GiB.
 
 The bundle itself is not loaded. The server maps its files, so their pages sit in the kernel's page
 cache and count towards the process's memory. When memory is short the kernel drops them, and reads

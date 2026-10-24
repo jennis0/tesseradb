@@ -97,12 +97,7 @@ credentials](operating.md#addresses-and-credentials) says who should reach each 
 Every section of `mosaica.toml` refuses a key it does not know and names the ones it takes. The keys
 this guide leaves out keep their defaults.
 
-!!! note ""
-    Not built yet: a reference page for `mosaica.toml`. Until there is one, each key is a field of
-    `RawServe` or `RawIngest` in
-    [`crates/mosaica-config/src/lib.rs`](https://github.com/jennis0/mosaica/blob/main/crates/mosaica-config/src/lib.rs),
-    with its default in
-    [`defaults.rs`](https://github.com/jennis0/mosaica/blob/main/crates/mosaica-config/src/defaults.rs).
+[The `mosaica.toml` reference](../reference/mosaica-toml.md) lists every key and its default.
 
 ## Create the credential
 
@@ -122,7 +117,7 @@ later.
 ```console
 mosaica$ mosaica build
 ...
-built /srv/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built /srv/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s), 0 row(s) refused
   view ireland: 29935 row(s)
 ```
 

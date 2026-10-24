@@ -47,7 +47,7 @@ view 'ireland': web_mercator, quantising against x [0.46875, 0.5], y [0.3125, 0.
         29935 point(s) placed, none on the frame's edge
         none of them outside web_mercator's ±85.0511287798066° domain, so nothing was clipped
 ...
-built bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2181449 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2181449 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s), 0 row(s) refused
   view ireland: 29935 row(s)
 ```
 

@@ -174,7 +174,7 @@ starts a one-off container with the same mounts and runs the command you give it
 ```console
 $ docker compose run --rm mosaica build
 ...
-built /var/lib/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built /var/lib/mosaica/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s), 0 row(s) refused
   view ireland: 29935 row(s)
 ```
 
@@ -204,7 +204,7 @@ server starts, since a large bundle can take minutes to open, and every 15 secon
 ```console
 $ docker compose ps
 NAME                       IMAGE     COMMAND                  SERVICE   CREATED         STATUS                   PORTS
-mosaica-docker-mosaica-1   mosaica   "/usr/local/bin/tess…"   mosaica   7 seconds ago   Up 7 seconds (healthy)   127.0.0.1:9161->8080/tcp, 127.0.0.1:9162->8081/tcp, 127.0.0.1:9163->8082/tcp
+mosaica-docker-mosaica-1   mosaica   "/usr/local/bin/mosa…"   mosaica   7 seconds ago   Up 7 seconds (healthy)   127.0.0.1:9161->8080/tcp, 127.0.0.1:9162->8081/tcp, 127.0.0.1:9163->8082/tcp
 ```
 
 From the host, ask for a token. Your application's backend will ask with an API key whose
@@ -271,7 +271,7 @@ another image. This uses Alpine Linux. Compose names the volume after the direct
 ```console
 $ cp ~/ireland/points.parquet config/
 $ docker compose run --rm mosaica build --out /var/lib/mosaica/bundle.next 2>&1 | tail -2
-built /var/lib/mosaica/bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2181449 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built /var/lib/mosaica/bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2181449 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s), 0 row(s) refused
   view ireland: 29935 row(s)
 $ docker compose stop
  Container mosaica-docker-mosaica-1 Stopping 

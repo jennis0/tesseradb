@@ -4,8 +4,10 @@ This tutorial is for someone who has never used Mosaica. We'll take the 29,935 p
 for Ireland and put them on a map in your browser, where you can search them by name and filter them
 by kind of place and by population.
 
-This tutorial should take about 30 minutes to complete. You'll need Rust (installed with rustup),
-`git`, `curl`, `unzip`, `openssl`, Python 3, Node.js with npm, and a web browser.
+This tutorial should take about 30 minutes to complete. You'll need Rust (installed with rustup), a
+C compiler and its build tools (`build-essential` on Debian and Ubuntu), `git`, `curl`, `unzip`,
+`openssl`, Python 3, Node.js 22.12 or later with npm, and a web browser. The C compiler builds the
+C libraries Mosaica links in, such as CRoaring, zstd and SQLite.
 
 ## What we'll do
 
@@ -23,7 +25,7 @@ Clone the repository, then build and install the `mosaica` binary with cargo.
 ```bash
 git clone https://github.com/jennis0/mosaica ~/mosaica
 cd ~/mosaica
-cargo install --path crates/mosaica-cli
+cargo install --locked --path crates/mosaica-cli
 ```
 
 ```
@@ -504,15 +506,15 @@ terminal for this.
 ```bash
 cd ~/mosaica/clients/ts
 npm ci
-npm run build -w @mosaicajs/components
+npm run bundle -w @mosaicajs/components
 ```
 
 ```
 ...
-dist/assets/decode.worker-DjqcC_7y.js    266.69 kB
-dist/mosaica-components.js             1,857.60 kB │ gzip: 444.08 kB
+dist/assets/decode.worker-RlGGQpYZ.js    191.89 kB
+dist/mosaica-components.js             1,699.17 kB │ gzip: 468.39 kB
 
-✓ built in 3.75s
+✓ built in 939ms
 ...
 ```
 
@@ -565,6 +567,9 @@ replace it with a single person, Everyone.
 cd ~/mosaica/clients/ts/examples/plain-html
 echo '{"everyone": {"label": "Everyone", "principal": "everyone"}}' > users.json
 ```
+
+`users.json` is a file in the clone, so git now shows it as changed. `git restore users.json` puts
+the original back when you have finished.
 
 Tell the page's server where Mosaica is listening and give it the key, then start it.
 

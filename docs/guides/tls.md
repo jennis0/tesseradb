@@ -47,7 +47,10 @@ nginx refuses a request body over 1 MiB unless told otherwise. A viewport reques
 tiles can be larger than that, and the viewer address itself accepts up to 2 MiB, so
 `client_max_body_size 2m` raises nginx's limit to match.
 
-Both nginx and Mosaica stop a response after 60 seconds, so leave nginx's timeout alone.
+nginx's `proxy_read_timeout`, 60 seconds by default, limits the time between two reads from the
+server, not the whole response. Mosaica ends a viewport response at `stream_deadline_ms`, 60 seconds
+by default, and a bulk-read response at `bulk_response_ms`, 30 seconds by default, with a cursor to
+resume from. No response runs longer than nginx waits between reads, so leave nginx's timeout alone.
 
 ## Forward every header
 
