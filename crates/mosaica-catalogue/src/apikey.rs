@@ -1,4 +1,4 @@
-//! The API key format: `tsk_<prefix>_<secret>`, with a 12-hex-digit prefix that is public and
+//! The API key format: `msk_<prefix>_<secret>`, with a 12-hex-digit prefix that is public and
 //! finds the record, and a 64-hex-digit secret of 256 random bits. The catalogue stores the
 //! SHA-256 of the secret. A secret of that entropy cannot be recovered from its hash by guessing,
 //! so a fast hash is enough.
@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 
 use crate::Error;
 
-const TAG: &str = "tsk";
+const TAG: &str = "msk";
 const PREFIX_BYTES: usize = 6;
 const SECRET_BYTES: usize = 32;
 
@@ -111,7 +111,7 @@ mod tests {
         assert_ne!(a.prefix, b.prefix);
         // b's secret under a's prefix.
         let (_, b_secret) = super::parse(&b.key).unwrap();
-        let crossed = format!("tsk_{}_{}", a.prefix, b_secret);
+        let crossed = format!("msk_{}_{}", a.prefix, b_secret);
         assert_eq!(cat.verify_api_key(&crossed), Err(AuthError::Refused));
     }
 
@@ -129,8 +129,8 @@ mod tests {
         assert_eq!(cat.verify_api_key(&wrong), Err(AuthError::Refused));
         for malformed in [
             "",
-            "tsk_",
-            "tsk__",
+            "msk_",
+            "msk__",
             &issued.key.to_uppercase(),
             &issued.key[4..],
         ] {

@@ -484,7 +484,7 @@ export type KeyCreate = {
 export type IssuedKey = {
   /** The key's public identity, which listing and revoking use. */
   prefix: string;
-  /** The whole key, `tsk_<prefix>_<secret>`. It is answered here once. */
+  /** The whole key, `msk_<prefix>_<secret>`. It is answered here once. */
   key: string;
 };
 

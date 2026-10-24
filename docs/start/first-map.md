@@ -556,7 +556,7 @@ cat page.key
 ```
 
 ```
-{"key":"tsk_92ce602a0958_c37c39511c94d1f5dbe414cdd9dde1232c602409e2db22d01401afc0b299d46a","prefix":"92ce602a0958"}
+{"key":"msk_92ce602a0958_c37c39511c94d1f5dbe414cdd9dde1232c602409e2db22d01401afc0b299d46a","prefix":"92ce602a0958"}
 ```
 
 The page's server signs you in as one of the people listed in `users.json`, each with the

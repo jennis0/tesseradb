@@ -90,8 +90,8 @@ def test_login_sends_exactly_one_credential_in_the_body_and_no_bearer(monkeypatc
     assert seen[0].full_url == "http://viewer.test/v1/login"
     assert seen[0].get_header("Authorization") is None
     assert json.loads(seen[0].data) == {"password": {"principal": "ann", "password": "secret"}}
-    login("http://viewer.test", api_key="tsk_a_b")
-    assert json.loads(seen[-1].data) == {"api_key": "tsk_a_b"}
+    login("http://viewer.test", api_key="msk_a_b")
+    assert json.loads(seen[-1].data) == {"api_key": "msk_a_b"}
     login("http://viewer.test", access_token="jwt")
     assert json.loads(seen[-1].data) == {"access_token": "jwt"}
     renewed = token.renew()

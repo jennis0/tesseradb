@@ -3236,7 +3236,7 @@ paths:
       operationId: createKey
       summary: "Issue an API key for a principal."
       description: |
-        The whole key, `tsk_<prefix>_<secret>`, is in this answer and nowhere else; the catalogue
+        The whole key, `msk_<prefix>_<secret>`, is in this answer and nowhere else; the catalogue
         keeps its SHA-256. With `permissions`, a credential made from the key holds at most those,
         and never more than its principal holds. With `expires_at`, the key and every session
         authorised with it end then.
@@ -3796,7 +3796,7 @@ components:
     authoriseAsKey:
       type: http
       scheme: bearer
-      description: "An API key, `tsk_<prefix>_<secret>`, whose principal holds `authorise-as`, or the operator credential, which authenticates the superuser. It mints a session for any principal, so it belongs to an integrator's backend and is never handed to a browser. A key that is not accepted is `401`; an accepted key without `authorise-as` is `403 forbidden`. Checked before the body is read."
+      description: "An API key, `msk_<prefix>_<secret>`, whose principal holds `authorise-as`, or the operator credential, which authenticates the superuser. It mints a session for any principal, so it belongs to an integrator's backend and is never handed to a browser. A key that is not accepted is `401`; an accepted key without `authorise-as` is `403 forbidden`. Checked before the body is read."
     controlCredential:
       type: http
       scheme: bearer
@@ -4148,7 +4148,7 @@ components:
               type: string
         api_key:
           type: string
-          description: "`tsk_<prefix>_<secret>`, as `POST /control/principals/{name}/keys` issued it."
+          description: "`msk_<prefix>_<secret>`, as `POST /control/principals/{name}/keys` issued it."
         access_token:
           type: string
           description: An OIDC access token, as a declared provider issued it.
@@ -4272,7 +4272,7 @@ components:
           description: The key's public identity, which listing and revoking use.
         key:
           type: string
-          description: "The whole key, `tsk_<prefix>_<secret>`. Shown here once."
+          description: "The whole key, `msk_<prefix>_<secret>`. Shown here once."
 
     KeyRecord:
       type: object

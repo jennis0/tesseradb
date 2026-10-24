@@ -39,7 +39,7 @@ export type LoginCredential =
       password: string;
     }
   | {
-      /** An API key, `tsk_<prefix>_<secret>`. */
+      /** An API key, `msk_<prefix>_<secret>`. */
       apiKey: string;
     }
   | {

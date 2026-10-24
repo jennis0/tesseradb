@@ -694,7 +694,7 @@ async fn authorise_and_revoke_match_the_description() {
     let principal = principal_for(&f.server, &["0"]);
 
     // A key that is not accepted.
-    let resp = authorise("tsk_nope_nope", json!({ "principal": principal }))
+    let resp = authorise("msk_nope_nope", json!({ "principal": principal }))
         .await
         .unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
@@ -877,7 +877,7 @@ async fn login_and_logout_match_the_description() {
     for body in [
         password("bea", "the wrong password entirely"),
         password("nobody", "correct horse battery staple"),
-        json!({ "api_key": "tsk_nope_nope" }),
+        json!({ "api_key": "msk_nope_nope" }),
         json!({ "access_token": "not.a.token" }),
     ] {
         let resp = login(body).await.unwrap();
@@ -2545,7 +2545,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         let url = f.server.session_url(path);
         let kinds = std::iter::once(Malformed::No).chain(malformed.iter().map(|(kind, _)| *kind));
         for kind in kinds {
-            for credential in [None, Some("not-a-key"), Some("tsk_nope_nope")] {
+            for credential in [None, Some("not-a-key"), Some("msk_nope_nope")] {
                 let mut req = f.server.client.post(url.clone());
                 if let Some(credential) = credential {
                     req = req.bearer_auth(credential);

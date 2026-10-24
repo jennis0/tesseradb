@@ -1,6 +1,6 @@
 //! Credentials on the three listeners, and minting sessions from them.
 //!
-//! A bearer credential is the operator credential, an API key (`tsk_…`) or an OIDC access token.
+//! A bearer credential is the operator credential, an API key (`msk_…`) or an OIDC access token.
 //! The operator credential authenticates the superuser, which holds every permission. An API key
 //! authenticates its local principal, with the permissions the catalogue resolves for that key.
 //! An access token authenticates an OIDC identity, whose terms and permissions the catalogue
@@ -160,7 +160,7 @@ pub async fn authenticate(
     if accepts.operator && same_secret(token, &state.operator_credential) {
         return Ok(Caller::superuser());
     }
-    if token.starts_with("tsk_") {
+    if token.starts_with("msk_") {
         return if accepts.api_key {
             api_key(&state.catalogue, token)
         } else {
