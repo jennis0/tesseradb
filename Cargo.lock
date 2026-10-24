@@ -1976,6 +1976,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "mosaica"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "mosaica-analyse",
+ "mosaica-build",
+ "mosaica-config",
+ "mosaica-corpus",
+ "mosaica-docgen",
+ "mosaica-server",
+ "mosaica-spatial",
+ "mosaica-store",
+ "mosaica-types",
+ "mosaica-wire",
+ "parquet",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mosaica-access"
 version = "0.1.0"
 dependencies = [
@@ -2102,31 +2127,6 @@ dependencies = [
  "subtle",
  "tempfile",
  "url",
-]
-
-[[package]]
-name = "mosaica-cli"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "clap",
- "mosaica-analyse",
- "mosaica-build",
- "mosaica-config",
- "mosaica-corpus",
- "mosaica-docgen",
- "mosaica-server",
- "mosaica-spatial",
- "mosaica-store",
- "mosaica-types",
- "mosaica-wire",
- "parquet",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "toml 0.8.23",
- "tracing-subscriber",
 ]
 
 [[package]]

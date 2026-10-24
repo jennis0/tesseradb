@@ -12,7 +12,7 @@ individual findings. This file is operational.
 ## 0. Prerequisites
 
 ```bash
-cargo build --release -p mosaica-cli     # the build/serve binary
+cargo build --release -p mosaica     # the build/serve binary
 cargo build --release -p mosaica-bench   # the harness (bench-timing is ON by default here)
 ```
 

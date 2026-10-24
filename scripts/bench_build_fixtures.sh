@@ -148,7 +148,7 @@ session = "127.0.0.1:49303"
 control = "127.0.0.1:45721"
 TOML
 
-[[ -x "$MOSAICA" ]] || { echo "missing $MOSAICA — run: cargo build --release -p mosaica-cli" >&2; exit 1; }
+[[ -x "$MOSAICA" ]] || { echo "missing $MOSAICA — run: cargo build --release -p mosaica" >&2; exit 1; }
 [[ -f "$GEOMETRY" ]] || { echo "missing $GEOMETRY" >&2; exit 1; }
 
 built=0; skipped=0; failed=0; stale=0

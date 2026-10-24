@@ -202,7 +202,7 @@ fi
 # 2. FAULT INJECTION STAYS OUT OF THE DEFAULT-FEATURES RELEASE BUILD (decision 0071). The claim
 #    this rule holds NARROWED deliberately: it used to be "no normal dependency edge anywhere
 #    enables fault-injection", and that stopped being true when the feature became declarable on
-#    mosaica-server and mosaica-cli -- a `--features fault-injection` build enables it across
+#    mosaica-server and mosaica -- a `--features fault-injection` build enables it across
 #    normal edges on purpose, and that faults build goes to its own target directory, never
 #    target/release/mosaica. What every deployment gets is the DEFAULT-FEATURES build, so the rule
 #    now asserts exactly that: the default resolution -- the one `cargo build --workspace
@@ -214,7 +214,7 @@ fi
 #    `mosaica-lifecycle/Cargo.toml` and `mosaica-engine/Cargo.toml`, the only two manifests that
 #    could then acquire a normal dependency enabling the feature. Demonstrated, not inferred:
 #    setting mosaica-engine's `mosaica-lifecycle` dependency to `features = ["fault-injection"]`
-#    left the rule green while `cargo tree -e normal -p mosaica-cli` showed the switchboard reaching
+#    left the rule green while `cargo tree -e normal -p mosaica` showed the switchboard reaching
 #    the release binary. The resolved feature set is the only thing that can answer this question;
 #    `-e normal` is what excludes the self dev-dependency edges the test gate is built on.
 #
@@ -227,7 +227,7 @@ fi
 if cargo tree -e normal --workspace -f "{p} {f}" | grep -n 'fault-injection'; then
   echo "FAIL: 'fault-injection' is in the DEFAULT-FEATURES resolution on a normal edge (lines"
   echo "      above), so a plain cargo build ships the fault switchboard. It may reach a binary"
-  echo "      only through the declared, default-off feature on mosaica-server/mosaica-cli"
+  echo "      only through the declared, default-off feature on mosaica-server/mosaica"
   echo "      (decision 0071) or the self dev-dependencies in [dev-dependencies]."
   fail=1
 fi
@@ -238,12 +238,12 @@ fi
 #     test, and the whole gate -- while the "faults build" the correctness suite's driver boots
 #     carries no switchboard, no seam sites and no arming surface, and every crash stage
 #     silently tests nothing. Same instrument as rule 2: the resolved feature graph, this time
-#     under the one flag the faults build is defined by. Demonstrated red by setting mosaica-cli's
+#     under the one flag the faults build is defined by. Demonstrated red by setting mosaica's
 #     `fault-injection = []` (the forward to mosaica-server dropped), and reverted green
 #     (2026-08-15).
-if ! cargo tree -e normal -p mosaica-cli --features fault-injection -f "{p} {f}" \
+if ! cargo tree -e normal -p mosaica --features fault-injection -f "{p} {f}" \
      | grep 'mosaica-lifecycle' | grep -q 'fault-injection'; then
-  echo "FAIL: a mosaica-cli build with --features fault-injection does not resolve"
+  echo "FAIL: a mosaica build with --features fault-injection does not resolve"
   echo "      mosaica-lifecycle with the feature, so the faults build (decision 0071) carries no"
   echo "      switchboard and the correctness suite's crash stages test nothing. The feature"
   echo "      chain cli -> server -> engine -> lifecycle has been unwired."

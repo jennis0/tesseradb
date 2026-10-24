@@ -1,6 +1,6 @@
 """The platform wheel's build hook: cargo builds both artifacts and they are copied into the package.
 
-Two artifacts from two crates. `mosaica-cli` produces the `mosaica` executable; `mosaica-python`
+Two artifacts from two crates. `mosaica` produces the `mosaica` executable; `mosaica-python`
 produces the `_mosaica` extension module, whose cargo output is named `lib_mosaica.so` (`.dylib`,
 `.dll`) and must be renamed to the name an interpreter will import. `crates/mosaica-python/check.sh`
 does the same rename for its own tests.
@@ -78,7 +78,7 @@ def build(repo: Path, package: Path, target: str | None, *, run=subprocess.run, 
             "Rust toolchain to build this wheel, or install the published one."
         )
     subcommand = os.environ.get("MOSAICA_NATIVE_CARGO") or "build"
-    command = ["cargo", subcommand, "--release", "-p", "mosaica-cli", "-p", "mosaica-python"]
+    command = ["cargo", subcommand, "--release", "-p", "mosaica", "-p", "mosaica-python"]
     if target:
         command += ["--target", target]
     log(f"mosaica-native: {' '.join(command)} in {repo}")

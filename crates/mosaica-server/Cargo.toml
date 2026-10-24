@@ -14,7 +14,7 @@ bench-timing = ["mosaica-engine/bench-timing"]
 # The correctness suite's faults build (decision 0071): the write executor's fault switchboard,
 # its three publication-seam pause sites, and the bearer-gated /control/faults/* arming surface.
 # OFF by default, and the default build is what every deployment gets — a binary built with this
-# goes to ITS OWN target directory (see mosaica-cli's feature comment for the command), never
+# goes to ITS OWN target directory (see mosaica's feature comment for the command), never
 # target/release/mosaica, which the oracle harness owns. `scripts/check-layers.sh` rule 2 asserts
 # no default-features release build reaches the switchboard, from the resolved feature graph.
 fault-injection = ["mosaica-engine/fault-injection", "mosaica-lifecycle/fault-injection"]

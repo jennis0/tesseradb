@@ -220,7 +220,7 @@ jobs:
       # never calls into the engine directly. So the release binary is a prerequisite, not an
       # optimisation, and building it as its own step keeps a compile failure legible as a compile
       # failure rather than as a suite error.
-      - run: cargo build --release -p mosaica-cli
+      - run: cargo build --release -p mosaica
       # The dependency list is **read from `reference/pyproject.toml`**, not restated here. That
       # file argues the point at its own site: an undeclared dependency is a suite that runs on the
       # machine it was written on, and it has already been bitten twice by one. A second copy of

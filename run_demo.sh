@@ -289,7 +289,7 @@ if [[ -n "${MOSAICA_BIN:-}" ]]; then
   say "using $BIN"
 else
   say "building the release binary"
-  cargo build --release -p mosaica-cli
+  cargo build --release -p mosaica
   BIN="./target/release/mosaica"
 fi
 

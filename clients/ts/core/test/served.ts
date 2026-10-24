@@ -140,7 +140,7 @@ export async function start(
 ): Promise<Served | string> {
   let corpus = options.corpus;
   const found = findBinary();
-  if (!found) return 'no mosaica binary: set MOSAICA_BIN, put mosaica on PATH, or run cargo build --release -p mosaica-cli';
+  if (!found) return 'no mosaica binary: set MOSAICA_BIN, put mosaica on PATH, or run cargo build --release -p mosaica';
   const binary = found.path;
   console.log(`live test: serving with ${binary}, from ${found.from}`);
   if (!corpus) {

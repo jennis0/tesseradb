@@ -11,7 +11,7 @@ publish = false
 #
 # `bench-timing` is enabled by default HERE and only here. That is safe for this binary and
 # unsafe for the workspace: cargo's resolver-2 unifies features across a `--workspace` build, so
-# `mosaica-cli` compiled in the same invocation also gets it. The second gate — `[serve]
+# `mosaica` compiled in the same invocation also gets it. The second gate — `[serve]
 # stage_timing`, default false — is what makes that harmless, and `scripts/check-no-stage-header.sh`
 # asserts the shipped binary stays quiet.
 

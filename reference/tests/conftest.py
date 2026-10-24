@@ -2,7 +2,7 @@
 HTTP-only handle to it.
 
 This is the "server spawned via a fixture" the task brief calls for: the harness runs the actual
-`mosaica` binary (built via `cargo build --release -p mosaica-cli`), not an in-process shortcut,
+`mosaica` binary (built via `cargo build --release -p mosaica`), not an in-process shortcut,
 and talks to it only over HTTP/the filesystem — never by calling into `mosaica-engine` directly
 (Python is a consumer, never a component).
 

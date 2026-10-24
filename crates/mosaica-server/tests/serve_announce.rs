@@ -7,7 +7,7 @@
 //!
 //! The process writes the line to stdout; `serve_announcing` is the same code with the stream
 //! supplied, which is the seam a test can read. That `mosaica serve` passes stdout, and its
-//! diagnostics stderr, is in `mosaica-cli`.
+//! diagnostics stderr, is in `mosaica`.
 
 mod common;
 

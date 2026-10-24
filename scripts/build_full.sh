@@ -32,7 +32,7 @@ fi
 BIN="$ROOT/target/release/mosaica"
 if [[ ! -x "$BIN" ]]; then
   echo "Building release binary..."
-  (cd "$ROOT" && cargo build --release -p mosaica-cli)
+  (cd "$ROOT" && cargo build --release -p mosaica)
 fi
 
 # The declaration this build compiles: one view over the scaled geometry, its points' labels in the

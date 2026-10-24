@@ -96,13 +96,13 @@ def dig(node, *path, default=None):
 
 
 def cargo_release_binary() -> Path:
-    """`cargo build --release -p mosaica-cli`, and the binary it wrote."""
+    """`cargo build --release -p mosaica`, and the binary it wrote."""
     env = dict(os.environ, CARGO_PROFILE_RELEASE_DEBUG="0")
     built = run(
-        ["cargo", "build", "--release", "-p", "mosaica-cli"], CHECKOUT, env=env
+        ["cargo", "build", "--release", "-p", "mosaica"], CHECKOUT, env=env
     )
     if built["returncode"] != 0:
-        raise SystemExit(f"cargo build --release -p mosaica-cli failed:\n{built['stderr_tail']}")
+        raise SystemExit(f"cargo build --release -p mosaica failed:\n{built['stderr_tail']}")
     return CHECKOUT / "target" / "release" / "mosaica"
 
 

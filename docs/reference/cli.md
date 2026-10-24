@@ -1,4 +1,4 @@
-<!-- Generated from crates/mosaica-cli/src/main.rs. Edit the help text there, then run: MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica-cli cli_reference -->
+<!-- Generated from crates/mosaica-cli/src/main.rs. Edit the help text there, then run: MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica cli_reference -->
 
 # CLI
 

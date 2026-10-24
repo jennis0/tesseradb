@@ -452,7 +452,7 @@ pub struct BuildArgs {
     ///
     /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
     /// config existed declared no scalar, and an empty schema must go on producing exactly the
-    /// bytes it did — `mosaica-cli`'s identity test asserts a byte-identical `columns.arrow`
+    /// bytes it did — `mosaica`'s identity test asserts a byte-identical `columns.arrow`
     /// across rebuilds carrying one key, and a schema that widened the fixed table by default
     /// would break it for reasons unrelated to identity.
     pub schema: crate::config::Schema,

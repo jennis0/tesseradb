@@ -21,7 +21,7 @@ COPY crates crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked -p mosaica-cli \
+    cargo build --release --locked -p mosaica \
     && install -D target/release/mosaica /out/usr/local/bin/mosaica \
     && install -d -o 65532 -g 65532 /out/var/lib/mosaica /out/etc/mosaica
 

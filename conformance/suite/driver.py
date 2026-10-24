@@ -310,7 +310,7 @@ def ensure_faults_cli_built() -> None:
             "build",
             "--release",
             "-p",
-            "mosaica-cli",
+            "mosaica",
             "--features",
             "fault-injection",
             "--target-dir",

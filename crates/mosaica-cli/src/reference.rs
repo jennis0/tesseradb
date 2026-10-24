@@ -5,7 +5,7 @@
 //! command or its help text, run:
 //!
 //! ```text
-//! MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica-cli cli_reference
+//! MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica cli_reference
 //! ```
 
 use std::fmt::Write;
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use clap::{Arg, ArgAction, Command, CommandFactory};
 use mosaica_docgen::{cell, escape_angles, outside_code};
 
-const REGENERATE: &str = "MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica-cli cli_reference";
+const REGENERATE: &str = "MOSAICA_WRITE_CLI_REFERENCE=1 cargo test -p mosaica cli_reference";
 
 const INTRO: &str = "\
 `mosaica <subcommand> --help` prints the text on this page. `mosaica --version` prints the commit \

@@ -253,7 +253,7 @@ def ensure_cli_built() -> None:
     and never to `CLI_BIN`.
     """
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "mosaica-cli"],
+        ["cargo", "build", "--release", "-p", "mosaica"],
         cwd=REPO_ROOT,
         check=True,
     )

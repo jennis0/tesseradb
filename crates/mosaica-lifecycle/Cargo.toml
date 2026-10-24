@@ -10,7 +10,7 @@ default = []
 # beside the executor rather than with the conformance suite's own pause points.
 #
 # Two enablement routes, both deliberate (decision 0071): the self dev-dependency below (tests),
-# and the declared, default-off `fault-injection` feature on mosaica-server/mosaica-cli (the
+# and the declared, default-off `fault-injection` feature on mosaica-server/mosaica (the
 # correctness suite's faults build, to its own target directory). `cargo build` does not build
 # dev-dependencies and the server/CLI feature is off by default, so no default-features build
 # carries this code. Note honestly what that does NOT buy: `cargo test --workspace` still unifies

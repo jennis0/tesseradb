@@ -16,13 +16,13 @@
 //! - **a self dev-dependency** (`mosaica-lifecycle = { path = ".", features = ["fault-injection"]
 //!   }` in this crate's own `[dev-dependencies]`, and the same shape in `mosaica-engine`'s and
 //!   `mosaica-server`'s) — how every test in the tree gets it; and
-//! - **a declared, default-off feature on `mosaica-server` and `mosaica-cli`** — how the
+//! - **a declared, default-off feature on `mosaica-server` and `mosaica`** — how the
 //!   correctness suite's driver gets a *served binary* that carries the seam pause sites. That
 //!   binary is built to **its own target directory**, never `target/release/mosaica`, which the
 //!   oracle harness builds with default features always:
 //!
 //!   ```text
-//!   cargo build --release -p mosaica-cli --features fault-injection --target-dir target/faults
+//!   cargo build --release -p mosaica --features fault-injection --target-dir target/faults
 //!   ```
 //!
 //! **What the gate buys: no default-features build carries this code.** `cargo build` does not
@@ -46,7 +46,7 @@
 //! --workspace`. So nothing may let a *default* build's behaviour depend on this feature —
 //! `crates/mosaica-server/tests/http.rs` already demonstrates the footgun with a
 //! `bench-timing` block that silently covers less when the feature is absent. The crates that
-//! *declare* the feature (`mosaica-server`, `mosaica-cli`) depend on it only to add the arming
+//! *declare* the feature (`mosaica-server`, `mosaica`) depend on it only to add the arming
 //! surface and the switchboard's construction; every default-build code path is identical with
 //! and without it.
 //!

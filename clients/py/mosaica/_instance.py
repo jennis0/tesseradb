@@ -320,7 +320,7 @@ def find_binary() -> tuple[str, str]:
     raise Refusal(
         "no `mosaica` binary at MOSAICA_BIN, on PATH, in the mosaica-native wheel, or in a "
         "checkout's target directory. Install it with `pip install mosaica-native`, or build "
-        "it with `cargo build --release -p mosaica-cli`"
+        "it with `cargo build --release -p mosaica`"
     )
 
 
