@@ -1,6 +1,6 @@
 import '@mosaicajs/components';
 import type {MosaicaExplorer, MapProbe} from '@mosaicajs/components';
-import {DEFAULT_BUDGET, MosaicaClient, createStore, dataToWorldXY, type Store as DataStore} from '@mosaicajs/client';
+import {DEFAULT_BUDGET, MosaicaClient, colourLayers, createStore, dataToWorldXY, type Store as DataStore} from '@mosaicajs/client';
 import {refusalOf} from '@mosaicajs/client/internal';
 import type {ViewInfo} from '@mosaicajs/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
@@ -616,7 +616,10 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
         s.failures = [...s.failures.slice(-19), {code: 'unknown-view', detail: `this bundle declares no view '${requestedView}'`, at: Date.now()}];
       }
       s.mTarget = meta.selection.thetaTargetMarks;
-      s.artifactLayer = meta.layers[0]?.name ?? null;
+      // A layer whose clusters carry names opens first, as labels on the map read better than none.
+      const colourable = colourLayers(meta.layers);
+      const named = colourable.find((l) => meta.layers.some((d) => d.depsOn.includes(l.name)));
+      s.artifactLayer = (named ?? colourable[0])?.name ?? null;
       // Colour by cluster where a layer exists, else by a column.
       s.colourBy = s.artifactLayer
         ? `cluster:${s.artifactLayer}`

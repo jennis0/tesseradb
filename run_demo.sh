@@ -50,8 +50,8 @@
 #
 # `arxiv` and `places` are the two example datasets, the only scales whose files are in git
 # (`examples/data/`), so they are the default and the only ones a fresh clone can build. `arxiv` is
-# 50,000 papers cut from `notebook-2m4`, with its layers, a second layout as a second view, and no
-# abstracts. `places` is 150,000 GeoNames features of every class, every populated place of 15,000
+# 50,000 papers cut from `notebook-2m4`, with its Toponymy clusters and their names, arXiv's own
+# classification, a second layout as a second view, and no abstracts. `places` is 150,000 GeoNames features of every class, every populated place of 15,000
 # people or more and a sample of the rest, on a `web_mercator` map, each visible to a principal
 # holding its country. Each `NOTICE.md` says where the data came from and how to make it again.
 #
@@ -745,7 +745,7 @@ fresh="$DEMO/presets/datasets-this-run.json"
     first=0
     label="$scale"
     case "$scale" in
-      arxiv) label="arXiv $(items_of arxiv | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · example: toponymy, k-means, HDBSCAN, taxonomy" ;;
+      arxiv) label="arXiv $(items_of arxiv | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · example: Toponymy topics, arXiv taxonomy" ;;
       places) label="GeoNames $(items_of places | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') features · example: countries and regions" ;;
       notebook) label="arXiv $(items_of notebook | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook corpus: HDBSCAN tree, topics, taxonomy" ;;
       notebook-2m4) label="arXiv $(items_of notebook-2m4 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook pipeline, whole corpus: HDBSCAN tree, toponymy, topics, taxonomy" ;;

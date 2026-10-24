@@ -12,10 +12,6 @@
   },
   "rows": {
     "archive.parquet": 38,
-    "clusters-hdbscan-members.parquet": 263847,
-    "clusters-hdbscan.parquet": 197,
-    "clusters-kmeans-members.parquet": 50000,
-    "clusters-kmeans.parquet": 64,
     "clusters-toponymy-members.parquet": 124108,
     "clusters-toponymy.parquet": 797,
     "points-umap200.parquet": 50000,
@@ -23,10 +19,6 @@
     "primary_category.parquet": 171,
     "taxonomy-arxiv-members.parquet": 100000,
     "taxonomy-arxiv.parquet": 201,
-    "topics-hdbscan-members.parquet": 86058,
-    "topics-hdbscan.parquet": 195,
-    "topics-kmeans-members.parquet": 29824,
-    "topics-kmeans.parquet": 64,
     "topics-toponymy-members.parquet": 11955,
     "topics-toponymy.parquet": 797
   }

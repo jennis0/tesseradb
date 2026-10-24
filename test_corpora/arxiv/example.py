@@ -1,17 +1,11 @@
 """The arXiv example dataset in `examples/data/arxiv/`: 50,000 papers cut from the notebook corpus.
 
-It is small enough to keep in git and is the shape `data/notebook-2m4-live/` has, so
-`schema.toml` beside it declares the same layers. Four things differ from a plain sample.
+It is small enough to keep in git. It keeps two of the source's clusterings: Toponymy's four
+levels with the names a language model gave them, and arXiv's own classification of archives over
+subject classes. Three things differ from a plain sample.
 
 **No abstracts.** arXiv's metadata is CC0, but an abstract may be its authors' copyright, so the
 points file keeps the title and drops the abstract.
-
-**The k-means and HDBSCAN labels are made again, over the sample.** The source's labels were made
-from titles over the whole corpus, and each recorded 200 papers drawn from the whole corpus, few of
-which are in the sample. Here `prepare.py`'s `Labeller` ranks words over the titles of every
-sampled paper in each cluster. The label's member file then holds a seeded draw of up to 200 of
-the cluster's sampled papers, and a third of those for the fallback text: those are the papers a
-reader must be able to see before the label is served.
 
 **Every Toponymy exemplar is in the sample.** A Toponymy name was written by a language model from
 six exemplar papers' titles, and a reader is shown it only where they can see all six. The
@@ -48,20 +42,17 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .prepare import FALLBACK, LABEL_SAMPLE, Labeller
 from .sources import DATA, load_embeddings, rows_for_ids
 
 #: The second layout's projection, chosen to differ from the source layout's 15 and 0.1.
-SECOND_LAYOUT = dict(pca=64, n_neighbors=200, min_dist=0.9)
+SECOND_LAYOUT = {"pca": 64, "n_neighbors": 200, "min_dist": 0.9}
 
 POINT_COLUMNS = [
     "entity_id", "x", "y", "categories", "arxiv_id", "archive", "primary_category",
     "submitted_at", "title",
 ]
 #: The clusterings kept, by file stem. Their artifact files carry no text, so they are filtered.
-CLUSTERINGS = ["clusters-kmeans", "clusters-hdbscan", "clusters-toponymy", "taxonomy-arxiv"]
-#: The labels made again from titles, and the clustering each names.
-RELABELLED = {"topics-kmeans": "clusters-kmeans", "topics-hdbscan": "clusters-hdbscan"}
+CLUSTERINGS = ["clusters-toponymy", "taxonomy-arxiv"]
 #: The label kept as written, every one of whose generating papers is in the sample.
 KEPT_LABELS = {"topics-toponymy": "clusters-toponymy"}
 VOCABULARIES = ["archive.parquet", "primary_category.parquet"]
@@ -107,45 +98,6 @@ def held_artifacts(source: Path, stem: str, members: pa.Table) -> pa.Table:
     return kept
 
 
-def relabel(source: Path, stem: str, clusters: pa.Table, members: pa.Table,
-            labeller: Labeller, row_of: dict, rng) -> tuple[pa.Table, pa.Table]:
-    """A label per cluster the source labelled, its words ranked over the titles of every sampled
-    paper in the cluster.
-
-    The contents are ranked as `prepare.py` ranks them: the description first and the fallback
-    second. The member rows are a seeded draw of up to `LABEL_SAMPLE` of the cluster's papers for
-    the description and a third of those for the fallback, and gate who may read each.
-    """
-    old = pq.read_table(source / f"{stem}.parquet")
-    old = old.filter(pc.is_in(old["attached_key"], value_set=clusters["key"]))
-    by_key = members.group_by("key").aggregate([("entity", "list")])
-    entities_of = dict(zip(by_key["key"].to_pylist(), by_key["entity_list"].to_pylist()))
-    attached = old["attached_key"].to_pylist()
-    groups = {key: [row_of[e] for e in entities_of[key]] for key in attached}
-    text = labeller.label(groups)
-
-    artifacts, rows = [], []
-    for record in old.to_pylist():
-        cluster = record["attached_key"]
-        described = text.get(cluster)
-        contents = [[described], [FALLBACK]] if described else [[FALLBACK]]
-        # Sorted, because a grouped list's order varies from run to run and the draw follows it.
-        pool = np.sort(np.asarray(entities_of[cluster], dtype=np.uint64))
-        pick = pool if len(pool) <= LABEL_SAMPLE else rng.choice(pool, LABEL_SAMPLE, replace=False)
-        # The label's own membership is the draw, and each rank's set is a third of the one
-        # above it, so the fallback is shown to a narrower reader than the description.
-        sets = [(None, pick)] + [(rank, pick[: max(1, len(pick) // 3**rank)])
-                                 for rank in range(len(contents))]
-        for rank, chosen in sets:
-            rows += [{"level": record["level"], "key": record["key"], "rank": rank,
-                      "entity": int(e)} for e in chosen]
-        artifacts.append({**record, "contents": contents})
-    described = sum(1 for r in artifacts if len(r["contents"]) == 2)
-    print(f"  {stem}: {len(artifacts)} labels made from titles, {described} with a description")
-    return (pa.Table.from_pylist(artifacts, schema=old.schema),
-            pa.Table.from_pylist(rows, schema=pq.read_schema(source / f"{stem}-members.parquet")))
-
-
 def second_layout(points: pa.Table, data: Path, seed: int) -> pa.Table:
     """The sampled papers laid out again from their embeddings, with their categories."""
     from sklearn.decomposition import PCA
@@ -172,7 +124,6 @@ def main() -> None:
                     help="the directory holding corpus.parquet and arxiv_papers_embeds.parquet")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(args.seed)
 
     keep, exemplars = sampled_ids(args.source, args.papers, args.seed)
     print(f"{len(keep):,} papers: {exemplars:,} Toponymy exemplars and "
@@ -185,21 +136,12 @@ def main() -> None:
         points = points.set_column(points.schema.get_field_index(axis), axis,
                                    pc.cast(points[axis], pa.float32()))
     write(points, args.out / "points.parquet")
-    row_of = {e: i for i, e in enumerate(points["entity_id"].to_pylist())}
 
     clusters = {}
     for stem in CLUSTERINGS:
         members = members_of(args.source, stem, keep)
         clusters[stem] = held_artifacts(args.source, stem, members)
         write(clusters[stem], args.out / f"{stem}.parquet")
-        write(members, args.out / f"{stem}-members.parquet")
-        clusters[stem + "-members"] = members
-
-    labeller = Labeller(points["title"].to_pylist())
-    for stem, clustering in RELABELLED.items():
-        artifacts, members = relabel(args.source, stem, clusters[clustering],
-                                     clusters[clustering + "-members"], labeller, row_of, rng)
-        write(artifacts, args.out / f"{stem}.parquet")
         write(members, args.out / f"{stem}-members.parquet")
 
     for stem, clustering in KEPT_LABELS.items():

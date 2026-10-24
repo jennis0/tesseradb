@@ -1,4 +1,5 @@
-# The arXiv example dataset: 50,000 papers, two 2D layouts, four clusterings and their labels.
+# The arXiv example dataset: 50,000 papers, two 2D layouts, Toponymy's named clusters and arXiv's
+# own classification.
 # `test_corpora/arxiv/example.py` writes the Parquet files beside this; NOTICE.md says where they
 # came from. The declaration is the notebook corpus's, without the abstracts and with the floors
 # scaled to a corpus a fiftieth of the size.
@@ -13,14 +14,6 @@ points                = "points.parquet"
 points_wide           = "points-umap200.parquet"
 archive               = "archive.parquet"
 primary_category      = "primary_category.parquet"
-kmeans                = "clusters-kmeans.parquet"
-kmeans_members        = "clusters-kmeans-members.parquet"
-kmeans_topics         = "topics-kmeans.parquet"
-kmeans_topic_members  = "topics-kmeans-members.parquet"
-hdbscan               = "clusters-hdbscan.parquet"
-hdbscan_members       = "clusters-hdbscan-members.parquet"
-hdbscan_topics        = "topics-hdbscan.parquet"
-hdbscan_topic_members = "topics-hdbscan-members.parquet"
 taxonomy              = "taxonomy-arxiv.parquet"
 taxonomy_members      = "taxonomy-arxiv-members.parquet"
 toponymy              = "clusters-toponymy.parquet"
@@ -118,92 +111,10 @@ title = "arXiv ID"
 type  = "keyword"
 index = true
 
-# Four clusterings and a label set over each of the three that have one. Every layer states its two
+# Two clusterings, and a set of names over one of them. Every layer states its two
 # disclosure controls, because neither has a default: `visibility` is the label a viewer must hold
 # to know the layer exists at all, and `require_member_visibility` is how much of a cluster a
 # viewer must already see before that cluster is served to them.
-
-[[layer]]
-name       = "clusters/kmeans"
-title      = "k-means clusters"
-source     = "kmeans"
-views      = ["topics", "topics-wide"]
-membership = "enumerated"
-hierarchy  = { kind = "flat", prune_children = false }
-
-visibility                = "public"
-artifact_visibility       = { default = "inherited" }
-# The absolute form: a fixed floor, whatever the cluster's size.
-require_member_visibility = { count = 5 }
-# `hull` beside the box: the explorer draws a cluster as its served hull, and every computed
-# property is recomputed per viewer from `membership ∩ M_auth`, so a hull discloses no more than
-# the box did.
-content                   = { computed = ["centroid", "box", "hull"] }
-
-  # Membership in its own source: one row per (artifact, entity).
-  [layer.members]
-  source = "kmeans_members"
-  fields = { id = "entity" }
-
-  # The label set, written where it is used. It expands to a flat layer of its own on the same
-  # views, carrying one supplied `text` content. A viewer reaches a label only where they reach
-  # the cluster it names.
-  [layer.labels]
-  name                      = "topics/kmeans"
-  title                     = "k-means topics"
-  source                    = "kmeans_topics"
-  type                      = "text"
-  membership                = "enumerated"
-  artifact_visibility       = { default = "inherited" }
-  # The layer grain: nothing beyond the cluster's own gate decides whether a label exists.
-  require_member_visibility = "none"
-
-    # The content grain: a label's text is read only by a viewer who can see every one of its
-    # member papers.
-    [layer.labels.content]
-    require_member_visibility = "all"
-
-    # One row per (artifact, rank, entity). The words were ranked over the titles of every paper
-    # in the cluster; the members are a seeded draw of up to 200 of them for the description and a
-    # third of those for the fallback.
-    [layer.labels.members]
-    source = "kmeans_topic_members"
-    fields = { id = "entity" }
-
-[[layer]]
-name       = "clusters/hdbscan"
-title      = "HDBSCAN clusters"
-source     = "hdbscan"
-views      = ["topics", "topics-wide"]
-membership = "enumerated"
-hierarchy  = { kind = "nested", prune_children = false }
-
-visibility                = "public"
-artifact_visibility       = { default = "inherited" }
-# The proportional form: a share of the cluster's own size, so the bar scales. Expect holes in the
-# lineage: a share does not shrink downward, so a small child can clear what its parent cannot.
-require_member_visibility = { fraction = 0.05 }
-content                   = { computed = ["centroid", "box", "hull"] }
-
-  [layer.members]
-  source = "hdbscan_members"
-  fields = { id = "entity" }
-
-  [layer.labels]
-  name                      = "topics/hdbscan"
-  title                     = "HDBSCAN topics"
-  source                    = "hdbscan_topics"
-  type                      = "text"
-  membership                = "enumerated"
-  artifact_visibility       = { default = "inherited" }
-  require_member_visibility = "none"
-
-    [layer.labels.content]
-    require_member_visibility = "all"
-
-    [layer.labels.members]
-    source = "hdbscan_topic_members"
-    fields = { id = "entity" }
 
 # The taxonomy: arXiv's own classification, as levels with containment edges between them.
 #
@@ -237,8 +148,8 @@ content                   = { computed = ["centroid", "box"] }
   fields = { id = "entity" }
 
 # Toponymy's rungs: a tiered layer over a density clustering. Levels are the rungs, coarsest
-# first; the edges are the library's own tree between them; and the names on every rung came
-# from the language model, attached the way the k-means and HDBSCAN labels are.
+# first; the edges are the library's own tree between them; and every cluster on every rung has a
+# name the language model gave it.
 [[layer]]
 name       = "clusters/toponymy"
 title      = "Toponymy clusters"
@@ -249,7 +160,10 @@ hierarchy  = { kind = "tiered", prune_children = false }
 
 visibility                = "public"
 artifact_visibility       = { default = "inherited" }
+# A fixed floor, whatever the cluster's size.
 require_member_visibility = { count = 5 }
+# Every computed property is recomputed per viewer from the members that viewer can see, so a hull
+# discloses no more than a box.
 content                   = { computed = ["centroid", "box", "hull"] }
 
   [[layer.levels]]
@@ -272,6 +186,9 @@ content                   = { computed = ["centroid", "box", "hull"] }
   source = "toponymy_members"
   fields = { id = "entity" }
 
+  # The names, written where they are used. They expand to a flat layer of their own on the same
+  # views, carrying one supplied `text` content. A viewer reaches a name only where they reach the
+  # cluster it names.
   [layer.labels]
   name                      = "topics/toponymy"
   title                     = "Toponymy topics"
@@ -279,6 +196,7 @@ content                   = { computed = ["centroid", "box", "hull"] }
   type                      = "text"
   membership                = "enumerated"
   artifact_visibility       = { default = "inherited" }
+  # Nothing beyond the cluster's own gate decides whether a name exists.
   require_member_visibility = "none"
 
     # A name was written from the titles of six exemplar papers, which are its members at rank 0,
