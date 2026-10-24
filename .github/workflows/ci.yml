@@ -200,7 +200,7 @@ jobs:
       # The TypeScript and components reference is generated from clients/ts before the site's build.
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22.15"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
       - run: npm --prefix clients/ts ci
@@ -281,7 +281,7 @@ jobs:
       # by a hatchling hook that shells out to npm.
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.15"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
       - uses: actions/setup-python@v7

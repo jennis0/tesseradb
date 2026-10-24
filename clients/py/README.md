@@ -17,7 +17,7 @@ The order matters. On an x86_64 or ARM64 machine (a `platform_machine` of `x86_6
 only from the copy already installed. `mosaica-native`'s build hook runs cargo, so it needs a
 Rust toolchain. `mosaica`'s build hook (`hatch_build.py`) runs `npm ci` (when the install is
 stale) and `npm run bundle -w @mosaicajs/components` in `clients/ts`, and copies the single-file
-bundle into `mosaica/static/`, so it needs Node 20 or later, with or without `[widget]`. Leave out
+bundle into `mosaica/static/`, so it needs Node 22.15 or later, with or without `[widget]`. Leave out
 `[widget]` to install the package without anywidget and the map. Nothing built is committed.
 `check.sh` is the package's half of the gate: the tests, and a wheel built and opened to prove
 the bundle is inside it.

@@ -139,7 +139,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: "22.15"
       - run: npm --prefix clients/ts ci
       - run: npm --prefix clients/ts run build
       - name: pack
@@ -204,7 +204,7 @@ jobs:
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: "22.15"
       # Trusted publishing: npm exchanges this job's OIDC token for a short-lived publish token, with
       # no stored secret. It needs npm 11.5.1 or later.
       - run: npm install -g npm@11.21.1

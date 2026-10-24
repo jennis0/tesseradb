@@ -46,7 +46,7 @@ def build_bundle(ts: Path, static: Path, *, run=subprocess.run, log=print) -> li
     if npm is None:
         raise RuntimeError(
             "mosaica[widget]'s bundle is built with Node at wheel-build time and npm is not on "
-            "PATH. Install Node (>= 20) to build from this checkout, or install the published wheel."
+            "PATH. Install Node (>= 22.15) to build from this checkout, or install the published wheel."
         )
     if not npm_install_is_current(ts):
         log(f"mosaica: npm ci in {ts}")
