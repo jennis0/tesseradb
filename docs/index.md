@@ -1,19 +1,45 @@
 # Mosaica
 
-Mosaica is a database for interactive maps of very large sets of points. You give it records that each have a position. They might be places with a longitude and latitude, or documents laid out by an embedding model. Mosaica serves a map of them that people can pan, zoom, filter and search, and it works out the counts, densities and cluster labels afresh for whatever is on screen.
+Mosaica is a database for interactive maps of very large sets of points. Give it records that each have a position, such as every place name in a gazetteer, or millions of papers laid out by what their abstracts say, and it serves a map of them that people can pan, zoom, filter and search. Whatever is on screen, the counts, densities and cluster labels are worked out for exactly that view.
 
-It is designed to hold billions of points on one machine and to serve them to many viewers at once. The data can change while it serves. New records appear on the map at the next flush, which runs every 90 seconds by default. A deletion applies to every request that starts after the server accepts it.
+It is designed to hold billions of points on one machine and to serve them to many viewers at once. The data can change while it serves. New records appear on the map at the next flush, every 90 seconds by default, and a deletion applies to every request that starts after the server accepts it.
 
-Mosaica can also give each viewer a map of their own. Every record can carry an access label, and each viewer holds a set of permissions. A viewer's map is then computed only from the records they may see, including every count and cluster. A record hidden from someone leaves no trace on their map.
+## What a map can show
 
-## Ways to use it
+<div class="grid cards" markdown>
 
-Mosaica is one program, `mosaica`, which builds a database from your files and serves it over HTTP. You can work with it from four places. The HTTP API and the two clients can each declare data, insert, delete and query it. The command line builds and serves, and reads records and counts. It cannot delete or draw a map yet.
+-   **Clusters and topics**
 
-- **Python.** Build a database from a pandas or polars data frame, draw it as a map in a Jupyter notebook, and query it from code. See the [Python client](reference/python/index.md).
-- **The command line.** Describe your Parquet files in a declaration, build them, and serve the result to browsers. [Your first map from files](start/first-map.md) walks through it.
-- **The HTTP API.** Read and write a running server from any language. See the [HTTP API reference](reference/http.md).
-- **TypeScript.** Put the map and its controls in a web page as web components, or as a layer in your own deck.gl scene. See the [TypeScript client](reference/typescript.md) and the [components](reference/components.md).
+    Draw clusters over the points, each with a title and a count. Nest them into a hierarchy, such as fields, then subfields, then topics, and let viewers colour or filter by any level.
+
+-   **Regions and shapes**
+
+    Add polygons such as country borders, or hulls around a cluster's points. They are drawn on the map and counted like any other annotation.
+
+-   **Filters on every kind of field**
+
+    Ranges on numbers and dates, values of a category, exact or partial matches on keywords, and words in free text. Draw a box, circle, ellipse or polygon to select an area, and combine any of these with and, or and not.
+
+-   **Counts and breakdowns**
+
+    Count the matching points by category or by cluster, compare them with another set, or divide them into a grid of cells. Every count follows the filters.
+
+-   **Several layouts of the same records**
+
+    Lay one set of records out in several ways, such as on a world map and by an embedding, or one layout per year. A viewer can switch between them and keep their selection.
+
+-   **A map for each viewer**
+
+    Give records access labels, and each viewer sees a map computed only from the records they may see. That covers every count and cluster as well as the points, so a hidden record leaves no trace.
+
+</div>
+
+## Where to start
+
+- **Explore your own data in a notebook.** The Python client turns a pandas or polars data frame into a map in Jupyter, and answers counts and filters from code. Start with the [Python client](reference/python/index.md).
+- **Run a map that other people open in a browser.** Describe your Parquet files, build them with the `mosaica` command, and serve the result. [Your first map from files](start/first-map.md) walks through it, and the [Docker](guides/docker.md) and [systemd](guides/systemd.md) guides cover running it for real.
+- **Put a map inside your own web application.** The TypeScript client and its web components add a map, filters and record cards to a page, in any framework, or a layer to your own deck.gl scene. See the [TypeScript client](reference/typescript.md) and the [components](reference/components.md).
+- **Work with it from another language.** Everything the clients do goes through an HTTP API, described in the [HTTP API reference](reference/http.md).
 
 ## About these pages
 
