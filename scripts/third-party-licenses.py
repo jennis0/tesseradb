@@ -29,6 +29,9 @@ Every third-party crate the Mosaica workspace depends on outside its tests, whic
 everything compiled into the mosaica binary, the mosaica-native Python wheel and the container
 image. Each licence text below lists the crates it covers, and the NOTICE files of the crates that
 ship one follow the licence texts.
+
+The example datasets in the repository carry their own terms, in examples/data/arxiv/NOTICE.md and
+examples/data/geonames/NOTICE.md. No package or image ships them.
 """
 
 
