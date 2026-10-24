@@ -86,11 +86,11 @@ jobs:
       # pin: the `.stderr` fixtures under crates/mosaica-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
       # regenerating them is a judgement call rather than maintenance.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           components: clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # A test process that runs past ten minutes is taken to be hung: the watchdog writes every
@@ -183,7 +183,7 @@ jobs:
       # The licences, banned crates and sources of the Rust dependency graph, against deny.toml.
       # Advisories read the RustSec database, which changes without a change here, so they are
       # checked at release (release.yml) rather than on every pull request.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check licenses bans sources
 
@@ -217,8 +217,8 @@ jobs:
     name: conformance (${{ matrix.mode }})
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -291,8 +291,8 @@ jobs:
       # `_mosaica` extension module, so `clients/py/check.sh` now builds two crates before it can
       # install anything. This job is no longer cargo-free and no longer cheap; the cache is what
       # keeps it from being a second copy of the `rust` job's compile on every run.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `check-clients.sh` requires an installed tree rather than installing one itself, so that a
       # developer's stale `node_modules` fails loudly instead of being silently repaired.
       - run: npm --prefix clients/ts ci
@@ -337,7 +337,7 @@ jobs:
           TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
         run: echo "token=${TOKEN:+yes}" >> "$GITHUB_OUTPUT"
       # A refused or failed upload is reported on the step and does not fail the gate.
-      - uses: codacy/codacy-coverage-reporter-action@v1
+      - uses: codacy/codacy-coverage-reporter-action@89d6c85cfafaec52c72b6c5e8b2878d33104c699 # v1.3.0
         if: ${{ steps.codacy.outputs.token == 'yes' }}
         continue-on-error: true
         with:
