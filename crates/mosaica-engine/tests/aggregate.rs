@@ -173,7 +173,8 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-/// `mark`'s values: `p` and `q` titled, `r` not.
+/// `mark`'s values: `p` and `s` share a title, `q` has its own, `r` has none, and no item carries
+/// `s`.
 fn write_marks(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("key", DataType::Utf8, false),
@@ -182,8 +183,13 @@ fn write_marks(path: &Path) {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(vec!["p", "q", "r"])),
-            Arc::new(StringArray::from(vec![Some("Pea"), Some("Queue"), None])),
+            Arc::new(StringArray::from(vec!["p", "q", "r", "s"])),
+            Arc::new(StringArray::from(vec![
+                Some("Pea"),
+                Some("Queue"),
+                None,
+                Some("Pea"),
+            ])),
         ],
     )
     .unwrap();
@@ -2622,6 +2628,43 @@ fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
     for row in listed {
         assert_eq!(&row.title, &titles[row.key.as_ref().unwrap()], "{row:?}");
     }
+}
+
+/// **A title is written once however many groups share it**, and each row reads back its own:
+/// two listed values sharing one, one with none, and the none row.
+#[test]
+fn a_shared_title_is_written_once_and_every_row_reads_its_own() {
+    let fx = fixture();
+    let session = fx.session(true);
+    let groupings = [field("mark", named(&["p", "q", "r", "s"]))];
+    let (collect, _) = respond(&fx.engine, &session, request(&groupings)).unwrap();
+    let mut read = Vec::new();
+    for (_, batch, _) in &collect.pages {
+        let title = batch
+            .column_by_name("title")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>()
+            .unwrap();
+        let values = title.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let distinct: std::collections::BTreeSet<&str> = values.iter().flatten().collect();
+        assert_eq!(distinct.len(), values.len(), "{values:?}");
+        read.extend(rows_of(batch));
+    }
+    let titles: Vec<(Option<&str>, Option<&str>)> = read
+        .iter()
+        .map(|r| (r.key.as_deref(), r.title.as_deref()))
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            (Some("p"), Some("Pea")),
+            (Some("q"), Some("Queue")),
+            (Some("r"), None),
+            (Some("s"), Some("Pea")),
+            (None, None),
+        ]
+    );
 }
 
 /// **A resumed table lists only the artifacts its first page chose**, each by its own entity: one

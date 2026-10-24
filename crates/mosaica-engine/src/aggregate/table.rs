@@ -9,6 +9,7 @@
 //! reads. A chunk counts each shard's rows of its prefixes and adds the shards' counts by cell, so
 //! a page, its position and its cursor are those of one shard holding every row.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -707,7 +708,11 @@ impl Plan {
             .titles
             .iter()
             .flatten()
-            .map(|title| text(title.as_deref().unwrap_or("")))
+            .flatten()
+            .map(String::as_str)
+            .collect::<HashSet<&str>>()
+            .into_iter()
+            .map(text)
             .sum();
         ["listed", "rest", "none"].map(text).iter().sum::<usize>() + keys + titles
     }
@@ -747,12 +752,7 @@ impl Plan {
                     let ids = UInt64Array::new(repeated(runs, id).into(), on_listed);
                     push("key", Arc::new(ids), true);
                     if let Some(titles) = &groups.titles {
-                        let positions = repeated(runs, |g| g.min(listed) as i32).into();
-                        push(
-                            "title",
-                            title_column(runs, listed, positions, titles)?,
-                            true,
-                        );
+                        push("title", title_column(runs, titles)?, true);
                     }
                     let slot = |g: u32| {
                         let slots = groups.slots.as_ref()?;
@@ -785,17 +785,13 @@ impl Plan {
                     let positions: ScalarBuffer<i32> =
                         repeated(runs, |g| g.min(listed) as i32).into();
                     let key = DictionaryArray::<Int32Type>::try_new(
-                        Int32Array::new(positions.clone(), on_listed),
+                        Int32Array::new(positions, on_listed),
                         Arc::new(StringArray::from(keys)),
                     )
                     .map_err(malformed)?;
                     push("key", Arc::new(key), true);
                     if let Some(titles) = &groups.titles {
-                        push(
-                            "title",
-                            title_column(runs, listed, positions, titles)?,
-                            true,
-                        );
+                        push("title", title_column(runs, titles)?, true);
                     }
                 }
             }
@@ -928,20 +924,28 @@ impl Plan {
     }
 }
 
-/// The `title` column: each listed row's title, written once in the dictionary, and null on the
-/// rest, the none and a listed group without one.
-fn title_column(
-    runs: &[Run],
-    listed: u32,
-    positions: ScalarBuffer<i32>,
-    titles: &[Option<String>],
-) -> Result<ArrayRef> {
-    let titled = valid(runs, |g| g < listed && titles[g as usize].is_some());
+/// The `title` column: each distinct title written once in the dictionary, and null on the rest,
+/// the none and a listed group without one.
+fn title_column(runs: &[Run], titles: &[Option<String>]) -> Result<ArrayRef> {
+    let mut values: Vec<&str> = Vec::new();
+    let mut index: HashMap<&str, i32> = HashMap::new();
+    let at: Vec<Option<i32>> = titles
+        .iter()
+        .map(|title| {
+            let title = title.as_deref()?;
+            Some(*index.entry(title).or_insert_with(|| {
+                values.push(title);
+                i32::try_from(values.len() - 1).expect("a page's titles fit in i32")
+            }))
+        })
+        .collect();
+    let at = |g: u32| at.get(g as usize).copied().flatten();
     let title = DictionaryArray::<Int32Type>::try_new(
-        Int32Array::new(positions, titled),
-        Arc::new(StringArray::from_iter(
-            titles.iter().map(|t| Some(t.as_deref().unwrap_or(""))),
-        )),
+        Int32Array::new(
+            repeated(runs, |g| at(g).unwrap_or(0)).into(),
+            valid(runs, |g| at(g).is_some()),
+        ),
+        Arc::new(StringArray::from(values)),
     )
     .map_err(|e| EngineError::Malformed(format!("an aggregate page did not assemble: {e}")))?;
     Ok(Arc::new(title))

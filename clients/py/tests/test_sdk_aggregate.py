@@ -106,6 +106,29 @@ def test_a_layer_row_is_titled_with_the_name_browse_gives(served, corpus):
     assert {r["key"]: r["title"] for r in listed} == {int(r["mosaica_id"]): r["name"] for r in browsed}
 
 
+def titled_papers(db) -> None:
+    """The papers, with two venues sharing a title and two without one."""
+    papers(db)
+    db.insert(
+        "venue",
+        pa.table({"key": ["neurips", "icml"], "title": ["Conference", "Conference"]}),
+        key="key",
+        title="title",
+    )
+
+
+def test_a_shared_title_and_none_read_into_a_data_frame(served, corpus):
+    """Each venue's row reads back its own title, null where it has none, and the table becomes a
+    data frame."""
+    pd = pytest.importorskip("pandas")
+    db = served(titled_papers)
+    (venues,) = db.aggregate("map", [{"by": {"field": "venue", "top": 4}}])
+    titles = {"neurips": "Conference", "icml": "Conference", "iclr": None, "kdd": None}
+    assert {r["key"]: r["title"] for r in rows(venues)} == titles
+    frame = venues.to_pandas()
+    assert {k: None if pd.isna(t) else t for k, t in zip(frame["key"], frame["title"])} == titles
+
+
 def test_a_selection_counts_what_count_counts(db):
     """The selection's filters and box are the request's filters."""
     part = db.view("map").filter({"n": {"range": {"gte": 3}}}).within((0.0, 0.0, 12.0, 1.0))
