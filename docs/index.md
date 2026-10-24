@@ -39,7 +39,7 @@ It is designed to hold billions of points on one machine and to serve them to ma
 - **Explore your own data in a notebook.** The Python client turns a pandas or polars data frame into a map in Jupyter, and answers counts and filters from code. Start with the [Python client](reference/python/index.md).
 - **Run a map that other people open in a browser.** Describe your Parquet files, build them with the `mosaica` command, and serve the result. [Your first map from files](start/first-map.md) walks through it, and the [Docker](guides/docker.md) and [systemd](guides/systemd.md) guides cover running it for real.
 - **Put a map inside your own web application.** The TypeScript client and its web components add a map, filters and record cards to a page, in any framework, or a layer to your own deck.gl scene. See the [TypeScript client](reference/typescript.md) and the [components](reference/components.md).
-- **Work with it from another language.** Everything the clients do goes through an HTTP API, described in the [HTTP API reference](reference/http.md).
+- **Work with it from another language.** A running server answers an HTTP API, which both clients are built on. The [HTTP API reference](reference/http.md) describes every route.
 
 ## About these pages
 
