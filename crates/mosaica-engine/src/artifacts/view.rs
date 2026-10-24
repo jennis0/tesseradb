@@ -499,7 +499,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             + self
                 .sides
                 .iter()
-                .map(|side| match (side.mask, side.counted && self.counts.is_some()) {
+                .map(|side| match (side.mask, side.counted) {
                     (Some(mask), false) => side.rows.masked_count(ordinal, mask),
                     _ => 0,
                 })

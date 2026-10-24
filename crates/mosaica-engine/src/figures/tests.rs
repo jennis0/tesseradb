@@ -5,8 +5,7 @@
 //! `plus` outside `P` — over a column with rows above its base, sums the shards' walks of their
 //! base rows, follows a growth, and assembles the figures from the three parts. The oracle walks
 //! `(P − minus) ∪ plus` in every shard row by row, reads each row's labels and position, and adds
-//! them up. The two must agree on every count, centroid and box. A sum brought forward by one
-//! shard's difference must be the sum made again from every shard's walk.
+//! them up. The two must agree on every count, centroid and box.
 
 use std::sync::Arc;
 
@@ -23,7 +22,7 @@ use crate::row_column::RowColumn;
 use super::cache::{Counters, Tail};
 use super::counts::{CountsAt, Deltas, Dense, Follow, Part, Reserves, SideAt, SideRow};
 use super::denied::{Brought, DeniedLabels, DenyCorrection, Subtracted};
-use super::sum::{difference, sum_of};
+use super::sum::sum_of;
 use super::{BoxSource, Geometry, LevelFigures};
 
 const BASE: u32 = 3_000;
@@ -58,21 +57,15 @@ impl Positions {
 }
 
 /// Every artifact's members over the base and the extent: the label form gives each row at most
-/// one, the list form lets a row carry several. A few artifacts are huge and spread, and the rest
-/// are drawn from `ordinals`: every one of them, or a few a shard holds most of, as a shard of a
-/// corpus laid out in space does.
-fn column_over(
-    rng: &mut StdRng,
-    layout: ServingLayout,
-    ordinals: std::ops::Range<u32>,
-) -> RowColumn {
+/// one, the list form lets a row carry several.
+fn column(rng: &mut StdRng, layout: ServingLayout) -> RowColumn {
     let mut sets = vec![Bitmap::new(); ORDINALS as usize];
     for row in 0..ROWS {
         // A few artifacts are huge and spread, so a deny can spend a side's reserve.
         let ordinal = match rng.gen_range(0..10) {
             0..=2 => rng.gen_range(0..4),
             3 => continue,
-            _ => rng.gen_range(ordinals.clone()),
+            _ => rng.gen_range(0..ORDINALS),
         };
         sets[ordinal as usize].add(row);
         if layout == ServingLayout::RowMajorList && rng.gen_bool(0.2) {
@@ -203,19 +196,8 @@ struct Shard {
 
 impl Shard {
     fn random(rng: &mut StdRng, id: u32, layout: ServingLayout, denying: Denying) -> Self {
-        Self::over(rng, id, layout, denying, 0..ORDINALS)
-    }
-
-    /// [`Self::random`], its smaller artifacts drawn from `ordinals` ([`column_over`]).
-    fn over(
-        rng: &mut StdRng,
-        id: u32,
-        layout: ServingLayout,
-        denying: Denying,
-        ordinals: std::ops::Range<u32>,
-    ) -> Self {
         let positions = Arc::new(Positions::random(rng));
-        let column = column_over(rng, layout, ordinals);
+        let column = column(rng, layout);
         let mask = match denying {
             Denying::Random(rate) => mask(rng, rate),
             Denying::Extremes(edges) => extremes_denied(&column, &positions.places(), edges),
@@ -240,7 +222,7 @@ impl Shard {
                 &|| true,
             )
             .expect("an unstopped walk answers");
-        Part::of(walked, true)
+        Part::of(walked)
     }
 
     fn side(&self, at: u64) -> SideAt {
@@ -296,7 +278,7 @@ fn position_of(shards: &[Shard]) -> impl Fn(SideRow) -> Option<(u32, u32)> + '_ 
 fn summed(shards: &[Shard], at: u64) -> (CountsAt, Option<Reserves>) {
     let parts: Vec<Part> = shards.iter().map(Shard::part).collect();
     let every: Vec<(ShardId, &Part)> = shards.iter().map(|s| s.id).zip(parts.iter()).collect();
-    let (dense, reserves) = sum_of(&every, Geometry::Box, &position_of(shards));
+    let (dense, reserves) = sum_of(&every, true, Some(&position_of(shards)));
     let sides = shards.iter().map(|shard| shard.side(at)).collect();
     (CountsAt::of(sides, dense), reserves)
 }
@@ -447,8 +429,9 @@ fn the_figures_are_a_walk_of_the_visible_rows() {
                         place: 0,
                         to: 2,
                         steps,
-                        counted: &|row| row < BASE && first.mask.projection.contains(row),
-                        place_of: &|row| place(&places, row),
+                        base_rows: BASE,
+                        fragment: &first.mask.projection,
+                        places: &places,
                     }],
                     Geometry::Box,
                 ));
@@ -534,203 +517,6 @@ fn a_denied_edge_takes_the_next_row_from_the_reserve_until_it_is_spent() {
     }
 }
 
-/// Per ordinal and side, the rows a reserve names.
-fn reserve_rows(reserves: Option<&Reserves>) -> Vec<Vec<Option<Vec<SideRow>>>> {
-    (0..ORDINALS)
-        .map(|o| {
-            (0..4)
-                .map(|side| reserves.and_then(|r| Some(r.side(o, side)?.collect())))
-                .collect()
-        })
-        .collect()
-}
-
-/// **A sum brought forward by one shard's difference is the sum made again** from every shard's
-/// walk: counts, placed counts, sums, boxes and reserves alike, whether the shard's walk is
-/// replaced by another of the same shard, taken away, or added, whichever artifacts' edges it
-/// held, and whether each artifact is spread over every shard or mostly in one.
-#[test]
-fn a_sum_brought_forward_by_a_shards_difference_is_the_sum_made_again() {
-    for seed in 0..32u64 {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let layout = match seed % 2 {
-            0 => ServingLayout::RowMajorLabel,
-            _ => ServingLayout::RowMajorList,
-        };
-        // Spread over every shard, or each shard holding most of its own few artifacts.
-        let ordinals = |id: u32| match seed % 4 < 2 {
-            true => 0..ORDINALS,
-            false => 4 + id * 9..(4 + id * 9 + 11).min(ORDINALS),
-        };
-        let held: Vec<Shard> = (0..3)
-            .map(|id| Shard::over(&mut rng, id, layout, Denying::Random(0.0), ordinals(id)))
-            .collect();
-        let (pred, pred_reserves) = summed(&held, 1);
-        let parts: Vec<Part> = held.iter().map(Shard::part).collect();
-        // Shard 1 compacted into another walk, taken away, or a shard 3 opened.
-        let replacement = Shard::over(&mut rng, 1, layout, Denying::Random(0.0), ordinals(1));
-        let opened = Shard::over(&mut rng, 3, layout, Denying::Random(0.0), ordinals(3));
-        let cases: [(&str, Vec<usize>, Vec<&Shard>); 3] = [
-            ("replaced", vec![1], vec![&replacement]),
-            ("taken away", vec![1], vec![]),
-            ("added", vec![], vec![&opened]),
-        ];
-        for (what, old, new) in cases {
-            let kept: Vec<&Shard> = held
-                .iter()
-                .enumerate()
-                .filter(|(at, _)| !old.contains(at))
-                .map(|(_, shard)| shard)
-                .collect();
-            let mut after: Vec<&Shard> = kept.iter().copied().chain(new.iter().copied()).collect();
-            after.sort_by_key(|shard| shard.id);
-            let after_owned: Vec<Shard> = after
-                .iter()
-                .map(|shard| Shard {
-                    id: shard.id,
-                    column: shard.column.clone(),
-                    positions: Arc::clone(&shard.positions),
-                    mask: shard.mask.clone(),
-                })
-                .collect();
-            let (again, again_reserves) = summed(&after_owned, 1);
-
-            let new_parts: Vec<Part> = new.iter().map(|shard| shard.part()).collect();
-            let added: Vec<(ShardId, &Part)> =
-                new.iter().map(|shard| shard.id).zip(new_parts.iter()).collect();
-            let old_parts: Vec<(usize, Part)> =
-                old.iter().map(|&at| (at, parts[at].clone())).collect();
-            let kept_parts = || {
-                Some(
-                    held.iter()
-                        .zip(&parts)
-                        .enumerate()
-                        .filter(|(at, _)| !old.contains(at))
-                        .map(|(_, (shard, part))| (shard.id, part.clone()))
-                        .collect(),
-                )
-            };
-            let (dense, grown, reserves) = difference(
-                &pred,
-                pred_reserves.as_ref(),
-                &old_parts,
-                &added,
-                kept_parts,
-                &position_of(&after_owned),
-            )
-            .expect("the difference holds");
-            let at = format!("seed {seed}: {what}");
-            assert_eq!(dense, *again.dense, "{at}: the walks' sum");
-            assert!(grown.is_empty(), "{at}: nothing grown");
-            assert_eq!(
-                reserve_rows(reserves.as_ref()),
-                reserve_rows(again_reserves.as_ref()),
-                "{at}: the reserves"
-            );
-        }
-    }
-}
-
-/// **A shard's growth leaves with its walk**: a sum followed through a growth in the shard whose
-/// walk is replaced holds none of that growth afterwards, and one in a shard kept keeps it.
-#[test]
-fn a_replaced_shards_growth_leaves_the_sum_with_its_walk() {
-    let mut rng = StdRng::seed_from_u64(5);
-    let layout = ServingLayout::RowMajorList;
-    let mut held: Vec<Shard> = (0..2)
-        .map(|id| Shard::random(&mut rng, id, layout, Denying::Random(0.0)))
-        .collect();
-    let (pred, reserves) = summed(&held, 1);
-    let parts: Vec<Part> = held.iter().map(Shard::part).collect();
-    let mut joined = Vec::new();
-    for (shard, rows) in held.iter_mut().zip([[3u32, 7], [11, 13]]) {
-        let kept = shard
-            .column
-            .amend_kept(&[(rows[0], 1), (rows[1], 2)], ROWS)
-            .unwrap();
-        joined.push(kept.len() as u64);
-        shard.column.record_step(1, 2, &kept);
-    }
-    assert!(joined.iter().all(|&n| n > 0), "each shard's growth joins a row");
-    let follows: Vec<(Vec<_>, Vec<Placement<'_>>)> = held
-        .iter()
-        .map(|shard| {
-            (
-                shard.column.steps_between(1, 2).unwrap(),
-                shard.positions.places(),
-            )
-        })
-        .collect();
-    type Placed<'a> = Box<dyn Fn(u32) -> Option<(u32, u32)> + 'a>;
-    let every = |_: u32| true;
-    let placed: Vec<Placed<'_>> = follows
-        .iter()
-        .map(|(_, places)| Box::new(move |row| place(places, row)) as Placed<'_>)
-        .collect();
-    let followed = pred.followed(
-        &follows
-            .iter()
-            .enumerate()
-            .map(|(at, (steps, _))| Follow {
-                place: at,
-                to: 2,
-                steps: steps.clone(),
-                counted: &every,
-                place_of: &*placed[at],
-            })
-            .collect::<Vec<_>>(),
-        Geometry::Box,
-    );
-    assert!(followed.count(1) > pred.count(1));
-    let replacement = Shard::random(&mut rng, 0, layout, Denying::Random(0.0));
-    let part = replacement.part();
-    let after = [replacement, Shard {
-        id: held[1].id,
-        column: held[1].column.clone(),
-        positions: Arc::clone(&held[1].positions),
-        mask: held[1].mask.clone(),
-    }];
-    let (_, grown, _) = difference(
-        &followed,
-        reserves.as_ref(),
-        &[(0, parts[0].clone())],
-        &[(after[0].id, &part)],
-        || Some(vec![(after[1].id, parts[1].clone())]),
-        &position_of(&after),
-    )
-    .expect("the difference holds");
-    let left: Vec<u32> = grown
-        .values()
-        .flat_map(|g| g.points.iter().map(|point| point.0))
-        .collect();
-    assert!(!left.is_empty() && left.iter().all(|&shard| shard == 1), "{left:?}");
-    let total: u64 = grown.values().map(|g| g.figures.count).sum();
-    assert_eq!(total, joined[1], "shard 1's rows grown, and none of shard 0's");
-}
-
-/// A difference that takes away more than the sum holds is refused, so the sum is made again.
-#[test]
-fn a_difference_taking_away_more_than_is_held_is_refused() {
-    let mut rng = StdRng::seed_from_u64(8);
-    let held: Vec<Shard> = (0..2)
-        .map(|id| Shard::random(&mut rng, id, ServingLayout::RowMajorLabel, Denying::Random(0.0)))
-        .collect();
-    let (pred, reserves) = summed(&held, 1);
-    let mut too_much = held[0].part();
-    for count in &mut too_much.counts {
-        *count += 1;
-    }
-    assert!(difference(
-        &pred,
-        reserves.as_ref(),
-        &[(0, too_much)],
-        &[],
-        || None,
-        &position_of(&held),
-    )
-    .is_none());
-}
-
 /// **What is written is what is read back**, and a file altered by one byte is not read.
 #[test]
 fn sums_walks_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
@@ -751,8 +537,9 @@ fn sums_walks_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
             place: 1,
             to: 7,
             steps: second.column.steps_between(6, 7).unwrap(),
-            counted: &|_| true,
-            place_of: &|row| place(&places, row),
+            base_rows: BASE,
+            fragment: &Bitmap::from_range(0..ROWS),
+            places: &places,
         }],
         Geometry::Box,
     );
@@ -768,7 +555,7 @@ fn sums_walks_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
     assert!(super::persist::read_sum(dir.path(), &stem, Geometry::None).is_none());
 
     let part = shards[0].part();
-    super::persist::write_part(dir.path(), &stem, 6, &part);
+    super::persist::write_part(dir.path(), &stem, 6, &part, Geometry::Box);
     assert_eq!(
         super::persist::read_part(dir.path(), &stem, 6, Geometry::Box),
         Some(part)
@@ -802,13 +589,11 @@ fn sums_walks_and_labels_written_to_disk_read_back_whole_or_not_at_all() {
 }
 
 /// Counts and position sums over several shards pass what a `u32` and a `u64` hold, and are
-/// held whole; taking a shard away brings them back into the arrays.
+/// held whole.
 #[test]
 fn sums_over_shards_are_widened_before_they_are_added() {
     let near_the_top = Part {
         len: 2,
-        positions: true,
-        reserved: false,
         ordinals: vec![0],
         counts: vec![u32::MAX],
         placed: vec![u32::MAX],
@@ -827,8 +612,4 @@ fn sums_over_shards_are_widened_before_they_are_added() {
         figures.centroid(0),
         Some([sums[0] as f64 / placed, sums[1] as f64 / placed])
     );
-    dense.sub(&near_the_top).expect("the sum holds the part");
-    assert!(dense.wide.is_empty());
-    assert_eq!(dense.counts[0], u32::MAX);
-    assert_eq!(dense.sums[0], [u64::MAX - 1, u64::MAX - 3]);
 }

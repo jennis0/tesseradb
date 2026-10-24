@@ -256,14 +256,11 @@ compactions adds its rows to them in place. A flush adds none, since its rows ar
 so an ingest window never refills them.
 
 A compaction rotates one shard's identity, which is part of their key. The first read of each level
-after it walks that shard's base rows again and moves the sum by that shard's difference: the
-shard's previous walk, read back from the cache directory, is taken away and its new walk added.
-Counts and position sums subtract exactly. A side of a box is the extreme across shards and cannot
-be taken away, so an artifact whose box the previous walk reached, or whose kept extreme rows
-included one of its rows, has its box and those rows worked out again from every shard's walk, read
-back from the cache directory. The same holds for a shard that opens, and for one whose column's
-steps do not lead to the version a request reads. Where a walk the difference needs is not on
-disc, the sum is made again from every shard's walk, read back or walked.
+after it walks that shard's base rows again and takes the sum again over every shard's walk: each
+other shard's walk is read back from the cache directory at the level version it read, and what a
+growth has added to it since is kept. The same holds for a shard that opens, and for one whose
+column's steps do not lead to the version a request reads. A shard whose walk is not on disc is
+walked again.
 
 They are also written to the cache directory, in files named by a digest of what they describe and
 checked against a SHA-256 when they are read, so a torn or altered file is read as a miss: each
@@ -271,8 +268,8 @@ sum under `figures/sums/`, naming every shard's identity and version it is over,
 several shards, each shard's walk under `figures/` and then the shard's identity. A restart reads
 the sums back, and walks again only what it cannot read back. The directory is held under
 `serve.figures_disk_bytes`, the files least
-recently written or read removed first. The directory of a shard identity a compaction has replaced
-is removed at the next compaction and at a restart.
+recently written or read removed first, and the directory of a shard identity a compaction has
+replaced is removed.
 
 D's correction is computed at the request's start from the labels and positions of the view's denied
 base rows, which the server holds per view, level and shard and writes beside the shard's walks. It

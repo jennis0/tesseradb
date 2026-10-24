@@ -557,34 +557,31 @@ base rows and adds every shard's rows above the base. A shard the request leaves
 too: the viewer sees nothing there, so its denied base rows are all the grant's base rows there. A
 growth or a publication is followed by each shard's steps.
 
-A shard whose walk is replaced moves the sum by that shard's difference. That is a shard whose
-identity a compaction rotated, a shard that opened, and a shard whose column's steps do not lead
-to the version a request reads. Its previous walk, read back from the cache directory, is taken
-away with what its growth added since, and its new walk is added. Counts, placed counts and
-position sums subtract exactly. A side of a box is an extreme across shards and cannot be taken
-away. An artifact whose box the previous walk reached, or whose eight most extreme rows on a side
-included one of the previous walk's rows, has its box and those rows worked out again from every
-shard's walk, read back. Every other artifact's box is widened by the new walk, and its extreme
-rows merged with the new walk's. Each shard's walk is written to the cache directory under the
-shard's identity, keeping each ordinal it counts a row of, with its box and its eight most extreme
-rows on each side. A compaction removes the directories of identities older than the one it
-replaced, and a restart all but those served. Where a walk the difference needs is not on disc,
-the sum is made again from every shard's walk, read back or walked.
+Where any shard's walk is replaced, the sum is taken again over every shard's walk. That is a
+shard whose identity a compaction rotated, a shard that opened, and a shard whose column's steps
+do not lead to the version a request reads: each is walked again. Every other shard's walk is
+read back from the cache directory at the level version it read, and what its growth has added
+since is kept as it was. The boxes and the eight most extreme rows on each side are taken again
+with the counts, since a side of a box is an extreme across shards. Each shard's walk is written
+to the cache directory under the shard's identity, keeping each ordinal it counts a row of, with
+its box and its eight most extreme rows on each side. A shard whose walk is not on disc is walked
+again too.
 
-The shards' walks are sparse. On GeoNames at 128 shards, which a build lays out in space, the
-walks of the principal who sees every item hold 1.00 to 1.50 entries per artifact over the five
-administrative levels, so the cache directory holds about one dense entry's worth of them per
-grant and level, against 128 dense entries held per shard. The eight most extreme rows kept for a
-box name each row's shard beside the row, so they take 256 B an artifact against one shard's 128
-B.
+A level whose forms all hold their own rows, as one published and not yet folded does, is summed
+without positions, and its centroids and boxes are worked out per artifact. Where only some
+shards' forms do, the sum is walked with positions, and the level's centroids and boxes are still
+worked out per artifact.
+
+On GeoNames at 128 shards, which a build lays out in space, the walks of the principal who sees
+every item hold 1.00 to 1.50 entries per artifact over the five administrative levels. The eight
+most extreme rows kept on each side for a box take 128 B an artifact, and in a sum over several
+shards each row's shard beside it, 128 B more.
 
 Measured on GeoNames' fourth administrative level (231,645 artifacts, a centroid and a box), for
 the principal who sees every item, twelve repeats of one `/v1/artifacts/viewport` request at zoom
-12 after its first, each server under a 24 GB cap with the machine's one-minute load between 2.6
-and 3.8. With the figures kept per shard, the repeats' median was 1.06 ms at N = 1, 1.51 ms at
-N = 32 and 1.39 s at N = 128, where the 128 entries, 1.19 GB, passed the 1 GiB bound and every
-request read them back from disc. With the sum, it was 1.02 ms, 1.37 ms and 1.66 ms, and the
-figures held in memory were 12.1 MB at every N, against 11.1 MB, 327 MB and 1.19 GB.
+12 after its first, each server under a 24 GB cap with the machine's one-minute load between 5.9
+and 6.6: the repeats' median was 0.95 ms at N = 1, 1.25 ms at N = 32 and 2.25 ms at N = 128, and
+the figures held in memory were 11.1 MB at N = 1 and 12.1 MB at N = 32 and 128.
 
 ### 3.7 A session's cost
 

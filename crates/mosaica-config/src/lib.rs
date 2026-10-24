@@ -444,14 +444,16 @@ struct RawServe {
     /// Bytes of artifact counts, centroids and boxes kept in memory for annotation levels served
     /// from a column, shared by every viewer with the same grant. Per grant and level, whatever the
     /// number of shards: 4 B an artifact for counts alone, 40 B with a centroid and a box, and for
-    /// a layer serving a box 4 B more and 256 B for each artifact with more than sixteen placed
-    /// rows.
+    /// a layer serving a box 4 B more and 128 B for each artifact with more than sixteen placed
+    /// rows, 256 B in a bundle of several shards.
     ///
     /// Default: `1073741824` (1 GiB).
     masked_count_cache_bytes: Option<u64>,
     /// Bytes of those counts, and of the labels of denied rows they are corrected with, kept in the
-    /// engine's cache directory so a restart reads them back. Past it, the files least recently
-    /// written or read are removed.
+    /// engine's cache directory so a restart reads them back. In a bundle of several shards it also
+    /// holds each shard's walk of each grant's items, up to 172 B for each artifact a shard holds a
+    /// member of, which a compaction of one shard reads back so as to walk that shard alone. Past
+    /// it, the files least recently written or read are removed.
     ///
     /// Default: `8589934592` (8 GiB).
     figures_disk_bytes: Option<u64>,

@@ -7707,7 +7707,7 @@ components:
             fills:
               type: integer
               minimum: 0
-              description: Walks of a grant's base rows for a level. A growth or a publication between folds does not walk again.
+              description: Walks of one shard's base rows under a grant for a level. A growth or a publication between folds does not walk again, and a compaction of one shard walks that shard again and no other.
             field_fills:
               type: integer
               minimum: 0
@@ -7719,7 +7719,7 @@ components:
             loads:
               type: integer
               minimum: 0
-              description: Counts read back from the cache directory rather than walked.
+              description: A level's counts over every shard, and one shard's walk of a level, read back from the cache directory rather than walked.
             exact:
               type: integer
               minimum: 0
@@ -7731,7 +7731,7 @@ components:
             not_admitted:
               type: integer
               minimum: 0
-              description: Counts or spare edge rows larger than the whole bound, served to the request that built them and not kept. Above zero, the bound is below one grant's level.
+              description: Counts larger than the whole bound, served to the request that built them and not kept, and spare edge rows left out so that a level's counts fit the bound. Above zero, the bound is below one grant's level.
             labels_bytes:
               type: integer
               minimum: 0

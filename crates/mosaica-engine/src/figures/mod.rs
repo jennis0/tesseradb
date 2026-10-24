@@ -30,9 +30,9 @@
 //!   of each side's base rows, off the request path, single-flight. A growth or a publication
 //!   between folds adds labels to base rows, and each side's column records each version's
 //!   additions ([`crate::row_column::GrowthStep`]); the sum follows them in place rather than
-//!   walking again, so an ingest window never refills it. A side whose walk is replaced moves the
-//!   sum by that side's difference ([`sum`]). The sums, and each side's walk, are written to the
-//!   engine's cache directory and read back after a restart ([`persist`]).
+//!   walking again, so an ingest window never refills it. Where a side's walk is replaced, the sum
+//!   is taken again over every side's walk ([`sum`]). The sums, and each side's walk, are written
+//!   to the engine's cache directory and read back after a restart ([`persist`]).
 //! - **D's correction** is held per sum, column version and each side's deny version
 //!   ([`crate::Shard::deny_version`]), from the labels of the view's denied base rows
 //!   ([`denied`]). It is loaded at the request's start like the mask it corrects, so a request that
@@ -79,7 +79,7 @@ pub(crate) use cache::{DrawingTurn, FiguresCache, MaskIdentity, SideVersions};
 pub use cache::{FiguresStats, DEFAULT_DISK_BYTES, DEFAULT_GIVE_WAY_MS};
 pub(crate) use field::{keep_extreme, ExactSum, FieldFigures, FieldRead, FieldTally, Number, Sum};
 
-use cache::{Counters, DenyKey, FiguresKey, LevelAddress, SumEntry, SumKey, SumSide, Tail, TailKey};
+use cache::{Counters, DenyKey, FiguresKey, LevelAddress, SumEntry, SumKey, Tail, TailKey};
 use counts::{CountsAt, Delta, Deltas, Reserves, SideRow, Wide};
 use denied::{Brought, DeniedLabels, DenyCorrection};
 use labels::{HeldLabels, LabelStore};
@@ -426,13 +426,16 @@ impl Engine {
         geometry: Geometry,
     ) -> Result<Option<LevelFigures>> {
         let mut sides = Vec::new();
-        let mut rows_held = false;
+        let (mut held, mut column_only) = (false, false);
         for ((side, rows), &at) in served.sides.iter().zip(forms).zip(versions) {
             let (Some(column), Some(leaf)) = (rows.column_shared(), mask.any_leaf(side.shard.id()))
             else {
                 continue;
             };
-            rows_held |= rows.membership().rows_held();
+            match rows.membership().rows_held() {
+                true => held = true,
+                false => column_only = true,
+            }
             sides.push(Side {
                 served: side,
                 column,
@@ -443,12 +446,12 @@ impl Engine {
         let Some(first) = sides.first() else {
             return Ok(None);
         };
-        // A form holding its own bitmaps derives its geometry per artifact. The sum keeps the
-        // positions the layer asks for all the same, so that its key does not move with any one
-        // side's form.
-        let served_geometry = match rows_held {
-            true => Geometry::None,
-            false => geometry,
+        // A form holding its own bitmaps derives its geometry per artifact. The sum is walked with
+        // positions where any side's form is served from its column alone.
+        let (served_geometry, geometry) = match (held, column_only) {
+            (false, _) => (geometry, geometry),
+            (true, true) => (Geometry::None, geometry),
+            (true, false) => (Geometry::None, Geometry::None),
         };
         let len = first.column.len();
         debug_assert!(
@@ -480,14 +483,11 @@ impl Engine {
             space,
             level,
             geometry,
-            sides: wants
-                .iter()
-                .map(|want| SumSide {
-                    shard: want.shard,
-                    identity: want.identity,
-                    column: want.column.identity(),
-                })
-                .collect(),
+            sides: cache::sides_digest(
+                wants
+                    .iter()
+                    .map(|want| (want.shard, want.identity, want.column.identity())),
+            ),
         };
         let Some((counts, reserves)) = self.summed(served, &key, &wants)? else {
             return exact();
@@ -542,14 +542,19 @@ impl Engine {
         }
         let key = DenyKey {
             sum: sum.clone(),
-            sides: sides
-                .iter()
-                .zip(&subtracted)
-                .map(|(side, subtracted)| {
+            sides: cache::digest_of(b"mosaica-deny-sides-v1", |hasher| {
+                use sha2::Digest;
+                for (side, subtracted) in sides.iter().zip(&subtracted) {
                     let (deny_version, failing) = deny_version(served, side.served, subtracted);
-                    (side.at, deny_version, failing)
-                })
-                .collect(),
+                    hasher.update(side.at.to_le_bytes());
+                    hasher.update(deny_version.to_le_bytes());
+                    hasher.update(failing.map_or([0; 9], |at| {
+                        let mut held = [1; 9];
+                        held[1..].copy_from_slice(&at.to_le_bytes());
+                        held
+                    }));
+                }
+            }),
         };
         if let mosaica_cache::Peek::Ready(held) = self.figures.denies.peek(&key) {
             return Ok(Correction::Held(held));
@@ -653,7 +658,7 @@ impl Engine {
         let key = TailKey {
             token_id: served.mask_identity.token_id,
             sum: sum.clone(),
-            level_versions: sides.iter().map(|side| side.at).collect(),
+            level_versions: cache::versions_digest(sides.iter().map(|side| side.at)),
             shards: served.mask_identity.shards,
         };
         let cancel = served.cancel.clone().unwrap_or_default();
@@ -695,7 +700,7 @@ impl Engine {
             served.name,
             space,
             level,
-            sides.iter().map(|side| side.at).collect(),
+            cache::versions_digest(sides.iter().map(|side| side.at)),
             geometry,
         ));
         let held = self
@@ -703,10 +708,9 @@ impl Engine {
             .get_or_build(key, &served.turn, served.cancel.as_ref(), |build| {
                 self.figures.counters.exact.fetch_add(1, Ordering::Relaxed);
                 let positions = geometry != Geometry::None;
-                let mut dense = counts::Dense::empty(len, positions);
+                let mut parts = Vec::with_capacity(sides.len());
                 for side in sides {
-                    let places =
-                        positions.then(|| Placement::of_segments(&side.served.segments));
+                    let places = positions.then(|| Placement::of_segments(&side.served.segments));
                     let walked = self.count_pool.install(|| {
                         #[cfg(feature = "fault-injection")]
                         self.switches.hold_masked_count_build_if_wanted();
@@ -716,14 +720,10 @@ impl Engine {
                             &|| build.give_way(),
                         )
                     })?;
-                    let part = counts::Part::of(walked, positions);
-                    dense.add(&part);
-                    for (at, &ordinal) in part.ordinals.iter().enumerate() {
-                        if part.placed.get(at).is_some_and(|&placed| placed > 0) {
-                            dense.widen_box(ordinal, part.boxes[at]);
-                        }
-                    }
+                    parts.push((side.served.shard.id(), counts::Part::of(walked)));
                 }
+                let every: Vec<_> = parts.iter().map(|(shard, part)| (*shard, part)).collect();
+                let (dense, _) = sum::sum_of(&every, positions, None);
                 Some(SumEntry::new(CountsAt::of(Vec::new(), dense), None, None))
             })
             .map_err(wait_error)?;

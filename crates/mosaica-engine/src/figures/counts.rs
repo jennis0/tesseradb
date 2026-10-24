@@ -4,23 +4,21 @@
 
 use std::sync::Arc;
 
+use croaring::Bitmap;
 use mosaica_types::ShardId;
 use rustc_hash::FxHashMap;
 
-use crate::row_column::{reserve_row, GrowthStep, LevelAccumulation, RESERVE, RESERVE_EMPTY};
+use crate::derived::{place, Placement};
+use crate::row_column::{
+    reserve_along, reserve_coordinate, reserve_row, GrowthStep, LevelAccumulation, NO_ROW, RESERVE,
+};
 
 /// An artifact keeps a reserve only above this many placed rows. At or below it, a box a deny
 /// touches is worked out from the artifact's members, which are as few.
 pub(crate) const RESERVE_MIN_PLACED: u32 = 2 * RESERVE as u32;
 
-/// A reserve slot holding no row.
-pub(crate) const NO_ROW: u32 = u32::MAX;
-
 /// A row of one side, as a reserve names it: the side's shard and the row in its row space.
 pub(crate) type SideRow = (u32, u32);
-
-/// A reserve slot holding no row.
-const NO_SIDE_ROW: SideRow = (u32::MAX, u32::MAX);
 
 /// One ordinal's figures over several sides, which pass what one side's `u32` and `u64` hold.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,9 +73,6 @@ impl Wide {
 pub(crate) struct Part {
     /// How many ordinals the level held when the side was walked.
     pub(crate) len: u32,
-    /// Whether the walk was given positions, and whether it kept reserves.
-    pub(crate) positions: bool,
-    pub(crate) reserved: bool,
     pub(crate) ordinals: Vec<u32>,
     pub(crate) counts: Vec<u32>,
     /// Empty where the walk was given no positions, as are `sums`, `boxes` and `reserves`.
@@ -90,8 +85,8 @@ pub(crate) struct Part {
 }
 
 impl Part {
-    /// The walk's figures, sparse. `positions` says whether the walk was given positions.
-    pub(crate) fn of(accumulation: LevelAccumulation, positions: bool) -> Self {
+    /// The walk's figures, sparse.
+    pub(crate) fn of(accumulation: LevelAccumulation) -> Self {
         let LevelAccumulation {
             counts,
             placed,
@@ -99,10 +94,9 @@ impl Part {
             boxes,
             reserves,
         } = accumulation;
+        let positions = !placed.is_empty();
         let mut out = Part {
             len: counts.len() as u32,
-            positions,
-            reserved: reserves.is_some(),
             ..Part::default()
         };
         let mut kept = reserves.map(|r| r.into_iter().peekable());
@@ -121,12 +115,7 @@ impl Part {
                 let mut rows = [[NO_ROW; RESERVE]; 4];
                 if kept.peek().is_some_and(|(at, _)| *at as usize == ordinal) {
                     let (_, reserve) = kept.next().expect("peeked");
-                    rows = reserve.map(|side| {
-                        side.map(|key| match key {
-                            RESERVE_EMPTY => NO_ROW,
-                            key => reserve_row(key),
-                        })
-                    });
+                    rows = reserve.map(|side| side.map(reserve_row));
                 }
                 out.reserves.push(rows);
             }
@@ -248,7 +237,6 @@ impl Dense {
         let i = ordinal as usize;
         match figures.narrow() {
             Some((count, placed, sums)) => {
-                self.wide.remove(&ordinal);
                 self.counts[i] = count;
                 if self.positions() {
                     self.placed[i] = placed;
@@ -266,8 +254,8 @@ impl Dense {
         }
     }
 
-    /// Add `part`'s counts, placed counts and sums. Its boxes are not added: see
-    /// [`super::sum`].
+    /// Add `part`'s counts, placed counts and sums; [`super::sum::sum_of`] widens the boxes. An
+    /// ordinal whose sum passes the arrays is held whole from then on.
     pub(crate) fn add(&mut self, part: &Part) {
         self.grow_to(part.len as usize);
         for (i, &ordinal) in part.ordinals.iter().enumerate() {
@@ -275,20 +263,6 @@ impl Dense {
             figures.add(part.wide(i));
             self.set(ordinal, figures);
         }
-    }
-
-    /// Take `part`'s counts, placed counts and sums away. `None` where it holds more than is here,
-    /// which no part added here does.
-    pub(crate) fn sub(&mut self, part: &Part) -> Option<()> {
-        for (i, &ordinal) in part.ordinals.iter().enumerate() {
-            if ordinal as usize >= self.counts.len() {
-                return None;
-            }
-            let mut figures = self.wide(ordinal);
-            figures.sub(part.wide(i))?;
-            self.set(ordinal, figures);
-        }
-        Some(())
     }
 
     /// Widen ordinal `ordinal`'s box by `bbox`.
@@ -315,13 +289,30 @@ impl Dense {
 pub(crate) struct Reserves {
     /// Per ordinal, where its rows are in `rows`, or `u32::MAX` for none.
     pub(crate) index: Vec<u32>,
-    pub(crate) rows: Vec<[[SideRow; RESERVE]; 4]>,
+    /// Up to [`RESERVE`] rows a side, most extreme first and [`NO_ROW`] past the last.
+    pub(crate) rows: Vec<[[u32; RESERVE]; 4]>,
+    /// Each row's shard, beside `rows`. Empty where the sum is over one shard, `alone`.
+    pub(crate) shards: Vec<[[u32; RESERVE]; 4]>,
+    pub(crate) alone: u32,
 }
 
 impl Reserves {
+    /// No reserve yet over `len` ordinals, of a sum over the shards `shards`.
+    pub(crate) fn over(len: usize, shards: &[ShardId]) -> Self {
+        Reserves {
+            index: vec![u32::MAX; len],
+            rows: Vec::new(),
+            shards: Vec::new(),
+            alone: match shards {
+                [shard] => shard.raw(),
+                _ => NO_ROW,
+            },
+        }
+    }
+
     pub(crate) fn weight_bytes(&self) -> u64 {
-        (self.index.len() * 4 + self.rows.len() * std::mem::size_of::<[[SideRow; RESERVE]; 4]>())
-            as u64
+        let slots = std::mem::size_of::<[[u32; RESERVE]; 4]>();
+        (self.index.len() * 4 + (self.rows.len() + self.shards.len()) * slots) as u64
     }
 
     /// One artifact's rows on one side, most extreme first.
@@ -330,79 +321,46 @@ impl Reserves {
         ordinal: u32,
         side: usize,
     ) -> Option<impl Iterator<Item = SideRow> + '_> {
-        let at = *self.index.get(ordinal as usize)?;
-        let rows = self.rows.get(at as usize)?;
+        let at = *self.index.get(ordinal as usize)? as usize;
+        let rows = self.rows.get(at)?[side];
+        let shards = match self.shards.get(at) {
+            Some(shards) => shards[side],
+            None => [self.alone; RESERVE],
+        };
         Some(
-            rows[side]
-                .iter()
-                .copied()
-                .take_while(|&row| row != NO_SIDE_ROW),
+            shards
+                .into_iter()
+                .zip(rows)
+                .take_while(|&(_, row)| row != NO_ROW),
         )
     }
 
-    /// Every row named on any side of `ordinal`'s reserve.
-    fn named(&self, ordinal: u32) -> impl Iterator<Item = SideRow> + '_ {
-        (0..4).flat_map(move |side| self.side(ordinal, side).into_iter().flatten())
-    }
-
-    /// Whether `ordinal`'s reserve names a row of `shard`.
-    pub(crate) fn names_shard(&self, ordinal: u32, shard: ShardId) -> bool {
-        self.named(ordinal).any(|(held, _)| held == shard.raw())
-    }
-
-    /// Hold `rows` as `ordinal`'s reserve, or none.
-    pub(crate) fn set(&mut self, ordinal: u32, rows: Option<[[SideRow; RESERVE]; 4]>) {
+    /// Hold `rows` as `ordinal`'s reserve.
+    pub(crate) fn set(&mut self, ordinal: u32, rows: [[SideRow; RESERVE]; 4]) {
         let i = ordinal as usize;
         if self.index.len() <= i {
             self.index.resize(i + 1, u32::MAX);
         }
-        match (rows, self.index[i]) {
-            (None, _) => self.index[i] = u32::MAX,
-            (Some(rows), u32::MAX) => {
-                self.index[i] = self.rows.len() as u32;
-                self.rows.push(rows);
-            }
-            (Some(rows), at) => self.rows[at as usize] = rows,
+        self.index[i] = self.rows.len() as u32;
+        self.rows.push(rows.map(|side| side.map(|(_, row)| row)));
+        if self.alone == NO_ROW {
+            self.shards
+                .push(rows.map(|side| side.map(|(shard, _)| shard)));
         }
-    }
-
-    /// The same reserves without the slots no ordinal names.
-    pub(crate) fn compacted(self) -> Self {
-        let mut out = Reserves {
-            index: vec![u32::MAX; self.index.len()],
-            rows: Vec::new(),
-        };
-        for (ordinal, &at) in self.index.iter().enumerate() {
-            if at != u32::MAX {
-                out.index[ordinal] = out.rows.len() as u32;
-                out.rows.push(self.rows[at as usize]);
-            }
-        }
-        out
     }
 }
 
-/// The reserve key of `shard`'s `row` at `(x, y)` on `side`: smaller is more extreme, the row's
-/// shard and then the row breaking ties, so every side's rows order alike.
+/// The reserve key of `shard`'s `row` at `position` on `side`: [`crate::row_column::reserve_key`]'s
+/// order, the row's shard and then the row breaking ties, so every side's rows order alike.
 #[inline]
-pub(crate) fn sum_key(side: usize, (shard, row): SideRow, (x, y): (u32, u32)) -> u128 {
-    let along = match side {
-        0 => x,
-        1 => y,
-        2 => u32::MAX - x,
-        _ => u32::MAX - y,
-    };
-    (u128::from(along) << 64) | (u128::from(shard) << 32) | u128::from(row)
+pub(crate) fn sum_key(side: usize, (shard, row): SideRow, position: (u32, u32)) -> u128 {
+    (u128::from(reserve_along(side, position)) << 64) | (u128::from(shard) << 32) | u128::from(row)
 }
 
 /// The coordinate on `side` a [`sum_key`] holds.
 #[inline]
 pub(crate) fn sum_key_value(side: usize, key: u128) -> u32 {
-    let along = (key >> 64) as u32;
-    match side {
-        0 | 1 => along,
-        _ => u32::MAX - along,
-    }
+    reserve_coordinate(side, (key >> 64) as u32)
 }
 
 /// The row a [`sum_key`] names.
@@ -423,7 +381,7 @@ pub(crate) fn reserve_of(
         .collect();
     keys.sort_unstable();
     keys.dedup();
-    let mut out = [NO_SIDE_ROW; RESERVE];
+    let mut out = [(NO_ROW, NO_ROW); RESERVE];
     for (slot, key) in out.iter_mut().zip(keys) {
         *slot = sum_key_row(key);
     }
@@ -579,7 +537,7 @@ impl CountsAt {
     }
 
     /// These counts with each side `follow` names carried from its version to the one it gives by
-    /// that side's steps, counting each pair whose row `counted` admits, placed by `place`.
+    /// that side's steps.
     /// `points` keeps each placed row for a box.
     pub(crate) fn followed(&self, follow: &[Follow<'_>], geometry: super::Geometry) -> CountsAt {
         let mut sides: Vec<SideAt> = self.sides.to_vec();
@@ -590,7 +548,7 @@ impl CountsAt {
             let shard = side.shard.raw();
             for step in &follow.steps {
                 for &(row, ordinal) in step.pairs.iter() {
-                    if !(follow.counted)(row) {
+                    if row >= follow.base_rows || !follow.fragment.contains(row) {
                         continue;
                     }
                     let mine = side_grown.entry(ordinal).or_default();
@@ -600,7 +558,7 @@ impl CountsAt {
                     if geometry == super::Geometry::None {
                         continue;
                     }
-                    if let Some((x, y)) = (follow.place_of)(row) {
+                    if let Some((x, y)) = place(follow.places, row) {
                         mine.placed += 1;
                         mine.sums[0] += u64::from(x);
                         mine.sums[1] += u64::from(y);
@@ -647,8 +605,11 @@ pub(crate) struct Follow<'a> {
     pub(crate) place: usize,
     pub(crate) to: u64,
     pub(crate) steps: Vec<&'a GrowthStep>,
-    pub(crate) counted: &'a dyn Fn(u32) -> bool,
-    pub(crate) place_of: &'a dyn Fn(u32) -> Option<(u32, u32)>,
+    /// The side's base row count, its grant's projection and its positions: a pair is counted
+    /// where its row is a base row of the projection, at the position the side places it.
+    pub(crate) base_rows: u32,
+    pub(crate) fragment: &'a Bitmap,
+    pub(crate) places: &'a [Placement<'a>],
 }
 
 /// One artifact's correction: the rows a request subtracts or adds beside the sum.

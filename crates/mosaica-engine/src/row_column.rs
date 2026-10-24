@@ -306,32 +306,38 @@ pub const RESERVE: usize = 8;
 /// the row, which breaks ties: [`reserve_key`] and [`reserve_row`].
 pub type Reserve = [[u64; RESERVE]; 4];
 
-/// A reserve slot holding no row.
+/// A reserve slot holding no row: as a key, and as the row [`reserve_row`] reads off it.
 pub const RESERVE_EMPTY: u64 = u64::MAX;
+pub const NO_ROW: u32 = RESERVE_EMPTY as u32;
 
-/// The reserve key of a row at `(x, y)` on `side`.
+/// How far along `side` a row at `(x, y)` lies, smaller being more extreme: the coordinate,
+/// turned round on the high sides.
 #[inline]
-pub fn reserve_key(side: usize, row: u32, (x, y): (u32, u32)) -> u64 {
-    let along = match side {
+pub fn reserve_along(side: usize, (x, y): (u32, u32)) -> u32 {
+    match side {
         0 => x,
         1 => y,
         2 => u32::MAX - x,
         _ => u32::MAX - y,
-    };
-    (u64::from(along) << 32) | u64::from(row)
+    }
 }
 
-/// The coordinate on `side` a reserve key holds.
+/// The coordinate on `side` that lies `along` it.
 #[inline]
-pub fn reserve_value(side: usize, key: u64) -> u32 {
-    let along = (key >> 32) as u32;
+pub fn reserve_coordinate(side: usize, along: u32) -> u32 {
     match side {
         0 | 1 => along,
         _ => u32::MAX - along,
     }
 }
 
-/// The row a reserve key names.
+/// The reserve key of a row at `(x, y)` on `side`.
+#[inline]
+pub fn reserve_key(side: usize, row: u32, position: (u32, u32)) -> u64 {
+    (u64::from(reserve_along(side, position)) << 32) | u64::from(row)
+}
+
+/// The row a reserve key names, [`NO_ROW`] for [`RESERVE_EMPTY`].
 #[inline]
 pub fn reserve_row(key: u64) -> u32 {
     key as u32

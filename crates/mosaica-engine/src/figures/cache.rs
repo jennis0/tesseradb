@@ -26,8 +26,9 @@
 //!
 //! The bound is `serve.masked_count_cache_bytes`. A level's sum over every side is 4 B an artifact
 //! for counts alone and 40 B with a centroid's sums and a box, whatever the number of sides. A
-//! layer that serves a box keeps a reserve in the same entry, 4 B an artifact and 256 B more for
-//! each artifact with more than sixteen placed rows, so an entry too large for the bound loses its
+//! layer that serves a box keeps a reserve in the same entry, 4 B an artifact and 128 B more for
+//! each artifact with more than sixteen placed rows, 256 B where the sum has several sides, which
+//! names each row's shard, so an entry too large for the bound loses its
 //! reserve and keeps its counts. A field's tally over a fragment's base rows is under a kilobyte,
 //! held in a cache of its own under a bound of the same size.
 
@@ -129,17 +130,6 @@ pub(crate) struct SumAddress {
     pub geometry: Geometry,
 }
 
-/// One side of a [`SumKey`]: the shard, the shard identity its base rows are numbered under, which
-/// a compaction rotates and nothing else renumbers, and its column's
-/// [`crate::row_column::RowColumn::identity`], which a column composed, opened, recomposed or
-/// claimed afresh moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SumSide {
-    pub shard: mosaica_types::ShardId,
-    pub identity: [u8; 32],
-    pub column: u64,
-}
-
 /// A level's sum over the base rows of every side: a function of each side's base rows and its
 /// column's base labels.
 ///
@@ -147,7 +137,10 @@ pub(crate) struct SumSide {
 /// - `view`, `space`, `level`: what the columns are of. The layer is named by its space, never by
 ///   its name, which a layer registered after a drop takes again.
 /// - `geometry`: what the entry carries beside the counts.
-/// - `sides`: every side the level is served from a column in, ascending by shard ([`SumSide`]).
+/// - `sides`: a digest of every side the level is served from a column in, ascending by shard:
+///   the shard, the shard identity its base rows are numbered under, which a compaction rotates
+///   and nothing else renumbers, and its column's [`crate::row_column::RowColumn::identity`],
+///   which a column composed, opened, recomposed or claimed afresh moves ([`sides_digest`]).
 ///   Within one key, a growth or a publication is followed by each side's steps, not by a new key.
 ///
 /// Not in the key: the overlay's version, the segments' versions and the fragments' watermarks. A
@@ -160,7 +153,7 @@ pub(crate) struct SumKey {
     pub space: LayerSpace,
     pub level: u32,
     pub geometry: Geometry,
-    pub sides: Vec<SumSide>,
+    pub sides: [u8; 32],
 }
 
 impl SumKey {
@@ -175,6 +168,39 @@ impl SumKey {
     }
 }
 
+/// A digest of a sum's sides, each its shard, its shard identity and its column's identity.
+pub(crate) fn sides_digest(
+    sides: impl IntoIterator<Item = (mosaica_types::ShardId, [u8; 32], u64)>,
+) -> [u8; 32] {
+    digest_of(b"mosaica-sum-sides-v1", |hasher| {
+        use sha2::Digest;
+        for (shard, identity, column) in sides {
+            hasher.update(shard.raw().to_le_bytes());
+            hasher.update(identity);
+            hasher.update(column.to_le_bytes());
+        }
+    })
+}
+
+/// SHA-256 over `tag` and what `write` adds: one fixed-size key for a list of any length.
+pub(crate) fn digest_of(tag: &[u8], write: impl FnOnce(&mut sha2::Sha256)) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(tag);
+    write(&mut hasher);
+    hasher.finalize().into()
+}
+
+/// A digest of each side's version of the level, in the order of the sides.
+pub(crate) fn versions_digest(versions: impl IntoIterator<Item = u64>) -> [u8; 32] {
+    digest_of(b"mosaica-level-versions-v1", |hasher| {
+        use sha2::Digest;
+        for version in versions {
+            hasher.update(version.to_le_bytes());
+        }
+    })
+}
+
 /// One request's composed mask over every side, named by every input to it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ExactKey {
@@ -182,22 +208,22 @@ pub(crate) struct ExactKey {
     pub view: String,
     pub space: LayerSpace,
     pub level: u32,
-    /// Each side's version of the level, in the order of the sides.
-    pub level_versions: Vec<u64>,
+    /// [`versions_digest`] of each side's version of the level.
+    pub level_versions: [u8; 32],
     pub geometry: Geometry,
     /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
 
 /// What a deny correction is a function of: the sum, the level's labels at each side's version of
-/// its column, and each side's denied base rows. A side's `failing` is the overlay's version where
-/// the mask also subtracts buffered rows the viewer fails below the base, which no deny version
-/// follows.
+/// its column, and each side's denied base rows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DenyKey {
     pub sum: SumKey,
-    /// Per side of `sum`: its version of the level, its deny version and its `failing`.
-    pub sides: Vec<(u64, u64, Option<u64>)>,
+    /// A digest of each side's version of the level, its deny version, and the overlay's version
+    /// where the mask also subtracts buffered rows the viewer fails below the base, which no deny
+    /// version follows.
+    pub sides: [u8; 32],
 }
 
 /// What one session's tail is a function of: its rows above each side's base rows and the labels
@@ -206,8 +232,8 @@ pub(crate) struct DenyKey {
 pub(crate) struct TailKey {
     pub token_id: u64,
     pub sum: SumKey,
-    /// Each side's version of the level, in the order of the sides.
-    pub level_versions: Vec<u64>,
+    /// [`versions_digest`] of each side's version of the level.
+    pub level_versions: [u8; 32],
     /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
@@ -289,7 +315,7 @@ impl MaskIdentity {
         view: &str,
         space: LayerSpace,
         level: u32,
-        level_versions: Vec<u64>,
+        level_versions: [u8; 32],
         geometry: Geometry,
     ) -> ExactKey {
         ExactKey {
@@ -435,8 +461,7 @@ pub struct FiguresStats {
     /// Composed field tallies that did not cover the fragment's base rows, or a deny that
     /// subtracted more than they held: each answered by a walk instead.
     pub field_mismatches: u64,
-    /// Sums read back from disk rather than walked, and sides' walks read back to bring a sum
-    /// forward.
+    /// Sums, and sides' walks, read back from disk rather than walked.
     pub loads: u64,
     /// Walks of a whole composed mask, taken where a level's denied-row labels are not yet held.
     pub exact: u64,
@@ -737,9 +762,8 @@ impl FiguresCache {
         }
     }
 
-    /// Remove every entry filed under an identity outside `live`: at open, the identities of the
-    /// shards served, and whenever a compaction rotates them, those and the identities they
-    /// replaced, whose sides' walks a sum held from before the compaction is brought forward by.
+    /// Remove every entry filed under an identity outside `live`, the identities of the shards
+    /// served: at open, and whenever a compaction rotates them.
     pub(crate) fn sweep(&self, live: impl IntoIterator<Item = [u8; 32]>) {
         let live: Vec<[u8; 32]> = live.into_iter().collect();
         self.field_left
@@ -1017,7 +1041,7 @@ mod tests {
             view: "s0".into(),
             space: LayerSpace::ZERO,
             level: 0,
-            level_versions: vec![1],
+            level_versions: versions_digest([1]),
             shards: [shards; 32],
         })
     }

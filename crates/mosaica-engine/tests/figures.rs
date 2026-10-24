@@ -969,8 +969,9 @@ fn counts_are_kept_where_their_reserve_is_too_large_for_the_bound() {
     let mut fx = Fixture::new(Corpus::SingleKey);
     let engine = fx.open_published();
     fold(&engine);
-    // Above the two levels' counts and sums, below the flat level's reserve.
-    engine.set_masked_count_cache_bytes(2_000);
+    // Above the two levels' counts and sums and the list level's reserve, below the flat level's
+    // counts and sums with its reserve.
+    engine.set_masked_count_cache_bytes(3_500);
     let reader = Principal::ReadAll;
     assert!(check_one(&fx, &engine, &reader, "under a small bound"));
     let fills = engine.figures_stats().fills;
@@ -1227,16 +1228,8 @@ fn several_shards_serve_the_figures_one_shard_holding_their_items_serves() {
     let corpus = Corpus::MultiKey;
     let one_dir = tempfile::TempDir::new().unwrap();
     let several_dir = tempfile::TempDir::new().unwrap();
-    let one_root = build(one_dir.path(), corpus, None);
-    let several_root = build(several_dir.path(), corpus, Some(450));
-    assert_eq!(shards_of(&several_root).1.len(), 3, "the build wrote three shards");
-    let open = |dir: &tempfile::TempDir, root: &Path| {
-        let (cache, wal) = (dir.path().join("cache"), dir.path().join("wal.log"));
-        let engine = open_engine_publishing(root, &cache, &wal);
-        engine.set_background_refresh_for_test(false);
-        engine
-    };
-    let (one, several) = (open(&one_dir, &one_root), open(&several_dir, &several_root));
+    let (one_root, several_root) = built_as_one_and_three(&one_dir, &several_dir, corpus);
+    let (one, several) = (open_in(&one_dir, &one_root), open_in(&several_dir, &several_root));
     for engine in [&one, &several] {
         publish_by_id(engine);
     }
@@ -1277,17 +1270,16 @@ fn several_shards_serve_the_figures_one_shard_holding_their_items_serves() {
         .into_iter()
         .filter(|s| s % 7 == 3)
         .collect();
-    // And a growth in shard 2 since its fold, after which the compaction of shard 1 builds shard
-    // 2's form holding its own rows.
-    let in_shard_two: Vec<u64> = ids_in_shard(&several, N, 2)
+    // And a growth in shard 1, whose growth leaves the sum with shard 1's walk at its compaction.
+    let joining_in_one: Vec<u64> = ids_in_shard(&several, N, 1)
         .into_iter()
         .filter(|s| s % 4 == 1)
         .collect();
     for engine in [&one, &several] {
         deny_by_id(engine, in_shard_one.iter().copied(), ChangeOp::Delete);
-        grow_by_id(engine, LIST, "l5", &in_shard_two);
+        grow_by_id(engine, LIST, "l5", &joining_in_one);
     }
-    assert_served_as_one(&one, &several, corpus, "deleted in shard 1, grown in shard 2");
+    assert_served_as_one(&one, &several, corpus, "deleted and grown in shard 1");
     let walks = several.figures_stats().fills;
     compact(&several, Some(shard(1)));
     fold(&one);
@@ -1299,6 +1291,10 @@ fn several_shards_serve_the_figures_one_shard_holding_their_items_serves() {
         "each sum walked shard 1 again and no other shard"
     );
 
+    let in_shard_two: Vec<u64> = ids_in_shard(&several, N, 2)
+        .into_iter()
+        .filter(|s| s % 4 == 1)
+        .collect();
     for engine in [&one, &several] {
         grow_by_id(engine, LIST, "l7", &in_shard_two);
         deny_by_id(engine, (0..N).filter(|s| s % 13 == 1), ChangeOp::Unsuppress);
@@ -1309,7 +1305,168 @@ fn several_shards_serve_the_figures_one_shard_holding_their_items_serves() {
         engine.figures_settled_for_test();
     }
     drop((one, several));
-    let (one, several) = (open(&one_dir, &one_root), open(&several_dir, &several_root));
+    let (one, several) = (open_in(&one_dir, &one_root), open_in(&several_dir, &several_root));
     assert_served_as_one(&one, &several, corpus, "after a restart");
     assert_eq!(several.figures_stats().fills, 0, "a restart walks nothing again");
+}
+
+/// `corpus` built in `one` as one shard and in `several` as three. The two bundles' roots.
+fn built_as_one_and_three(
+    one: &tempfile::TempDir,
+    several: &tempfile::TempDir,
+    corpus: Corpus,
+) -> (PathBuf, PathBuf) {
+    let one_root = build(one.path(), corpus, None);
+    let several_root = build(several.path(), corpus, Some(450));
+    assert_eq!(shards_of(&several_root).1.len(), 3, "the build wrote three shards");
+    (one_root, several_root)
+}
+
+/// An engine over `root`, its cache and log in `dir`, its background refresh off.
+fn open_in(dir: &tempfile::TempDir, root: &Path) -> Engine {
+    let (cache, wal) = (dir.path().join("cache"), dir.path().join("wal.log"));
+    let engine = open_engine_publishing(root, &cache, &wal);
+    engine.set_background_refresh_for_test(false);
+    engine
+}
+
+/// **A shard every item of which is suppressed** leaves every principal out of it while the
+/// grant's base rows there are still in the sum: the request subtracts them all, through a
+/// compaction of another shard and the lift.
+#[test]
+fn a_shard_the_viewer_sees_nothing_in_is_corrected_in_the_sum() {
+    let corpus = Corpus::MultiKey;
+    let one_dir = tempfile::TempDir::new().unwrap();
+    let several_dir = tempfile::TempDir::new().unwrap();
+    let (one_root, several_root) = built_as_one_and_three(&one_dir, &several_dir, corpus);
+    let (one, several) = (
+        open_in(&one_dir, &one_root),
+        open_in(&several_dir, &several_root),
+    );
+    for engine in [&one, &several] {
+        publish_by_id(engine);
+        fold(engine);
+    }
+    assert_served_as_one(&one, &several, corpus, "folded");
+    let all_of_one = ids_in_shard(&several, N, 1);
+    for engine in [&one, &several] {
+        deny_by_id(engine, all_of_one.iter().copied(), ChangeOp::Suppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "shard 1 suppressed whole");
+    compact(&several, Some(shard(0)));
+    fold(&one);
+    assert_served_as_one(&one, &several, corpus, "shard 0 compacted, shard 1 left out");
+    for engine in [&one, &several] {
+        deny_by_id(engine, all_of_one.iter().copied(), ChangeOp::Unsuppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "lifted");
+}
+
+/// **Two compactions with no request between them walk the two shards compacted and no other**:
+/// the shard kept is read back at the version its walk read, and what a growth has added to it
+/// since is kept as it was rather than walked again.
+#[test]
+fn two_compactions_in_a_row_walk_the_shards_compacted_and_no_other() {
+    let corpus = Corpus::MultiKey;
+    let one_dir = tempfile::TempDir::new().unwrap();
+    let several_dir = tempfile::TempDir::new().unwrap();
+    let (one_root, several_root) = built_as_one_and_three(&one_dir, &several_dir, corpus);
+    let (one, several) = (
+        open_in(&one_dir, &one_root),
+        open_in(&several_dir, &several_root),
+    );
+    for engine in [&one, &several] {
+        publish_by_id(engine);
+        fold(engine);
+    }
+    let walks = several.figures_stats().fills;
+    assert_served_as_one(&one, &several, corpus, "folded");
+    let sums = 2 * corpus.principals().len() as u64;
+    assert_eq!(
+        several.figures_stats().fills - walks,
+        3 * sums,
+        "every shard walked once"
+    );
+
+    let joining: Vec<u64> = ids_in_shard(&several, N, 1)
+        .into_iter()
+        .filter(|s| s % 3 == 0)
+        .collect();
+    for engine in [&one, &several] {
+        grow_by_id(engine, LIST, "l3", &joining);
+    }
+    let walks = several.figures_stats().fills;
+    assert_served_as_one(&one, &several, corpus, "grown in shard 1");
+    assert_eq!(
+        several.figures_stats().fills,
+        walks,
+        "a growth is followed, not walked"
+    );
+
+    for engine in [&one, &several] {
+        deny_by_id(engine, (0..N).filter(|s| s % 17 == 2), ChangeOp::Delete);
+    }
+    compact(&several, Some(shard(0)));
+    compact(&several, Some(shard(2)));
+    fold(&one);
+    let walks = several.figures_stats().fills;
+    assert_served_as_one(&one, &several, corpus, "shards 0 and 2 compacted in a row");
+    assert_eq!(
+        several.figures_stats().fills - walks,
+        2 * sums,
+        "each sum walked shards 0 and 2 and read shard 1 back"
+    );
+}
+
+/// The sources of `f7`'s members `n` from each side of their box: the lowest and highest by `x`
+/// and by `y`.
+fn edges_of_f7(n: usize) -> Vec<u64> {
+    let members: Vec<u64> = (0..N).filter(|s| s % FLAT_ARTIFACTS == 7).collect();
+    let mut out = BTreeSet::new();
+    for along in [x_of as fn(u64) -> f64, y_of] {
+        let mut sorted = members.clone();
+        sorted.sort_by(|a, b| along(*a).total_cmp(&along(*b)).then(a.cmp(b)));
+        out.extend(sorted.iter().take(n));
+        out.extend(sorted.iter().rev().take(n));
+    }
+    out.into_iter().collect()
+}
+
+/// **A denied edge is replaced from the reserve over several shards as over one**: the eight most
+/// extreme rows a side keeps, each with its shard, answer one row denied off each edge, and ten
+/// spend them, in a bundle of one shard and of three alike.
+#[test]
+fn a_denied_edge_is_replaced_from_the_reserve_over_one_shard_and_several() {
+    let corpus = Corpus::SingleKey;
+    let one_dir = tempfile::TempDir::new().unwrap();
+    let several_dir = tempfile::TempDir::new().unwrap();
+    let (one_root, several_root) = built_as_one_and_three(&one_dir, &several_dir, corpus);
+    let (one, several) = (
+        open_in(&one_dir, &one_root),
+        open_in(&several_dir, &several_root),
+    );
+    for engine in [&one, &several] {
+        publish_by_id(engine);
+        fold(engine);
+    }
+    assert_served_as_one(&one, &several, corpus, "folded");
+    let spent = |engine: &Engine| engine.figures_stats().reserve_spent;
+    let before = (spent(&one), spent(&several));
+    for engine in [&one, &several] {
+        deny_by_id(engine, edges_of_f7(1), ChangeOp::Suppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "an edge row off each side suppressed");
+    assert_eq!(
+        (spent(&one), spent(&several)),
+        before,
+        "one row off each edge is answered from the reserve"
+    );
+    for engine in [&one, &several] {
+        deny_by_id(engine, edges_of_f7(10), ChangeOp::Suppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "ten rows off each side suppressed");
+    assert!(
+        spent(&one) > before.0 && spent(&several) > before.1,
+        "ten rows off an edge spend a reserve of eight"
+    );
 }

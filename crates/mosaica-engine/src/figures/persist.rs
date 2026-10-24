@@ -2,7 +2,7 @@
 //! directory, so a restart reads them back rather than walking again.
 //!
 //! A level's sum for one grant is one file in [`SUMS_DIR`], which names the sides it is over.
-//! Each side's walk, which a sum is brought forward by when that side or another moves, and the
+//! Each side's walk, which a sum is taken again from when another side moves, and the
 //! denied rows' labels are in one directory per shard identity. Every file is named by a digest of
 //! what it is a function of and the version it describes. A file is a magic, the payload's length
 //! and its SHA-256, then the payload; a file whose length or digest does not match is not read, so
@@ -25,7 +25,7 @@ use super::counts::{CountsAt, Dense, Grown, Part, Reserves, SideAt, SideGrown, W
 use super::denied::DeniedLabels;
 use super::Geometry;
 
-const SUM_MAGIC: &[u8; 8] = b"MSFSUM04";
+const SUM_MAGIC: &[u8; 8] = b"MSFSUM05";
 const PART_MAGIC: &[u8; 8] = b"MSFPRT04";
 const DENIED_MAGIC: &[u8; 8] = b"MSFDNY03";
 
@@ -143,18 +143,7 @@ pub(crate) fn bytes_under(root: &Path) -> u64 {
 
 /// Write `payload` as the entry `stem` at `at`, and remove the entry's other versions.
 fn write(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8], payload: &[u8]) {
-    let mut bytes = Vec::with_capacity(HEADER + payload.len());
-    bytes.extend_from_slice(magic);
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&Sha256::digest(payload));
-    bytes.extend_from_slice(payload);
-    let path = path_of(dir, stem, at, extension);
-    if let Err(error) = mosaica_authz::write_private_atomically(&path, &bytes) {
-        tracing::warn!(
-            path = %path.display(),
-            %error,
-            "a level's figures could not be written to the cache directory; a restart walks them again"
-        );
+    if !write_beside(dir, stem, at, extension, magic, payload) {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -169,6 +158,33 @@ fn write(dir: &Path, stem: &str, at: u64, extension: &str, magic: &[u8; 8], payl
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Write `payload` as the entry `stem` at `at`, beside the entry's other versions. `false` where
+/// it could not be written.
+fn write_beside(
+    dir: &Path,
+    stem: &str,
+    at: u64,
+    extension: &str,
+    magic: &[u8; 8],
+    payload: &[u8],
+) -> bool {
+    let mut bytes = Vec::with_capacity(HEADER + payload.len());
+    bytes.extend_from_slice(magic);
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&Sha256::digest(payload));
+    bytes.extend_from_slice(payload);
+    let path = path_of(dir, stem, at, extension);
+    if let Err(error) = mosaica_authz::write_private_atomically(&path, &bytes) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "a level's figures could not be written to the cache directory; a restart walks them again"
+        );
+        return false;
+    }
+    true
 }
 
 /// The payload of the entry `stem` at `at`, where a whole and unaltered one is on disk. A read marks
@@ -279,8 +295,8 @@ fn flags(positions: bool, reserves: bool) -> u8 {
     u8::from(positions) | (u8::from(reserves) << 1)
 }
 
-/// Whether `flags` holds what `geometry` asks for: positions with a centroid or a box, and a
-/// reserve only with a box.
+/// Whether a sum's `flags` hold what `geometry` asks for: positions with a centroid or a box, and
+/// a reserve only with a box, which an entry too large for the bound goes without.
 fn holds(flags: u8, geometry: Geometry) -> Option<(bool, bool)> {
     let (positions, reserves) = (flags & 1 != 0, flags & 2 != 0);
     let wanted =
@@ -337,11 +353,11 @@ pub(crate) fn write_sum(dir: &Path, stem: &str, counts: &CountsAt, reserves: Opt
     if let Some(reserves) = reserves {
         put_len(&mut payload, reserves.index.len());
         put_u32s(&mut payload, &reserves.index);
+        payload.extend_from_slice(&reserves.alone.to_le_bytes());
         put_len(&mut payload, reserves.rows.len());
-        for rows in &reserves.rows {
-            for &(shard, row) in rows.as_flattened() {
-                put_u32s(&mut payload, &[shard, row]);
-            }
+        put_len(&mut payload, reserves.shards.len());
+        for rows in reserves.rows.iter().chain(&reserves.shards) {
+            put_u32s(&mut payload, rows.as_flattened());
         }
     }
     write(dir, stem, 0, "sum", SUM_MAGIC, &payload);
@@ -421,18 +437,21 @@ pub(crate) fn read_sum(
         true => {
             let len = r.len()?;
             let index = r.u32s(len)?;
-            let held = r.len()?;
-            let flat = r.u32s(held.checked_mul(8 * RESERVE)?)?;
-            let pairs: Vec<(u32, u32)> = flat
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|p| (p[0], p[1]))
-                .collect();
-            let sides = pairs.as_chunks::<RESERVE>().0;
+            let alone = r.u32()?;
+            let (held, tagged) = (r.len()?, r.len()?);
+            let mut slots = |n: usize| -> Option<Vec<[[u32; RESERVE]; 4]>> {
+                let flat = r.u32s(n.checked_mul(4 * RESERVE)?)?;
+                Some(flat.as_chunks::<RESERVE>().0.as_chunks::<4>().0.to_vec())
+            };
+            let (rows, shards) = (slots(held)?, slots(tagged)?);
+            if !(shards.is_empty() || shards.len() == rows.len()) {
+                return None;
+            }
             Some(Reserves {
                 index,
-                rows: sides.as_chunks::<4>().0.to_vec(),
+                rows,
+                shards,
+                alone,
             })
         }
     };
@@ -447,10 +466,17 @@ pub(crate) fn read_sum(
     Some((counts, reserves))
 }
 
-/// Write one side's walk of a level, filed under the level version it read.
-pub(crate) fn write_part(dir: &Path, stem: &str, filled_at: u64, part: &Part) {
+/// The flags of a walk taken for `geometry`: positions with a centroid or a box, and a reserve
+/// with a box.
+fn walked_for(geometry: Geometry) -> (bool, bool) {
+    (geometry != Geometry::None, geometry == Geometry::Box)
+}
+
+/// Write one side's walk of a level for `geometry`, filed under the level version it read, beside
+/// its walks at other versions, which a sum held may still name.
+pub(crate) fn write_part(dir: &Path, stem: &str, filled_at: u64, part: &Part, geometry: Geometry) {
     let k = part.ordinals.len();
-    let (positions, reserves) = (part.positions, part.reserved);
+    let (positions, reserves) = walked_for(geometry);
     let mut payload = Vec::with_capacity(k * if positions { 172 } else { 8 } + 32);
     payload.extend_from_slice(&part.len.to_le_bytes());
     payload.push(flags(positions, reserves));
@@ -467,7 +493,7 @@ pub(crate) fn write_part(dir: &Path, stem: &str, filled_at: u64, part: &Part) {
             put_u32s(&mut payload, rows.as_flattened());
         }
     }
-    write(dir, stem, filled_at, "part", PART_MAGIC, &payload);
+    write_beside(dir, stem, filled_at, "part", PART_MAGIC, &payload);
 }
 
 /// One side's walk of a level at `filled_at`, where it is on disk with the geometry `geometry`
@@ -485,14 +511,12 @@ pub(crate) fn read_part(
     let k = r.len()?;
     let ordinals = r.u32s(k)?;
     let counts = r.u32s(k)?;
-    let (positions, reserved) = holds(flags, geometry)?;
-    if reserved != (geometry == Geometry::Box) {
+    let (positions, reserved) = walked_for(geometry);
+    if flags != self::flags(positions, reserved) {
         return None;
     }
     let mut part = Part {
         len,
-        positions,
-        reserved,
         ordinals,
         counts,
         ..Part::default()
