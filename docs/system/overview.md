@@ -77,7 +77,7 @@ The [write path](write-path.md) chapter covers ingest, flushes and compaction.
 Mosaica can give each viewer a map computed only from the items they may see.
 
 - **Access labels.** Any item can carry a label, an expression over terms such as `secret&(team_a|team_b)`.
-- **Viewers.** A viewer signs in with a password, an API key, or a token from an OpenID Connect provider. Alternatively, your own backend starts a session on their behalf. Either way, the session holds a set of terms, and the viewer may see the items whose labels those terms satisfy.
+- **Viewers.** A viewer signs in with a password or an API key, or presents an access token from an OpenID Connect provider. Mosaica checks the token, and your application runs the provider's sign-in page. Alternatively, your own backend starts a session on the viewer's behalf. Either way, the session holds a set of terms, and the viewer may see the items whose labels those terms satisfy.
 - **Everything follows.** Every count, sample, density, cluster count and annotation title is computed from the items the viewer may see. A filter only narrows that set. A viewer who may see few items still gets a full sample of those.
 - **Public data.** Data with no labels needs no set-up. Every item gets the label `public`, which every viewer holds.
 
