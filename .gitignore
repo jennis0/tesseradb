@@ -56,3 +56,9 @@ clients/ts/components/custom-elements.json
 
 #Ignore env variables
 .env
+
+# Local working notes and scratch files of individual sessions.
+.claude/identity-campaign/
+.claude/perf-campaign/
+.impeccable/
+clients/ts/.shot2-tmp.mjs
