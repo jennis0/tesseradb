@@ -79,6 +79,8 @@ These are done once, by the owner of the repository and the registry accounts.
 
 ## What the workflow does
 
+Every third-party action in `release.yml` and `wheels.yml` is pinned to a commit, with its release tag in a comment, and Dependabot (`.github/dependabot.yml`) proposes new pins weekly.
+
 | Job | What it does |
 |---|---|
 | `verify` | Refuses the tag unless it is `v` and the version in `Cargo.toml`, every copy of the version agrees, `CHANGELOG.md` has its section, the gate passed on the commit, `cargo deny check` passes including advisories, and `THIRD_PARTY_LICENSES` is current. |

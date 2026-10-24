@@ -1,0 +1,8 @@
+# Weekly pull requests that move the workflows' pinned action commits to each action's newest
+# release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
