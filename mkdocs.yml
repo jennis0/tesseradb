@@ -1,6 +1,6 @@
 site_name: Mosaica
 site_description: An interactive map over billions of points, served from one machine while the data changes.
-repo_url: https://github.com/jennis0/mosaica
+repo_url: https://github.com/mosaicadb/mosaica
 edit_uri: ""
 docs_dir: docs
 strict: true

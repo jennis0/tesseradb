@@ -57,4 +57,4 @@ any later release, and a bundle built by one version may be refused by the next.
   container image on GHCR; and the Rust crates on crates.io, which are internal to the binary and
   carry no stable API.
 
-[0.1.0]: https://github.com/jennis0/mosaica/releases/tag/v0.1.0
+[0.1.0]: https://github.com/mosaicadb/mosaica/releases/tag/v0.1.0

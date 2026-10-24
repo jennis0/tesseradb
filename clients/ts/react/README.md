@@ -1,6 +1,6 @@
 # @mosaicajs/react
 
-React bindings for [Mosaica](https://github.com/jennis0/mosaica), which serves an interactive map over billions of points from one machine, with every count, cluster and sample computed over what the signed-in viewer may see. `useMosaicaStore` and `useProjection` hold a [`@mosaicajs/client`](https://www.npmjs.com/package/@mosaicajs/client) store in a component. `@mosaicajs/react/components` wraps each `mosaica-*` element of [`@mosaicajs/components`](https://www.npmjs.com/package/@mosaicajs/components) as a React component; it needs `@mosaicajs/components` and `@lit/react`, which the hooks alone do not.
+React bindings for [Mosaica](https://github.com/mosaicadb/mosaica), which serves an interactive map over billions of points from one machine, with every count, cluster and sample computed over what the signed-in viewer may see. `useMosaicaStore` and `useProjection` hold a [`@mosaicajs/client`](https://www.npmjs.com/package/@mosaicajs/client) store in a component. `@mosaicajs/react/components` wraps each `mosaica-*` element of [`@mosaicajs/components`](https://www.npmjs.com/package/@mosaicajs/components) as a React component; it needs `@mosaicajs/components` and `@lit/react`, which the hooks alone do not.
 
 ```bash
 npm install @mosaicajs/react @mosaicajs/components @lit/react
@@ -19,4 +19,4 @@ function Map({authorise}: {authorise: () => Promise<{token: string; expiresAt: n
 }
 ```
 
-Documentation: [TypeScript client reference](https://github.com/jennis0/mosaica/blob/main/docs/reference/typescript.md). Licence: Apache-2.0.
+Documentation: [TypeScript client reference](https://github.com/mosaicadb/mosaica/blob/main/docs/reference/typescript.md). Licence: Apache-2.0.

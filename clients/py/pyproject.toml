@@ -40,11 +40,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jennis0/mosaica"
-Documentation = "https://github.com/jennis0/mosaica/tree/main/docs"
-Source = "https://github.com/jennis0/mosaica"
-Issues = "https://github.com/jennis0/mosaica/issues"
-Changelog = "https://github.com/jennis0/mosaica/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/mosaicadb/mosaica"
+Documentation = "https://github.com/mosaicadb/mosaica/tree/main/docs"
+Source = "https://github.com/mosaicadb/mosaica"
+Issues = "https://github.com/mosaicadb/mosaica/issues"
+Changelog = "https://github.com/mosaicadb/mosaica/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # The notebook map: anywidget plus the components' single-file bundle, which the wheel's build

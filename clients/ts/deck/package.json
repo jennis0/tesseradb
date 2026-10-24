@@ -9,13 +9,13 @@
     "visualisation",
     "webgl"
   ],
-  "homepage": "https://github.com/jennis0/mosaica/tree/main/clients/ts/deck#readme",
+  "homepage": "https://github.com/mosaicadb/mosaica/tree/main/clients/ts/deck#readme",
   "bugs": {
-    "url": "https://github.com/jennis0/mosaica/issues"
+    "url": "https://github.com/mosaicadb/mosaica/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jennis0/mosaica.git",
+    "url": "git+https://github.com/mosaicadb/mosaica.git",
     "directory": "clients/ts/deck"
   },
   "license": "Apache-2.0",

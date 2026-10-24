@@ -15,22 +15,22 @@ These are done once, by the owner of the repository and the registry accounts.
    matching `v*`. The publish jobs run in this environment, and only they can ask the registries
    for a publish token.
 2. **PyPI trusted publishers.** For each of the projects `mosaica-native` and `mosaica`, open the
-   project on PyPI, then Settings, Publishing, and add a GitHub publisher with owner `jennis0`,
+   project on PyPI, then Settings, Publishing, and add a GitHub publisher with owner `mosaicadb`,
    repository `mosaica`, workflow `release.yml` and environment `release`. No token is stored.
 3. **npm trusted publishers.** The organisation `mosaicajs` on npmjs.com owns the `@mosaicajs`
    scope, and each of `@mosaicajs/client`, `@mosaicajs/deck`, `@mosaicajs/components` and
    `@mosaicajs/react` exists as a 0.0.0 placeholder. On each package's Settings page, under Trusted
-   publishing, add GitHub Actions with repository `jennis0/mosaica`, workflow `release.yml` and
+   publishing, add GitHub Actions with repository `mosaicadb/mosaica`, workflow `release.yml` and
    environment `release`. No token is stored, and npm records provenance for each publish.
 4. **crates.io trusted publishers.** All twenty published crates exist as 0.0.0 placeholders. On
    each crate's Settings page at crates.io, under Trusted Publishing, add GitHub with repository
-   owner `jennis0`, repository `mosaica`, workflow `release.yml` and environment `release`. No
+   owner `mosaicadb`, repository `mosaica`, workflow `release.yml` and environment `release`. No
    token is stored: `rust-lang/crates-io-auth-action` exchanges the job's OIDC token for a publish
    token that lasts thirty minutes.
 5. **GHCR.** Under Settings, Actions, General, set workflow permissions so that a workflow can be
    granted `packages: write` (the release workflow asks for it per job). After the first release,
    open the `mosaica` package under your GitHub profile's Packages, check that it is linked to
-   `jennis0/mosaica`, and set its visibility to public: a new package is private.
+   `mosaicadb/mosaica`, and set its visibility to public: a new package is private.
 
 ## Cutting a release
 
@@ -49,7 +49,7 @@ These are done once, by the owner of the repository and the registry accounts.
    `package-lock.json`.
 3. **Write the changelog.** Add a section `## [0.2.0] - YYYY-MM-DD` to `CHANGELOG.md` with
    today's date, describing what changed for a user, and a link line
-   `[0.2.0]: https://github.com/jennis0/mosaica/releases/tag/v0.2.0` at the bottom. The section's
+   `[0.2.0]: https://github.com/mosaicadb/mosaica/releases/tag/v0.2.0` at the bottom. The section's
    body becomes the release notes. `python3 scripts/version.py notes` prints it.
 4. **Refresh the licence notices** if `Cargo.lock` changed since the last release:
 
@@ -71,7 +71,7 @@ These are done once, by the owner of the repository and the registry accounts.
    approve the waiting deployments. One approval releases them all.
 8. **Check the result:** the GitHub release with its archives, `SHA256SUMS` and wheels;
    `pip install mosaica==0.2.0`; `npm view @mosaicajs/client version`;
-   `cargo install mosaica --version 0.2.0`; `docker pull ghcr.io/jennis0/mosaica:0.2.0`.
+   `cargo install mosaica --version 0.2.0`; `docker pull ghcr.io/mosaicadb/mosaica:0.2.0`.
 
 ## What the workflow does
 

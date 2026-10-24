@@ -23,7 +23,7 @@ C libraries Mosaica links in, such as CRoaring, zstd and SQLite.
 Clone the repository, then build and install the `mosaica` binary with cargo.
 
 ```bash
-git clone https://github.com/jennis0/mosaica ~/mosaica
+git clone https://github.com/mosaicadb/mosaica ~/mosaica
 cd ~/mosaica
 cargo install --locked --path crates/mosaica-cli
 ```

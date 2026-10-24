@@ -9,13 +9,13 @@
     "map",
     "visualisation"
   ],
-  "homepage": "https://github.com/jennis0/mosaica/tree/main/clients/ts/react#readme",
+  "homepage": "https://github.com/mosaicadb/mosaica/tree/main/clients/ts/react#readme",
   "bugs": {
-    "url": "https://github.com/jennis0/mosaica/issues"
+    "url": "https://github.com/mosaicadb/mosaica/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jennis0/mosaica.git",
+    "url": "git+https://github.com/mosaicadb/mosaica.git",
     "directory": "clients/ts/react"
   },
   "license": "Apache-2.0",

@@ -1,6 +1,6 @@
 # @mosaicajs/deck
 
-`MosaicaLayer`, a [deck.gl](https://deck.gl) layer that draws a [Mosaica](https://github.com/jennis0/mosaica) store, for a page that builds its own `Deck`. Mosaica serves an interactive map over billions of points from one machine, computed over what each viewer may see. The store comes from [`@mosaicajs/client`](https://www.npmjs.com/package/@mosaicajs/client).
+`MosaicaLayer`, a [deck.gl](https://deck.gl) layer that draws a [Mosaica](https://github.com/mosaicadb/mosaica) store, for a page that builds its own `Deck`. Mosaica serves an interactive map over billions of points from one machine, computed over what each viewer may see. The store comes from [`@mosaicajs/client`](https://www.npmjs.com/package/@mosaicajs/client).
 
 ```bash
 npm install @mosaicajs/deck @mosaicajs/client @deck.gl/core @deck.gl/layers @deck.gl/aggregation-layers @luma.gl/core
@@ -41,4 +41,4 @@ store.subscribe('meta', (meta) => {
 
 deck.gl and luma.gl are peer dependencies.
 
-Documentation: [TypeScript client reference](https://github.com/jennis0/mosaica/blob/main/docs/reference/typescript.md). Licence: Apache-2.0.
+Documentation: [TypeScript client reference](https://github.com/mosaicadb/mosaica/blob/main/docs/reference/typescript.md). Licence: Apache-2.0.
