@@ -1,0 +1,353 @@
+# A release, from a version tag: `v0.1.0`, or `v0.2.0-rc.1` for a pre-release. RELEASING.md is the
+# runbook, including the one-time set-up of the registries.
+#
+# The stages:
+#
+# 1. verify: the tag is `v` and the version in Cargo.toml, every copy of the version agrees,
+#    CHANGELOG.md has a section for it, the gate passed on the tagged commit, `cargo deny check`
+#    passes with advisories, and THIRD_PARTY_LICENSES is current.
+# 2. build, with no access to any registry: the wheels and bare binaries (`wheels.yml`, called), the
+#    binary archives with their checksums, and the npm tarballs.
+# 3. publish, every job in the `release` environment, whose required reviewer approves the batch:
+#    PyPI (mosaica-native, then mosaica once PyPI serves the matching mosaica-native), npm,
+#    crates.io in dependency order, and the container image for each architecture.
+# 4. the image's multi-architecture tags and the GitHub release, which run only after the approved
+#    jobs succeed and need no second approval.
+#
+# All publish jobs wait on every build job, so they reach the environment together and one approval
+# releases them all.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: the tag, the version and the changelog agree
+        id: version
+        run: |
+          python3 scripts/version.py check --tag "$GITHUB_REF_NAME"
+          version=$(python3 scripts/version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      # The gate (ci.yml) runs on every push to main. A tag on a commit the gate has not passed is
+      # refused, so tag after the gate is green.
+      - name: the gate passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+                     --status success --json databaseId --jq length)
+          if [ "$passed" -eq 0 ]; then
+            echo "the gate has no passing run on $GITHUB_SHA; wait for it, or fix main and tag again" >&2
+            exit 1
+          fi
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9
+      - name: THIRD_PARTY_LICENSES is current
+        run: python3 scripts/third-party-licenses.py --check
+
+  wheels:
+    needs: verify
+    uses: ./.github/workflows/wheels.yml
+
+  # One archive per target: the binary, the licence, the third-party notices, the readme and the
+  # changelog. `.tar.gz`, or `.zip` for Windows, and one SHA256SUMS over all of them.
+  archives:
+    needs: [verify, wheels]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mosaica-binary-*
+          path: binaries
+      - name: archive each binary
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir dist
+          for dir in binaries/mosaica-binary-*; do
+            triple=${dir#binaries/mosaica-binary-}
+            name="mosaica-$VERSION-$triple"
+            mkdir "$name"
+            cp "$dir"/* "$name"/
+            chmod +x "$name"/mosaica*
+            cp LICENSE THIRD_PARTY_LICENSES README.md CHANGELOG.md "$name"/
+            if [[ "$triple" == *windows* ]]; then
+              zip -qr "dist/$name.zip" "$name"
+            else
+              tar -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: archives
+          path: dist/*
+
+  # The four packages, packed in dependency order. `npm pack` runs each package's prepack, which
+  # drops the source-only export conditions and adds the licence.
+  npm-pack:
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - run: npm --prefix clients/ts ci
+      - run: npm --prefix clients/ts run build
+      - name: pack
+        run: |
+          mkdir dist-npm
+          for dir in core deck components react; do
+            (cd "clients/ts/$dir" && npm pack --pack-destination ../../../dist-npm)
+          done
+          ls -l dist-npm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm
+          path: dist-npm/*.tgz
+
+  pypi:
+    needs: [verify, wheels, archives, npm-pack]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mosaica-native-*
+          path: dist-native
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: mosaica
+          path: dist-mosaica
+      # skip-existing makes a re-run of this job publish only what an earlier attempt did not.
+      - name: mosaica-native
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-native
+          skip-existing: true
+      # mosaica pins mosaica-native exactly, so it goes up only once PyPI serves the version it pins.
+      - name: wait until PyPI serves mosaica-native
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          pip install packaging
+          normalised=$(python3 -c "import sys; from packaging.version import Version; print(Version(sys.argv[1]))" "$VERSION")
+          for _ in $(seq 60); do
+            if curl -sf "https://pypi.org/pypi/mosaica-native/$normalised/json" >/dev/null; then exit 0; fi
+            sleep 10
+          done
+          echo "PyPI does not serve mosaica-native $normalised after ten minutes" >&2
+          exit 1
+      - name: mosaica
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-mosaica
+          skip-existing: true
+
+  npm:
+    needs: [verify, wheels, archives, npm-pack]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later. Where NPM_TOKEN is set it is used instead,
+      # which the first release needs, since a trusted publisher can only be added to a package that
+      # exists.
+      - run: npm install -g npm@11
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm
+          path: dist-npm
+      - name: publish in dependency order
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIST_TAG: ${{ needs.verify.outputs.prerelease == 'true' && 'next' || 'latest' }}
+        run: |
+          for name in client deck components react; do
+            # A package an earlier attempt published is left as it is, so a re-run is safe.
+            if npm view "@mosaicajs/$name@$VERSION" version >/dev/null 2>&1; then
+              echo "@mosaicajs/$name@$VERSION is already published"
+              continue
+            fi
+            npm publish "dist-npm/mosaicajs-$name-$VERSION.tgz" --provenance --access public --tag "$DIST_TAG"
+          done
+
+  # `cargo publish --workspace` publishes in dependency order and waits for each crate to be
+  # available before the crates that depend on it.
+  crates:
+    needs: [verify, wheels, archives, npm-pack]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --locked --exclude mosaica-bench --exclude mosaica-docgen
+
+  # Each architecture on its own runner, pushed by digest; `image` below names them.
+  image-build:
+    needs: [verify, wheels, archives, npm-pack]
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: names
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            MOSAICA_BUILD_COMMIT=${{ github.sha }}
+            MOSAICA_VERSION=${{ needs.verify.outputs.version }}
+          outputs: type=image,name=${{ steps.names.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+      - name: record the digest
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ steps.names.outputs.arch }}
+          path: digests/*
+          if-no-files-found: error
+
+  # The tags over both architectures: the version, major.minor, and latest for a release that is not
+  # a pre-release. It pushes only images the approved `image-build` jobs pushed.
+  image:
+    needs: [verify, image-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: tag the multi-architecture image
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags=(-t "$image:$VERSION")
+          if [ "$PRERELEASE" = false ]; then
+            tags+=(-t "$image:${VERSION%.*}" -t "$image:latest")
+          fi
+          sources=()
+          for digest in digests/*; do sources+=("$image@sha256:${digest#digests/}"); done
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "$image:$VERSION"
+
+  # The release page: the changelog's section as its notes, the archives, their checksums and the
+  # wheels. It runs once every registry has the release.
+  github-release:
+    needs: [verify, archives, pypi, npm, crates, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: archives
+          path: assets
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{mosaica,mosaica-native-*}"
+          path: assets
+          merge-multiple: true
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          python3 scripts/version.py notes > notes.md
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" assets/* --title "Mosaica $GITHUB_REF_NAME" \
+            --notes-file notes.md --verify-tag "${flags[@]}"
