@@ -6,8 +6,9 @@
 # holds is checked by `clients/py/check.sh`, on one platform, in the gate. This job answers the
 # other question — whether the build works for a platform this machine is not.
 #
-# Nothing is published from here. The wheels are uploaded as artifacts and a human decides what to
-# do with them, because the version is pinned `==` on both sides: a `mosaica` that reached PyPI
+# Nothing is published from here. The wheels and the bare `mosaica` binaries are uploaded as
+# artifacts. `release.yml` calls this workflow on a version tag and publishes them, `mosaica-native`
+# before `mosaica`, because the version is pinned `==` on both sides: a `mosaica` that reached PyPI
 # without its matching `mosaica-native` is uninstallable, and the reverse is a stale binary
 # against a bundle format that refuses it.
 #
@@ -34,8 +35,7 @@ name: wheels
 
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -157,6 +157,19 @@ jobs:
         with:
           name: mosaica-native-${{ matrix.platform }}
           path: clients/py-native/dist/*.whl
+      # The same executable on its own, for the release's archives. The artifact is named by the
+      # target triple without cargo-zigbuild's glibc suffix.
+      - name: the target triple
+        id: triple
+        shell: bash
+        run: echo "triple=$(echo '${{ matrix.target }}' | cut -d. -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mosaica-binary-${{ steps.triple.outputs.triple }}
+          path: |
+            clients/py-native/mosaica_native/mosaica
+            clients/py-native/mosaica_native/mosaica.exe
+          if-no-files-found: error
 
   # `mosaica` itself: one `py3-none-any` wheel for every platform, built where the components'
   # bundle can be built, which is the only reason this needs Node.
@@ -180,13 +193,15 @@ jobs:
           python - dist/*.whl <<'PY'
           import sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
+              info = next(n for n in z.namelist() if n.endswith(".dist-info/WHEEL"))
+              info = info.rsplit("/", 1)[0]
               tag = dict(
                   line.split(": ", 1)
-                  for line in z.read("mosaica-0.1.0.dist-info/WHEEL").decode().splitlines()
+                  for line in z.read(f"{info}/WHEEL").decode().splitlines()
                   if ": " in line
               )["Tag"]
               requires = [
-                  line for line in z.read("mosaica-0.1.0.dist-info/METADATA").decode().splitlines()
+                  line for line in z.read(f"{info}/METADATA").decode().splitlines()
                   if line.startswith("Requires-Dist:")
               ]
           print(tag, *requires, sep="\n")
@@ -199,3 +214,38 @@ jobs:
         with:
           name: mosaica
           path: dist/*.whl
+
+  # The two wheels together, as a user installs them: `mosaica` with the matching `mosaica-native`
+  # from this run and nothing else from either project, in a clean virtualenv, then the import and
+  # the binary. Both must report the version in Cargo.toml.
+  smoke:
+    needs: [native, pure]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{mosaica,mosaica-native-manylinux_2_28_x86_64}"
+          path: dist
+          merge-multiple: true
+      - name: install both wheels in a clean virtualenv and run them
+        run: |
+          version=$(python3 scripts/version.py)
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install "pyarrow>=14"
+          /tmp/smoke/bin/pip install --no-index --find-links dist "mosaica==$version"
+          cd /tmp
+          /tmp/smoke/bin/python - "$version" <<'PY'
+          import subprocess, sys
+          import mosaica, mosaica_native
+          want = sys.argv[1]
+          printed = subprocess.run(
+              [mosaica_native.binary_path(), "--version"], check=True, capture_output=True, text=True
+          ).stdout.strip()
+          print(mosaica.__version__, printed, sep="\n")
+          if mosaica.__version__ != want or not printed.startswith(f"mosaica {want}"):
+              sys.exit(f"the wheels report {mosaica.__version__} and {printed!r}; Cargo.toml says {want}")
+          PY
