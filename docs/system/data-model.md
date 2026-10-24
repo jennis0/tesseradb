@@ -28,6 +28,25 @@ flowchart LR
 
 *Each paper is one item. Views place it on maps. A layer groups papers into topics drawn over a view.*
 
+??? info "How does Mosaica compare to a relational database?"
+
+    | Mosaica | Nearest relational idea |
+    |---|---|
+    | Item | A row of a main table, keyed by its `mosaica_id` or by a unique field |
+    | Field | A column of that table |
+    | View | A child table of positions, one row per item placed in it, stored in order of position |
+    | View group | A table partitioned by key, with partitions added and dropped while running |
+    | Annotation layer | A table of artifacts, a table joining each artifact to its member items, and a parent column for hierarchies |
+    | Vocabulary | A lookup table that a category column refers to |
+    | Access label | A row-level security policy |
+
+    A relational database is built to answer any query, planned when you ask it. Mosaica is built to answer one question quickly over billions of rows: what is in this map tile, for this viewer, under these filters. That is why it differs.
+
+    - **Each layout is stored in its own order.** A tile is quick to read when its points are stored together, but a table can be stored in only one order, and two layouts put the same item in different places. So each view is its own table, ordered by position, and what is true of the item everywhere is kept apart from both.
+    - **Drawn columns sit beside the positions.** A rendered field is copied next to each position, so drawing a tile reads one place. Since that decides how the view is stored, `render` is fixed once declared.
+    - **Annotations are built in.** In SQL, counting the papers a viewer may see in each topic on screen is a join and a grouping on every request. Mosaica stores each artifact's members so that they can be intersected directly with what the viewer may see, which keeps those counts quick enough for a map.
+    - **Joins happen when data is written.** Mosaica takes no ad hoc queries and joins nothing when you ask. Rows from different files are tied to their items once, when they are inserted, by a unique field or a `mosaica_id`. That is why a unique field matters.
+
 ## Items and fields
 
 An item is one record: in the example, one paper. Its data is held in fields, one for each column you declare, such as `title`, `year`, `archive` and `abstract`.
