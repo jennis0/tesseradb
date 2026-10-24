@@ -1,23 +1,30 @@
 [package]
 name = "mosaica-store"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The on-disk bundle formats of Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [dependencies]
-mosaica-types = { path = "../mosaica-types", features = ["serde"] }
-mosaica-access = { path = "../mosaica-access" }
+mosaica-types = { workspace = true, features = ["serde"] }
+mosaica-access = { workspace = true }
 # The Roaring container assembler, shared with the filter index. `Permutation::project`
 # stamps looked-up rows into a bit array, which *is* the container payload.
-mosaica-roaring = { path = "../mosaica-roaring" }
-mosaica-spatial = { path = "../mosaica-spatial" }
-mosaica-analyse = { path = "../mosaica-analyse" }
+mosaica-roaring = { workspace = true }
+mosaica-spatial = { workspace = true }
+mosaica-analyse = { workspace = true }
 # The postings, value-column, dictionary and record-blob writers an empty shard's base is written
 # with (`src/empty_shard.rs`), which the build and a running service both call, and the postings
 # reader the containment and term-image derivations walk (`derived::walk_posting`).
-mosaica-authz = { path = "../mosaica-authz" }
-mosaica-filter = { path = "../mosaica-filter" }
-mosaica-filter-write = { path = "../mosaica-filter-write" }
+mosaica-authz = { workspace = true }
+mosaica-filter = { workspace = true }
+mosaica-filter-write = { workspace = true }
 arrow = { workspace = true }
 # `terms/pairs.parquet` is the one bundle artefact contracts §2 defines in Parquet rather than
 # Arrow IPC; see `src/pairs.rs` for why its writer lives here with the other six.

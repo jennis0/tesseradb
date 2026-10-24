@@ -1,16 +1,23 @@
 [package]
 name = "mosaica-corpus"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Generated test corpora and their expected answers for Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 # The correctness suite's generator. `scripts/check-layers.sh` enforces the dependency rule:
 # mosaica-types and mosaica-spatial and nothing else in the workspace. A generator that can read
 # an artefact stops being an independent statement of the corpus and becomes a transcription of
 # the thing it checks.
 [dependencies]
-mosaica-types = { path = "../mosaica-types" }
-mosaica-spatial = { path = "../mosaica-spatial" }
+mosaica-types = { workspace = true }
+mosaica-spatial = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 

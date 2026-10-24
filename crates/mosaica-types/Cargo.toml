@@ -1,13 +1,20 @@
 [package]
 name = "mosaica-types"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Shared identifier and value types for Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [dependencies]
 serde = { workspace = true, optional = true }
 # A layer declaration's labels are read by the one label rule.
-mosaica-access = { path = "../mosaica-access" }
+mosaica-access = { workspace = true }
 # `IdentityKey::generate`: the operating system's random source, for the key every new bundle gets.
 getrandom = "0.2"
 

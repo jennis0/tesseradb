@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-access"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Access labels and their evaluation for Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 # No crate of the workspace: `scripts/check-layers.sh` keeps this one at the bottom.
 [dependencies]

@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-filter"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The attribute filter index of Mosaica, read side. Internal crate of the mosaica binary, with no stable API."
 
 [features]
 default = []
@@ -12,15 +19,15 @@ default = []
 bench-timing = ["mosaica-authz/bench-timing"]
 
 [dependencies]
-mosaica-types = { path = "../mosaica-types" }
+mosaica-types = { workspace = true }
 # The Roaring container assembler, shared with `mosaica-store`'s row projection. Below both,
 # because `check-layers.sh` denies filter -> store and store must not reach the filter index.
-mosaica-roaring = { path = "../mosaica-roaring" }
+mosaica-roaring = { workspace = true }
 # For the CSR postings format only — `PostingsReader`, `DeltaTier` and their ordinal-addressed
 # format core. This crate reads attribute postings; it never reads an authorisation posting, and
 # nothing here constructs a `TermId`. See lib.rs for why the dependency is on the format rather
 # than the other way round.
-mosaica-authz = { path = "../mosaica-authz" }
+mosaica-authz = { workspace = true }
 croaring.workspace = true
 # The value column is an Arrow IPC file, as every other columnar artefact in the bundle is
 # (contracts §2.1). Reading it here rather than through `mosaica-store` is what keeps the layer

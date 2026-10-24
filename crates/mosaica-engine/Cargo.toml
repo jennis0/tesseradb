@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-engine"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The request-serving core of Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [features]
 default = []
@@ -22,28 +29,28 @@ bench-timing = []
 fault-injection = ["mosaica-lifecycle/fault-injection"]
 
 [dependencies]
-mosaica-types = { path = "../mosaica-types" }
-mosaica-access = { path = "../mosaica-access" }
-mosaica-authz = { path = "../mosaica-authz" }
+mosaica-types = { workspace = true }
+mosaica-access = { workspace = true }
+mosaica-authz = { workspace = true }
 # The single-flight cache behind the row-projection, region and occupancy caches. Shared with
 # mosaica-authz, which sits below this crate.
-mosaica-cache = { path = "../mosaica-cache" }
-mosaica-store = { path = "../mosaica-store" }
-mosaica-spatial = { path = "../mosaica-spatial" }
-mosaica-lifecycle = { path = "../mosaica-lifecycle" }
+mosaica-cache = { workspace = true }
+mosaica-store = { workspace = true }
+mosaica-spatial = { workspace = true }
+mosaica-lifecycle = { workspace = true }
 # **The container encoder**, for the same reason `mosaica-store` and `mosaica-filter` hold it: a row
 # column's transposition already holds one Roaring block's worth of finished words per artifact, so
 # the container is its output rather than something to insert value by value
 # (`row_column::RowColumn::transpose`).
-mosaica-roaring = { path = "../mosaica-roaring" }
+mosaica-roaring = { workspace = true }
 # The filter artefact's reader. Entity-space only — it never sees a `RowId`, which is what
 # `check-layers.sh` pins by denying it `mosaica-store` and `mosaica-spatial`.
-mosaica-filter = { path = "../mosaica-filter" }
+mosaica-filter = { workspace = true }
 # **The analyser a text column was indexed with**, resolved from the manifest's recorded identity so
 # a query is segmented by the same pipeline as the index (decision 0070). Analysing at the wire
 # instead would put that choice in a second place, free to drift from the artefact.
-mosaica-analyse = { path = "../mosaica-analyse" }
-mosaica-filter-write = { path = "../mosaica-filter-write" }
+mosaica-analyse = { workspace = true }
+mosaica-filter-write = { workspace = true }
 croaring = { workspace = true }
 arc-swap = { workspace = true }
 # D-D: the engine's shared compute pool for the intra-request tile-loop sweep. No `tokio`

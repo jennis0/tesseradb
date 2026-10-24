@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-lifecycle"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The write-ahead log and write commands of Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [features]
 default = []
@@ -21,9 +28,9 @@ fault-injection = []
 
 [dependencies]
 croaring = { workspace = true }
-mosaica-roaring = { path = "../mosaica-roaring" }
-mosaica-types = { path = "../mosaica-types", features = ["serde"] }
-mosaica-authz = { path = "../mosaica-authz" }
+mosaica-roaring = { workspace = true }
+mosaica-types = { workspace = true, features = ["serde"] }
+mosaica-authz = { workspace = true }
 postcard = { workspace = true }
 crc32fast = { workspace = true }
 serde = { workspace = true }

@@ -1,13 +1,20 @@
 [package]
 name = "mosaica-config"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The mosaica.toml deployment file for Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [dependencies]
 # `CompactionSchedule` and the engine's own defaults for the keys it owns.
-mosaica-engine = { path = "../mosaica-engine" }
-mosaica-types = { path = "../mosaica-types" }
+mosaica-engine = { workspace = true }
+mosaica-types = { workspace = true }
 serde = { workspace = true }
 toml = "0.8"
 # `Semaphore::MAX_PERMITS`, the bound an admission gate is refused past.

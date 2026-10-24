@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-cache"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "A byte-bounded single-flight LRU cache for Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [dependencies]
 rustc-hash = "1"

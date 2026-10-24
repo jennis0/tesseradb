@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-python"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The _mosaica Python extension module of Mosaica. Internal crate of the mosaica-native wheel, with no stable API."
 
 [lib]
 # The Python module's own name: `import _mosaica` loads this object, so the library name and the
@@ -23,10 +30,10 @@ doctest = false
 # The declaration: parsing it, checking it, and the control-plane payloads it serialises to.
 # The whole crate, not a slice of it: the engine follows here, and the point of this module is
 # that the SDK runs the same code the binary runs rather than a second copy of the rules.
-mosaica-build = { path = "../mosaica-build" }
+mosaica-build = { workspace = true }
 # The deployment file, where the declaration is: `open` is the pair the CLI's `check` verb
 # resolves it with.
-mosaica-config = { path = "../mosaica-config" }
+mosaica-config = { workspace = true }
 serde_json = { workspace = true }
 
 [dependencies.pyo3]

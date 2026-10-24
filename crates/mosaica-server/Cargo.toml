@@ -1,8 +1,15 @@
 [package]
 name = "mosaica-server"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The HTTP server of Mosaica. Internal crate of the mosaica binary, with no stable API."
 
 [features]
 default = []
@@ -20,13 +27,13 @@ bench-timing = ["mosaica-engine/bench-timing"]
 fault-injection = ["mosaica-engine/fault-injection", "mosaica-lifecycle/fault-injection"]
 
 [dependencies]
-mosaica-types = { path = "../mosaica-types" }
-mosaica-access = { path = "../mosaica-access" }
-mosaica-config = { path = "../mosaica-config" }
-mosaica-engine = { path = "../mosaica-engine" }
-mosaica-wire = { path = "../mosaica-wire" }
-mosaica-lifecycle = { path = "../mosaica-lifecycle" }
-mosaica-catalogue = { path = "../mosaica-catalogue" }
+mosaica-types = { workspace = true }
+mosaica-access = { workspace = true }
+mosaica-config = { workspace = true }
+mosaica-engine = { workspace = true }
+mosaica-wire = { workspace = true }
+mosaica-lifecycle = { workspace = true }
+mosaica-catalogue = { workspace = true }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["full"] }

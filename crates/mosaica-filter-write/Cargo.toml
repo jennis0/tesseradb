@@ -1,14 +1,21 @@
 [package]
 name = "mosaica-filter-write"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The attribute filter index of Mosaica, write side. Internal crate of the mosaica binary, with no stable API."
 
 [dependencies]
-mosaica-filter = { path = "../mosaica-filter" }
-mosaica-roaring = { path = "../mosaica-roaring" }
-mosaica-authz = { path = "../mosaica-authz" }
-mosaica-types = { path = "../mosaica-types" }
+mosaica-filter = { workspace = true }
+mosaica-roaring = { workspace = true }
+mosaica-authz = { workspace = true }
+mosaica-types = { workspace = true }
 croaring = { workspace = true }
 # The record blob's writer half (records-and-search §3): the block directory is an Arrow batch
 # and the blocks are zstd frames. The read side lives in `mosaica-filter`; this crate is separate

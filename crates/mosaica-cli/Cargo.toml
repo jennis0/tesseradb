@@ -1,8 +1,15 @@
 [package]
 name = "mosaica"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Serve an interactive map over billions of points from one machine, with every view computed over what each viewer may see."
 
 [[bin]]
 name = "mosaica"
@@ -31,21 +38,21 @@ fault-injection = ["mosaica-server/fault-injection"]
 bench-timing = ["mosaica-server/bench-timing"]
 
 [dependencies]
-mosaica-build = { path = "../mosaica-build" }
+mosaica-build = { workspace = true }
 # The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two
 # sides of the text differential share one pipeline (`records-and-search.md` §4.4).
-mosaica-analyse = { path = "../mosaica-analyse" }
+mosaica-analyse = { workspace = true }
 # The `corpus` verbs only — the correctness suite's access to the generated corpus
 # (`correctness-suite.md` §12.1), on the same drive-the-CLI precedent as `tokenise`.
-mosaica-corpus = { path = "../mosaica-corpus" }
-mosaica-spatial = { path = "../mosaica-spatial" }
-mosaica-config = { path = "../mosaica-config" }
-mosaica-server = { path = "../mosaica-server" }
-mosaica-store = { path = "../mosaica-store" }
-mosaica-types = { path = "../mosaica-types" }
+mosaica-corpus = { workspace = true }
+mosaica-spatial = { workspace = true }
+mosaica-config = { workspace = true }
+mosaica-server = { workspace = true }
+mosaica-store = { workspace = true }
+mosaica-types = { workspace = true }
 # The `items` and `artifacts` verbs: a bulk read's frames, and the zstd codec its pages may be
 # compressed with.
-mosaica-wire = { path = "../mosaica-wire" }
+mosaica-wire = { workspace = true }
 # The `corpus` verbs' output encoding: expected items and censuses leave on stdout as Arrow IPC,
 # the same encoding the suite's other Arrow surfaces speak.
 arrow = { workspace = true }
