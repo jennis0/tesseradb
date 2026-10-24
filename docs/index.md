@@ -1,6 +1,6 @@
 # Mosaica
 
-Mosaica is a database for interactive maps of very large sets of points. Give it records that each have a position, such as every place name in a gazetteer, or millions of papers laid out by what their abstracts say, and it serves a map of them that people can pan, zoom, filter and search. Whatever is on screen, the counts, densities and cluster labels are worked out for exactly that view.
+Mosaica is a database for interactive maps of very large sets of points. Give it records that each have a position, such as every place name in a gazetteer, or millions of papers laid out by what their abstracts say, and it serves a map of them that people can pan, zoom, filter and search. Whatever is on screen, the counts and densities are worked out for exactly that view.
 
 It is designed to hold billions of points on one machine and to serve them to many viewers at once. The data can change while it serves. New records appear on the map at the next flush, every 90 seconds by default, and a deletion applies to every request that starts after the server accepts it.
 
@@ -10,15 +10,15 @@ It is designed to hold billions of points on one machine and to serve them to ma
 
 -   **Clusters and topics**
 
-    Draw clusters over the points, each with a title and a count. Nest them into a hierarchy, such as fields, then subfields, then topics, and let viewers colour or filter by any level.
+    Draw clusters over the points, each with a count and, if you give one, a title. Nest them into a hierarchy, such as fields, then subfields, then topics, and let viewers colour or filter by any level.
 
 -   **Regions and shapes**
 
-    Add polygons such as country borders, or hulls around a cluster's points. They are drawn on the map and counted like any other annotation.
+    Add polygons such as country borders, or have the server work out a hull around each cluster's points. The map outlines one when a viewer points at it or opens it.
 
 -   **Filters on every kind of field**
 
-    Ranges on numbers and dates, values of a category, exact or partial matches on keywords, and words in free text. Draw a box, circle, ellipse or polygon to select an area, and combine any of these with and, or and not.
+    Ranges on numbers and dates, values of a category, exact or partial matches on keywords, and words in free text. Draw a box or a freehand shape to select an area, and combine any of these with and, or and not.
 
 -   **Counts and breakdowns**
 
@@ -26,11 +26,11 @@ It is designed to hold billions of points on one machine and to serve them to ma
 
 -   **Several layouts of the same records**
 
-    Lay one set of records out in several ways, such as on a world map and by an embedding, or one layout per year. A viewer can switch between them and keep their selection.
+    Lay one set of records out in several ways, such as on a world map and by an embedding, or one layout per year. A viewer can switch between them and keep their filters.
 
 -   **A map for each viewer**
 
-    Give records access labels, and each viewer sees a map computed only from the records they may see. That covers every count and cluster as well as the points, so a hidden record leaves no trace.
+    Give records access labels, and each viewer sees a map computed only from the records they may see. That covers every count and cluster as well as the points, so no count includes a record the viewer may not see. The [security](system/security.md) chapter lists what response times can still reveal.
 
 </div>
 
