@@ -77,11 +77,12 @@ the session's own. The other two are counts over the grant's base rows. A view's
 the last build or compaction wrote; a flush adds rows above it.
 
 The per-artifact counts, position sums and boxes of an annotation level served from a column are
-counted once per grant over the grant's base rows, keyed by the grant, the shard's identity, which a
-compaction rotates, and the level's column. A growth between compactions adds to them in place. They
-are written to the server's cache directory and read back after a restart. Beside them the server
-holds the labels of every deleted and suppressed base row in each view, per view and level, whoever
-is asking.
+counted once per grant over the grant's base rows in every shard and held as one sum, keyed by the
+grant, the level's column in each shard and each shard's identity, which a compaction rotates. A
+growth between compactions adds to them in place, and a shard whose rows are counted again replaces
+that shard's part of the sum. They are written to the server's cache directory and read back after
+a restart. Beside them the server holds the labels of every deleted and suppressed base row in each
+view, per view and level, whoever is asking.
 
 The figures of a number or timestamp field (the count of its finite values, their sum, the items
 with none, and its eight smallest and eight largest values with their rows) are stored in the bundle
@@ -92,8 +93,9 @@ and the merge is held per grant, shard identity, view and field.
 Both kinds of shared count include rows that are deleted or suppressed, so no request is served them
 alone. Every request subtracts the base rows its own composed visible set removes, read from the
 overlay it loaded at its start, and adds its own rows above the base. For an annotation level the
-subtraction is cached under the view's deny version, which moves whenever the deleted and suppressed
-base rows change, and the rows above the base under the overlay's version, which every deny moves. A
+subtraction is cached under every shard's deny version for the view, each of which moves whenever
+that shard's deleted and suppressed base rows change, and the rows above the base under the
+overlay's version, which every deny moves. A
 field's smallest and largest value are the first of the kept extremes whose row the request does not
 subtract, and where it subtracts all eight kept on a side, a walk of the grant's base rows less
 those it subtracts. A request that starts after a suppression is accepted therefore subtracts the

@@ -757,30 +757,15 @@ impl ArtifactRows {
     }
 
     /// Candidacy for one viewport, on whichever route this level's layout takes: which artifacts
-    /// could have a member this viewer can see inside the viewport. `counts` is this level's
-    /// masked-count histogram where the request already built one ([`crate::Engine::masked_counts`]).
-    /// Where the viewport covers the whole mask ([`crate::tile_index::Viewport::covers_mask`]),
-    /// the scan finds nothing the histogram has not already counted. The filtered question is
-    /// [`Self::matched`]'s, asked of a narrower set, and keeps the scan.
-    pub fn candidacy(
-        &self,
-        viewport: &crate::tile_index::Viewport<'_>,
-        counts: Option<&crate::figures::Figures>,
-    ) -> Candidacy {
+    /// could have a member this viewer can see inside the viewport. A viewport covering the whole
+    /// mask in every side reads candidacy off the level's figures instead
+    /// ([`crate::layer_read::LevelForms::populated_over`]). The filtered question is
+    /// [`Self::matched`]'s, asked of a narrower set.
+    pub fn candidacy(&self, viewport: &crate::tile_index::Viewport<'_>) -> Candidacy {
         // The column arm answers against `viewport ∩ M_auth`, exact for the masked question too;
         // the indexed arm is a candidate generator and every ordinal it returns still pays a probe.
         match &self.column {
-            Some(column) => {
-                if viewport.covers_mask() {
-                    // The lengths must agree, or the histogram is not this column's — a sanity
-                    // check on the pairing, not the disclosure defence: a mismatch only makes the
-                    // entry short, losing artifacts rather than admitting them.
-                    if let Some(counts) = counts.filter(|c| c.len() == column.len()) {
-                        return Candidacy::Scanned(counts.populated());
-                    }
-                }
-                Candidacy::Scanned(column.candidates(viewport.here()))
-            }
+            Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
             None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
         }
     }
@@ -1215,9 +1200,8 @@ mod tests {
 
     // ---- candidacy on a row-major level ---------------------------------------------------
 
-    /// A row-major level over twelve artifacts of fifty contiguous rows each, with the column the
-    /// scan and the histogram are both read from.
-    fn row_major_level() -> (ArtifactRows, Arc<RowColumn>) {
+    /// A row-major level over twelve artifacts of fifty contiguous rows each.
+    fn row_major_level() -> ArtifactRows {
         static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let scratch = DIR
             .get_or_init(|| tempfile::tempdir().expect("a scratch directory"))
@@ -1235,57 +1219,42 @@ mod tests {
             RowColumn::compose(&membership, 600, ServingLayout::RowMajorLabel, scratch)
                 .expect("the memberships partition"),
         );
-        (
-            ArtifactRows::synthetic(&slices, Some(Arc::clone(&column))),
-            column,
-        )
+        ArtifactRows::synthetic(&slices, Some(column))
     }
 
-    /// The histogram and the scan return the same candidates, whatever the viewport covers. A
-    /// narrower-than-mask viewport falls back to the scan even with counts in hand, since the
-    /// histogram knows nothing about the box.
+    /// The scan proposes every artifact with a visible row in the viewport, and none without.
     #[test]
-    fn the_whole_map_reads_candidacy_off_the_histogram_and_a_narrower_viewport_scans() {
-        let (rows, column) = row_major_level();
+    fn the_scan_proposes_the_artifacts_seen_in_the_viewport() {
+        let rows = row_major_level();
         // Empties ordinal 4 entirely, so it is in the comparison.
         let mut mask: Bitmap = (0..600u32).filter(|r| r % 4 != 3).collect();
         mask.remove_range(200..250);
-        let counts = crate::figures::Figures::of_counts(column.histogram_over(&mask));
-        assert_eq!(counts.get(4), 0, "ordinal 4 has no visible row");
-
         let whole = Bitmap::from_range(0..600);
         let viewport = crate::tile_index::Viewport::compose(&whole, &mask);
         assert!(viewport.covers_mask());
-        let from_histogram: Vec<u32> = rows.candidacy(&viewport, Some(&counts)).iter().collect();
-        let from_scan: Vec<u32> = rows.candidacy(&viewport, None).iter().collect();
-        assert_eq!(from_histogram, from_scan);
-        assert_eq!(from_scan, vec![0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
+        let scanned: Vec<u32> = rows.candidacy(&viewport).iter().collect();
+        assert_eq!(scanned, vec![0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
 
         let box_rows = Bitmap::from_range(320..440);
         let narrow = crate::tile_index::Viewport::compose(&box_rows, &mask);
         assert!(!narrow.covers_mask());
-        let narrowed: Vec<u32> = rows.candidacy(&narrow, Some(&counts)).iter().collect();
-        assert_eq!(
-            narrowed,
-            rows.candidacy(&narrow, None).iter().collect::<Vec<_>>()
-        );
+        let narrowed: Vec<u32> = rows.candidacy(&narrow).iter().collect();
         assert_eq!(narrowed, vec![6, 7, 8]);
     }
 
-    /// A mask holding one row outside the viewport takes the scan, not the histogram: reading the
-    /// histogram there would serve an artifact whose only visible member is off screen.
+    /// A mask holding one row outside the viewport does not cover it, and the scan answers for
+    /// the row in view and not for one off screen.
     #[test]
     fn a_viewport_missing_one_visible_row_does_not_cover_the_mask() {
-        let (rows, column) = row_major_level();
+        let rows = row_major_level();
         let mask: Bitmap = (0..600u32).collect();
-        let counts = crate::figures::Figures::of_counts(column.histogram_over(&mask));
 
         // Every row but one, and the one left out is the only visible row of ordinal 11 in view.
         let mut almost = Bitmap::from_range(0..600);
         almost.remove_range(551..600);
         let viewport = crate::tile_index::Viewport::compose(&almost, &mask);
         assert!(!viewport.covers_mask());
-        let served: Vec<u32> = rows.candidacy(&viewport, Some(&counts)).iter().collect();
+        let served: Vec<u32> = rows.candidacy(&viewport).iter().collect();
         assert_eq!(
             served,
             (0..12u32).collect::<Vec<_>>(),
@@ -1297,11 +1266,9 @@ mod tests {
         let viewport = crate::tile_index::Viewport::compose(&off_screen, &mask);
         assert!(!viewport.covers_mask());
         assert_eq!(
-            rows.candidacy(&viewport, Some(&counts))
-                .iter()
-                .collect::<Vec<_>>(),
+            rows.candidacy(&viewport).iter().collect::<Vec<_>>(),
             (0..11u32).collect::<Vec<_>>(),
-            "ordinal 11 is wholly off screen, and the histogram must not serve it"
+            "ordinal 11 is wholly off screen"
         );
     }
 }

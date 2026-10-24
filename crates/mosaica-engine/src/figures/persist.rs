@@ -1,11 +1,13 @@
-//! A fragment's counts and a level's denied-row labels on disk, in the engine's cache directory,
-//! so a restart reads them back rather than walking again.
+//! A level's sums, its sides' walks and its denied-row labels on disk, in the engine's cache
+//! directory, so a restart reads them back rather than walking again.
 //!
-//! One directory per shard identity, and a file per entry named by a digest of what it is a
-//! function of and the level version it describes. A file is a magic, the payload's length and
-//! its SHA-256, then the payload; a file whose length or digest does not match is not read, so a
-//! torn or altered entry is a miss. Writes go through [`mosaica_authz::write_private_atomically`],
-//! as the fragments beside them do.
+//! A level's sum for one grant is one file in [`SUMS_DIR`], which names the sides it is over.
+//! Each side's walk, which a sum is brought forward by when that side or another moves, and the
+//! denied rows' labels are in one directory per shard identity. Every file is named by a digest of
+//! what it is a function of and the version it describes. A file is a magic, the payload's length
+//! and its SHA-256, then the payload; a file whose length or digest does not match is not read, so
+//! a torn or altered entry is a miss. Writes go through
+//! [`mosaica_authz::write_private_atomically`], as the fragments beside them do.
 //!
 //! The directory is held under a byte bound: after each write the files least recently written or
 //! read are removed until what is left fits.
@@ -19,12 +21,21 @@ use sha2::{Digest, Sha256};
 use crate::engine::hex_encode as hex;
 use crate::row_column::RESERVE;
 
-use super::counts::{CountsAt, Dense, Grown, Reserves};
+use super::counts::{CountsAt, Dense, Grown, Part, Reserves, SideAt, SideGrown, Wide};
 use super::denied::DeniedLabels;
 use super::Geometry;
 
-const COUNTS_MAGIC: &[u8; 8] = b"MSFCNT03";
+const SUM_MAGIC: &[u8; 8] = b"MSFSUM04";
+const PART_MAGIC: &[u8; 8] = b"MSFPRT04";
 const DENIED_MAGIC: &[u8; 8] = b"MSFDNY03";
+
+/// The subdirectory of the figures' directory the sums are written to.
+pub(crate) const SUMS_DIR: &str = "sums";
+
+/// The directory the sums are written to.
+pub(crate) fn sums_dir(root: &Path) -> PathBuf {
+    root.join(SUMS_DIR)
+}
 const HEADER: usize = 8 + 8 + 32;
 
 /// The directory a shard identity's entries live in.
@@ -33,9 +44,10 @@ pub(crate) fn identity_dir(root: &Path, identity: &[u8; 32]) -> PathBuf {
 }
 
 /// Remove every identity's directory but those of `keep`: the entries of a superseded prefix can
-/// never be read again.
+/// never be read again. The sums are kept: one naming an identity removed here is walked again.
 pub(crate) fn sweep_other_identities(root: &Path, keep: &[[u8; 32]]) {
-    let keep: Vec<String> = keep.iter().map(|identity| hex(identity)).collect();
+    let mut keep: Vec<String> = keep.iter().map(|identity| hex(identity)).collect();
+    keep.push(SUMS_DIR.to_string());
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -46,8 +58,8 @@ pub(crate) fn sweep_other_identities(root: &Path, keep: &[[u8; 32]]) {
     }
 }
 
-/// What one fragment's counts are a function of, as a file stem, the layer named by its space as
-/// [`super::cache::FragmentKey`] names it.
+/// What a level's figures for one grant are a function of beside their sides, as a file stem, the
+/// layer named by its space as [`super::cache::SumKey`] names it.
 pub(crate) fn counts_stem(
     terms: &[u8; 32],
     view: &str,
@@ -211,6 +223,22 @@ impl Reader<'_> {
                 .collect(),
         )
     }
+    fn u128(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.take(16)?.try_into().ok()?))
+    }
+    fn identity(&mut self) -> Option<[u8; 32]> {
+        self.take(32)?.try_into().ok()
+    }
+    fn wide(&mut self) -> Option<Wide> {
+        Some(Wide {
+            count: self.u64()?,
+            placed: self.u64()?,
+            sums: [self.u128()?, self.u128()?],
+        })
+    }
+    fn len(&mut self) -> Option<usize> {
+        usize::try_from(self.u64()?).ok()
+    }
     fn u64s(&mut self, n: usize) -> Option<Vec<u64>> {
         let bytes = self.take(n.checked_mul(8)?)?;
         Some(
@@ -236,115 +264,250 @@ fn put_u64s(payload: &mut Vec<u8>, values: &[u64]) {
     }
 }
 
-/// Write a fragment's counts at their version: the walk, its reserves, and what the steps since it
-/// added.
-pub(crate) fn write_counts(dir: &Path, stem: &str, counts: &CountsAt, reserves: Option<&Reserves>) {
+fn put_len(payload: &mut Vec<u8>, len: usize) {
+    payload.extend_from_slice(&(len as u64).to_le_bytes());
+}
+
+fn put_wide(payload: &mut Vec<u8>, wide: &Wide) {
+    put_u64s(payload, &[wide.count, wide.placed]);
+    payload.extend_from_slice(&wide.sums[0].to_le_bytes());
+    payload.extend_from_slice(&wide.sums[1].to_le_bytes());
+}
+
+/// The geometry a sum or a part holds, as one byte: positions, and a reserve beside them.
+fn flags(positions: bool, reserves: bool) -> u8 {
+    u8::from(positions) | (u8::from(reserves) << 1)
+}
+
+/// Whether `flags` holds what `geometry` asks for: positions with a centroid or a box, and a
+/// reserve only with a box.
+fn holds(flags: u8, geometry: Geometry) -> Option<(bool, bool)> {
+    let (positions, reserves) = (flags & 1 != 0, flags & 2 != 0);
+    let wanted =
+        positions == (geometry != Geometry::None) && (!reserves || geometry == Geometry::Box);
+    wanted.then_some((positions, reserves))
+}
+
+/// Write a level's sum for one grant: its sides, the walks' sum, what each side's growth since its
+/// walk added, and the reserve.
+pub(crate) fn write_sum(dir: &Path, stem: &str, counts: &CountsAt, reserves: Option<&Reserves>) {
     let dense = &counts.dense;
     let n = dense.counts.len();
-    let geometry = !dense.placed.is_empty();
-    let mut payload = Vec::with_capacity(n * if geometry { 40 } else { 4 } + 64);
-    payload.extend_from_slice(&dense.filled_at.to_le_bytes());
-    payload.extend_from_slice(&(n as u64).to_le_bytes());
-    payload.push(u8::from(geometry) | (u8::from(reserves.is_some()) << 1));
+    let positions = dense.positions();
+    let mut payload = Vec::with_capacity(n * if positions { 40 } else { 4 } + 64);
+    put_len(&mut payload, counts.sides.len());
+    for side in counts.sides.iter() {
+        payload.extend_from_slice(&side.shard.raw().to_le_bytes());
+        payload.extend_from_slice(&side.identity);
+        put_u64s(&mut payload, &[side.filled_at, side.at]);
+        let mut grown: Vec<(&u32, &SideGrown)> = side.grown.iter().collect();
+        grown.sort_unstable_by_key(|(ordinal, _)| **ordinal);
+        put_len(&mut payload, grown.len());
+        for (ordinal, g) in grown {
+            put_u32s(&mut payload, &[*ordinal, g.count, g.placed]);
+            put_u64s(&mut payload, &g.sums);
+        }
+    }
+    put_len(&mut payload, n);
+    payload.push(flags(positions, reserves.is_some()));
     put_u32s(&mut payload, &dense.counts);
-    if geometry {
+    if positions {
         put_u32s(&mut payload, &dense.placed);
         put_u64s(&mut payload, dense.sums.as_flattened());
         put_u32s(&mut payload, dense.boxes.as_flattened());
     }
-    if let Some(reserves) = reserves {
-        payload.extend_from_slice(&(reserves.index.len() as u64).to_le_bytes());
-        put_u32s(&mut payload, &reserves.index);
-        payload.extend_from_slice(&(reserves.rows.len() as u64).to_le_bytes());
-        for rows in &reserves.rows {
-            put_u32s(&mut payload, rows.as_flattened());
-        }
+    let mut wide: Vec<(&u32, &Wide)> = dense.wide.iter().collect();
+    wide.sort_unstable_by_key(|(ordinal, _)| **ordinal);
+    put_len(&mut payload, wide.len());
+    for (ordinal, w) in wide {
+        put_u32s(&mut payload, &[*ordinal]);
+        put_wide(&mut payload, w);
     }
     let mut grown: Vec<(&u32, &Grown)> = counts.grown.iter().collect();
     grown.sort_unstable_by_key(|(ordinal, _)| **ordinal);
-    payload.extend_from_slice(&(grown.len() as u64).to_le_bytes());
+    put_len(&mut payload, grown.len());
     for (ordinal, g) in grown {
-        put_u32s(&mut payload, &[*ordinal, g.count, g.placed]);
-        put_u64s(&mut payload, &g.sums);
-        payload.extend_from_slice(&(g.points.len() as u64).to_le_bytes());
-        for &(row, x, y) in &g.points {
-            put_u32s(&mut payload, &[row, x, y]);
+        put_u32s(&mut payload, &[*ordinal]);
+        put_wide(&mut payload, &g.figures);
+        put_len(&mut payload, g.points.len());
+        for &(shard, row, x, y) in &g.points {
+            put_u32s(&mut payload, &[shard, row, x, y]);
         }
     }
-    write(dir, stem, counts.at, "counts", COUNTS_MAGIC, &payload);
+    if let Some(reserves) = reserves {
+        put_len(&mut payload, reserves.index.len());
+        put_u32s(&mut payload, &reserves.index);
+        put_len(&mut payload, reserves.rows.len());
+        for rows in &reserves.rows {
+            for &(shard, row) in rows.as_flattened() {
+                put_u32s(&mut payload, &[shard, row]);
+            }
+        }
+    }
+    write(dir, stem, 0, "sum", SUM_MAGIC, &payload);
 }
 
-/// A fragment's counts at `at`, and their reserves, where they are on disk with the geometry
-/// `geometry` asks for.
-pub(crate) fn read_counts(
+/// A level's sum for one grant, and its reserve, where it is on disk with the geometry `geometry`
+/// asks for.
+pub(crate) fn read_sum(
     dir: &Path,
     stem: &str,
-    at: u64,
     geometry: Geometry,
 ) -> Option<(CountsAt, Option<Reserves>)> {
-    let payload = read(dir, stem, at, "counts", COUNTS_MAGIC)?;
+    let payload = read(dir, stem, 0, "sum", SUM_MAGIC)?;
     let mut r = Reader(&payload);
-    let filled_at = r.u64()?;
-    let n = usize::try_from(r.u64()?).ok()?;
-    let flags = r.u8()?;
-    let (placed, reserved) = (flags & 1 != 0, flags & 2 != 0);
-    if placed != (geometry != Geometry::None) || (reserved && geometry != Geometry::Box) {
-        return None;
+    let mut sides = Vec::new();
+    for _ in 0..r.len()? {
+        let shard = mosaica_types::ShardId::new(r.u32()?).ok()?;
+        let identity = r.identity()?;
+        let (filled_at, at) = (r.u64()?, r.u64()?);
+        let mut grown = FxHashMap::default();
+        for _ in 0..r.len()? {
+            let head = r.u32s(3)?;
+            let sums = r.u64s(2)?;
+            grown.insert(
+                head[0],
+                SideGrown {
+                    count: head[1],
+                    placed: head[2],
+                    sums: [sums[0], sums[1]],
+                },
+            );
+        }
+        sides.push(SideAt {
+            shard,
+            identity,
+            filled_at,
+            at,
+            grown: std::sync::Arc::new(grown),
+        });
     }
+    let n = r.len()?;
+    let (positions, reserved) = holds(r.u8()?, geometry)?;
     let mut dense = Dense {
-        filled_at,
         counts: r.u32s(n)?,
         ..Dense::default()
     };
-    if placed {
+    if positions {
         dense.placed = r.u32s(n)?;
         dense.sums = r.u64s(2 * n)?.as_chunks::<2>().0.to_vec();
         dense.boxes = r.u32s(4 * n)?.as_chunks::<4>().0.to_vec();
     }
+    for _ in 0..r.len()? {
+        let ordinal = r.u32()?;
+        dense.wide.insert(ordinal, r.wide()?);
+    }
+    let mut grown = FxHashMap::default();
+    for _ in 0..r.len()? {
+        let ordinal = r.u32()?;
+        let figures = r.wide()?;
+        let points = r.len()?;
+        let flat = r.u32s(points.checked_mul(4)?)?;
+        grown.insert(
+            ordinal,
+            Grown {
+                figures,
+                points: flat
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| (p[0], p[1], p[2], p[3]))
+                    .collect(),
+            },
+        );
+    }
     let reserves = match reserved {
         false => None,
         true => {
-            let len = usize::try_from(r.u64()?).ok()?;
+            let len = r.len()?;
             let index = r.u32s(len)?;
-            let held = usize::try_from(r.u64()?).ok()?;
-            let flat = r.u32s(held.checked_mul(4 * RESERVE)?)?;
-            let sides = flat.as_chunks::<RESERVE>().0;
+            let held = r.len()?;
+            let flat = r.u32s(held.checked_mul(8 * RESERVE)?)?;
+            let pairs: Vec<(u32, u32)> = flat
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| (p[0], p[1]))
+                .collect();
+            let sides = pairs.as_chunks::<RESERVE>().0;
             Some(Reserves {
                 index,
                 rows: sides.as_chunks::<4>().0.to_vec(),
             })
         }
     };
-    let mut grown = FxHashMap::default();
-    for _ in 0..r.u64()? {
-        let head = r.u32s(3)?;
-        let sums = r.u64s(2)?;
-        let points = usize::try_from(r.u64()?).ok()?;
-        let flat = r.u32s(points.checked_mul(3)?)?;
-        grown.insert(
-            head[0],
-            Grown {
-                count: head[1],
-                placed: head[2],
-                sums: [sums[0], sums[1]],
-                points: flat
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|p| (p[0], p[1], p[2]))
-                    .collect(),
-            },
-        );
-    }
     if !r.0.is_empty() {
         return None;
     }
     let counts = CountsAt {
-        at,
+        sides: sides.into(),
         dense: std::sync::Arc::new(dense),
         grown: std::sync::Arc::new(grown),
     };
     Some((counts, reserves))
+}
+
+/// Write one side's walk of a level, filed under the level version it read.
+pub(crate) fn write_part(dir: &Path, stem: &str, filled_at: u64, part: &Part) {
+    let k = part.ordinals.len();
+    let (positions, reserves) = (part.positions, part.reserved);
+    let mut payload = Vec::with_capacity(k * if positions { 172 } else { 8 } + 32);
+    payload.extend_from_slice(&part.len.to_le_bytes());
+    payload.push(flags(positions, reserves));
+    put_len(&mut payload, k);
+    put_u32s(&mut payload, &part.ordinals);
+    put_u32s(&mut payload, &part.counts);
+    if positions {
+        put_u32s(&mut payload, &part.placed);
+        put_u64s(&mut payload, part.sums.as_flattened());
+        put_u32s(&mut payload, part.boxes.as_flattened());
+    }
+    if reserves {
+        for rows in &part.reserves {
+            put_u32s(&mut payload, rows.as_flattened());
+        }
+    }
+    write(dir, stem, filled_at, "part", PART_MAGIC, &payload);
+}
+
+/// One side's walk of a level at `filled_at`, where it is on disk with the geometry `geometry`
+/// asks for.
+pub(crate) fn read_part(
+    dir: &Path,
+    stem: &str,
+    filled_at: u64,
+    geometry: Geometry,
+) -> Option<Part> {
+    let payload = read(dir, stem, filled_at, "part", PART_MAGIC)?;
+    let mut r = Reader(&payload);
+    let len = r.u32()?;
+    let flags = r.u8()?;
+    let k = r.len()?;
+    let ordinals = r.u32s(k)?;
+    let counts = r.u32s(k)?;
+    let (positions, reserved) = holds(flags, geometry)?;
+    if reserved != (geometry == Geometry::Box) {
+        return None;
+    }
+    let mut part = Part {
+        len,
+        positions,
+        reserved,
+        ordinals,
+        counts,
+        ..Part::default()
+    };
+    if positions {
+        part.placed = r.u32s(k)?;
+        part.sums = r.u64s(2 * k)?.as_chunks::<2>().0.to_vec();
+        part.boxes = r.u32s(4 * k)?.as_chunks::<4>().0.to_vec();
+    }
+    if reserved {
+        let flat = r.u32s(k.checked_mul(4 * RESERVE)?)?;
+        part.reserves = flat.as_chunks::<RESERVE>().0.as_chunks::<4>().0.to_vec();
+    }
+    let framed = r.0.is_empty() && part.ordinals.windows(2).all(|w| w[0] < w[1]);
+    framed.then_some(part)
 }
 
 /// Write a level's denied-row labels.

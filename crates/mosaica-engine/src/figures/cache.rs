@@ -24,10 +24,10 @@
 //! counted as drawing while it waits on a walk, its own included, so nothing waits on itself. A
 //! walk, or a walk waiting for a place, that every caller has left stops and holds nothing.
 //!
-//! The bound is `serve.masked_count_cache_bytes`. An entry over a fragment's base rows is 4 B an
-//! artifact for counts alone and 40 B with a centroid's sums and a box. A layer that serves a box
-//! keeps a reserve beside it as an entry of its own, 4 B an artifact and 128 B more for each
-//! artifact with more than sixteen placed rows, so an entry too large for the bound loses its
+//! The bound is `serve.masked_count_cache_bytes`. A level's sum over every side is 4 B an artifact
+//! for counts alone and 40 B with a centroid's sums and a box, whatever the number of sides. A
+//! layer that serves a box keeps a reserve in the same entry, 4 B an artifact and 256 B more for
+//! each artifact with more than sixteen placed rows, so an entry too large for the bound loses its
 //! reserve and keeps its counts. A field's tally over a fragment's base rows is under a kilobyte,
 //! held in a cache of its own under a bound of the same size.
 
@@ -67,8 +67,8 @@ const CORRECTIONS_BYTES: u64 = 256 << 20;
 /// transposition at the construction site would compile.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum FiguresKey {
-    /// A level's counts over one fragment's base rows ([`FragmentKey`]).
-    Fragment(FragmentKey),
+    /// A level's sum over every side's base rows ([`SumKey`]).
+    Sum(SumKey),
     /// A level's counts over one request's whole composed mask: the walk of the whole composed
     /// mask, the answer while a level's denied-row labels are being read.
     Exact(ExactKey),
@@ -82,7 +82,9 @@ pub(crate) enum FiguresKey {
 /// A field's tally over a fragment's base rows: a function of the fragment's base rows and their
 /// values, which nothing changes between folds.
 ///
-/// - `terms`, `identity` and `view`: as [`FragmentKey`]'s.
+/// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
+/// - `identity`: the shard identity the fragment was unioned against, which a fold rotates.
+/// - `view`: the view the fragment's rows are of.
 /// - `column`: the field's column as the request resolved it.
 /// - `kind`: how its values are compared, which a field declared again with another type moves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -116,73 +118,96 @@ pub(crate) struct FieldTailKey {
     pub shards: [u8; 32],
 }
 
-/// The fragment's counts: a function of the fragment's base rows and the column's base labels.
-///
-/// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
-/// - `identity`: the shard identity the fragment was unioned against. A fold rotates it, and
-///   nothing else renumbers the base rows or rewrites the postings below them.
-/// - `view`, `space`, `level`: what the column is of. The layer is named by its space, never by its
-///   name, which a layer registered after a drop takes again.
-/// - `column`: [`crate::row_column::RowColumn::identity`], which a column composed, opened,
-///   recomposed or claimed afresh moves. Within one, a growth or a publication is followed by its
-///   steps, not by a new key.
-/// - `geometry`: what the entry carries beside the counts.
-///
-/// Not in the key: the overlay's version, the segments' versions and the fragment's watermark. A
-/// flush adds rows above the base only, a deny is corrected per request, and an item flushed under
-/// a key the grant holds has a row above the base.
+/// The level a sum is of, for one grant, whatever its sides: what a sum whose sides have moved is
+/// brought forward from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct FragmentKey {
+pub(crate) struct SumAddress {
     pub terms: [u8; 32],
-    pub identity: [u8; 32],
     pub view: String,
     pub space: LayerSpace,
     pub level: u32,
-    pub column: u64,
     pub geometry: Geometry,
 }
 
-/// One request's composed mask in one shard, named by every input to it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ExactKey {
+/// One side of a [`SumKey`]: the shard, the shard identity its base rows are numbered under, which
+/// a compaction rotates and nothing else renumbers, and its column's
+/// [`crate::row_column::RowColumn::identity`], which a column composed, opened, recomposed or
+/// claimed afresh moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SumSide {
     pub shard: mosaica_types::ShardId,
+    pub identity: [u8; 32],
+    pub column: u64,
+}
+
+/// A level's sum over the base rows of every side: a function of each side's base rows and its
+/// column's base labels.
+///
+/// - `terms`: the session's grant ([`crate::Session::terms_digest`]).
+/// - `view`, `space`, `level`: what the columns are of. The layer is named by its space, never by
+///   its name, which a layer registered after a drop takes again.
+/// - `geometry`: what the entry carries beside the counts.
+/// - `sides`: every side the level is served from a column in, ascending by shard ([`SumSide`]).
+///   Within one key, a growth or a publication is followed by each side's steps, not by a new key.
+///
+/// Not in the key: the overlay's version, the segments' versions and the fragments' watermarks. A
+/// flush adds rows above the base only, a deny is corrected per request, and an item flushed under
+/// a key the grant holds has a row above the base.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SumKey {
     pub terms: [u8; 32],
     pub view: String,
     pub space: LayerSpace,
     pub level: u32,
-    pub level_version: u64,
+    pub geometry: Geometry,
+    pub sides: Vec<SumSide>,
+}
+
+impl SumKey {
+    pub(crate) fn address(&self) -> SumAddress {
+        SumAddress {
+            terms: self.terms,
+            view: self.view.clone(),
+            space: self.space,
+            level: self.level,
+            geometry: self.geometry,
+        }
+    }
+}
+
+/// One request's composed mask over every side, named by every input to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ExactKey {
+    pub terms: [u8; 32],
+    pub view: String,
+    pub space: LayerSpace,
+    pub level: u32,
+    /// Each side's version of the level, in the order of the sides.
+    pub level_versions: Vec<u64>,
     pub geometry: Geometry,
     /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
 
-/// What a deny correction is a function of: the fragment, the level's labels at one version of
-/// one column, and the denied base rows. `failing` is the overlay's version where the mask also
-/// subtracts buffered rows the viewer fails below the base, which no deny version follows.
+/// What a deny correction is a function of: the sum, the level's labels at each side's version of
+/// its column, and each side's denied base rows. A side's `failing` is the overlay's version where
+/// the mask also subtracts buffered rows the viewer fails below the base, which no deny version
+/// follows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DenyKey {
-    pub terms: [u8; 32],
-    pub identity: [u8; 32],
-    pub view: String,
-    pub space: LayerSpace,
-    pub level: u32,
-    pub column: u64,
-    pub level_version: u64,
-    pub deny_version: u64,
-    pub failing: Option<u64>,
+    pub sum: SumKey,
+    /// Per side of `sum`: its version of the level, its deny version and its `failing`.
+    pub sides: Vec<(u64, u64, Option<u64>)>,
 }
 
-/// What one session's tail in one shard is a function of: its rows above the fragment's base rows
-/// and the labels the column gives them.
+/// What one session's tail is a function of: its rows above each side's base rows and the labels
+/// each side's column gives them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TailKey {
-    pub shard: mosaica_types::ShardId,
     pub token_id: u64,
-    pub view: String,
-    pub space: LayerSpace,
-    pub level: u32,
-    pub column: u64,
-    pub level_version: u64,
+    pub sum: SumKey,
+    /// Each side's version of the level, in the order of the sides.
+    pub level_versions: Vec<u64>,
     /// [`MaskIdentity::shards`].
     pub shards: [u8; 32],
 }
@@ -258,93 +283,95 @@ impl MaskIdentity {
         }
     }
 
-    /// This mask's exact key for one level in `shard`.
+    /// This mask's exact key for one level, its sides at `level_versions`.
     pub(crate) fn exact_key(
         &self,
-        shard: mosaica_types::ShardId,
         view: &str,
         space: LayerSpace,
         level: u32,
-        level_version: u64,
+        level_versions: Vec<u64>,
         geometry: Geometry,
     ) -> ExactKey {
         ExactKey {
-            shard,
             terms: self.terms,
             view: view.to_string(),
             space,
             level,
-            level_version,
+            level_versions,
             geometry,
             shards: self.shards,
         }
     }
 }
 
-/// How many versions of one fragment's counts are kept: a request still holding a level's form
-/// from before a publication reads the counts at that form's version.
-const VERSIONS_KEPT: usize = 4;
+/// A sum at one version of its sides, and the reserve walked with it.
+pub(crate) type HeldSum = (Arc<CountsAt>, Option<Arc<Reserves>>);
 
-/// What one held reserve belongs to: a fragment's entry, and the version its walk read.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ReserveKey {
-    pub fragment: FragmentKey,
-    pub filled_at: u64,
-}
+/// How many versions of one sum are kept: a request still holding a level's form from before a
+/// publication reads the sum at that form's version.
+const VERSIONS_KEPT: usize = 4;
 
 /// Where an entry is written, and when it was last.
 pub(crate) struct Written {
     pub(super) dir: std::path::PathBuf,
     pub(super) stem: String,
-    /// The newest version written to disk.
-    pub(super) at: AtomicU64,
+    /// Each side's version in the newest sum written.
+    pub(super) ats: Mutex<Vec<u64>>,
     pub(super) last: Mutex<Option<Instant>>,
     pub(super) writing: std::sync::atomic::AtomicBool,
 }
 
-/// One held entry: the counts over a fragment's base rows at the last few versions of the level
-/// they were brought to, newest last.
-pub(crate) struct FragmentCounts {
+/// One held entry: a level's sum at the last few versions of its sides' forms it was brought to,
+/// newest last, and the reserve walked with it.
+pub(crate) struct SumEntry {
     versions: Mutex<std::collections::VecDeque<Arc<CountsAt>>>,
+    pub(crate) reserves: Option<Arc<Reserves>>,
     /// What was charged against the bound when the entry was admitted.
     weight: u64,
     /// `None` for an entry nothing writes: a walk of a whole mask.
     pub(super) written: Option<Written>,
 }
 
-impl FragmentCounts {
-    /// `written` names where the entry is written, and that its version is on disk already.
-    pub(crate) fn new(counts: CountsAt, written: Option<(std::path::PathBuf, String)>) -> Self {
-        let weight = counts.weight_bytes();
-        let at = counts.at;
-        FragmentCounts {
+impl SumEntry {
+    /// `written` names where the entry is written, and whether its version is on disk already.
+    pub(crate) fn new(
+        counts: CountsAt,
+        reserves: Option<Arc<Reserves>>,
+        written: Option<(std::path::PathBuf, String, bool)>,
+    ) -> Self {
+        let weight = counts.weight_bytes() + reserves.as_ref().map_or(0, |r| r.weight_bytes());
+        let ats = counts.ats();
+        SumEntry {
             versions: Mutex::new(std::iter::once(Arc::new(counts)).collect()),
+            reserves,
             weight,
-            written: written.map(|(dir, stem)| Written {
+            written: written.map(|(dir, stem, on_disk)| Written {
                 dir,
                 stem,
-                at: AtomicU64::new(at),
+                ats: Mutex::new(if on_disk { ats } else { Vec::new() }),
                 last: Mutex::new(Some(Instant::now())),
                 writing: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
 
-    /// The counts at `version`: held, or brought forward from an older version held by `follow`,
-    /// which is handed that version and answers `None` where it cannot reach `version` from it.
+    /// The sum at `ats`: held, or brought forward from an older version held by `follow`, which is
+    /// handed that version and answers `None` where it cannot reach `ats` from it.
     pub(crate) fn at(
         &self,
-        version: u64,
+        ats: &[u64],
         follow: impl FnOnce(&CountsAt) -> Option<CountsAt>,
     ) -> Option<Arc<CountsAt>> {
         let mut versions = self.versions.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(held) = versions.iter().find(|held| held.at == version) {
+        if let Some(held) = versions.iter().find(|held| held.ats() == ats) {
             return Some(Arc::clone(held));
         }
-        let from = versions.iter().rev().find(|held| held.at < version)?;
+        let from = versions.iter().rev().find(|held| {
+            let held = held.ats();
+            held.len() == ats.len() && held.iter().zip(ats).all(|(held, at)| held <= at)
+        })?;
         let followed = Arc::new(follow(from)?);
-        let at = versions.partition_point(|held| held.at < version);
-        versions.insert(at, Arc::clone(&followed));
+        versions.push_back(Arc::clone(&followed));
         while versions.len() > VERSIONS_KEPT {
             versions.pop_front();
         }
@@ -362,19 +389,13 @@ impl FragmentCounts {
     }
 }
 
-impl CacheWeight for FragmentCounts {
+impl CacheWeight for SumEntry {
     fn cache_weight_bytes(&self) -> u64 {
         self.weight
     }
 }
 
 impl CacheWeight for DenyCorrection {
-    fn cache_weight_bytes(&self) -> u64 {
-        self.weight_bytes()
-    }
-}
-
-impl CacheWeight for Reserves {
     fn cache_weight_bytes(&self) -> u64 {
         self.weight_bytes()
     }
@@ -406,7 +427,7 @@ pub struct FiguresStats {
     pub entries: usize,
     /// Requests waiting at this instant for another request's build of their key.
     pub waiters: u64,
-    /// Walks of a fragment's base rows for a level.
+    /// Walks of one side's base rows for a level.
     pub fills: u64,
     /// Walks of a fragment's base rows for a field, which a field the base stores no tallies of
     /// takes, and so does one whose composed tallies do not cover the fragment's base rows.
@@ -414,15 +435,16 @@ pub struct FiguresStats {
     /// Composed field tallies that did not cover the fragment's base rows, or a deny that
     /// subtracted more than they held: each answered by a walk instead.
     pub field_mismatches: u64,
-    /// Fragments' counts read back from disk rather than walked.
+    /// Sums read back from disk rather than walked, and sides' walks read back to bring a sum
+    /// forward.
     pub loads: u64,
     /// Walks of a whole composed mask, taken where a level's denied-row labels are not yet held.
     pub exact: u64,
     /// Boxes worked out from an artifact's rows, or a field's base rows less a deny walked,
     /// because a deny reached a side its reserve could not answer.
     pub reserve_spent: u64,
-    /// Entries, counts or reserves, larger than the whole bound: served to the request that built
-    /// them and not kept.
+    /// Entries larger than the whole bound, served to the request that built them and not kept,
+    /// and reserves left out of an entry to bring it under the bound.
     pub not_admitted: u64,
     /// Bytes of denied-row labels held, and their bound.
     pub labels_bytes: u64,
@@ -443,6 +465,7 @@ pub(crate) struct Counters {
     pub(crate) loads: AtomicU64,
     pub(crate) exact: AtomicU64,
     pub(crate) spent: AtomicU64,
+    pub(crate) reserves_left_out: AtomicU64,
 }
 
 /// One request's part in [`FiguresCache::drawing`].
@@ -553,10 +576,13 @@ struct Abandoned;
 
 /// The cache itself, under a byte bound.
 pub struct FiguresCache {
-    slots: SingleFlightCache<FiguresKey, FragmentCounts>,
-    /// The reserves, beside the counts they were walked with.
-    pub(super) reserves: SingleFlightCache<ReserveKey, Reserves>,
-    /// The deny corrections, per fragment and deny version.
+    slots: SingleFlightCache<FiguresKey, SumEntry>,
+    /// The bound `slots` is held under, which an entry's reserve is left out to fit.
+    bound_bytes: AtomicU64,
+    /// Per level, the sum built last: what a sum whose sides have moved is brought forward from,
+    /// while it is held.
+    latest: Mutex<FxHashMap<SumAddress, std::sync::Weak<SumEntry>>>,
+    /// The deny corrections, per sum and deny versions.
     pub(super) denies: SingleFlightCache<DenyKey, DenyCorrection>,
     /// The tails, per session and generation.
     pub(super) tails: SingleFlightCache<TailKey, Tail>,
@@ -572,8 +598,9 @@ pub struct FiguresCache {
     pub(super) field_tails: SingleFlightCache<FieldTailKey, Held>,
     /// Per `(view, space, level)`, the labels of the view's denied base rows.
     pub(super) labels: LabelStore,
-    /// Where entries are persisted: one directory per shard identity beneath it. `None` holds
-    /// nothing on disk.
+    /// Where entries are persisted: a sum per level and grant in [`super::persist::SUMS_DIR`], and
+    /// beneath it one directory per shard identity for its sides' walks, its fields' tallies and
+    /// its denied rows' labels. `None` holds nothing on disk.
     pub(super) dir: Option<std::path::PathBuf>,
     /// The bytes `dir` may hold.
     pub(super) disk_bound: Arc<AtomicU64>,
@@ -618,7 +645,6 @@ impl FiguresCache {
         let slots = SingleFlightCache::new(bound_bytes);
         slots.set_wait_budget_ms(BUILD_WAIT_MS);
         let disk_bound = Arc::new(AtomicU64::new(DEFAULT_DISK_BYTES));
-        let reserves = SingleFlightCache::new(bound_bytes);
         let denies = SingleFlightCache::new(CORRECTIONS_BYTES);
         denies.set_wait_budget_ms(BUILD_WAIT_MS);
         let tails = SingleFlightCache::new(CORRECTIONS_BYTES);
@@ -631,7 +657,8 @@ impl FiguresCache {
         field_tails.set_wait_budget_ms(BUILD_WAIT_MS);
         FiguresCache {
             slots,
-            reserves,
+            bound_bytes: AtomicU64::new(bound_bytes),
+            latest: Mutex::default(),
             denies,
             tails,
             fields,
@@ -662,8 +689,7 @@ impl FiguresCache {
     pub fn set_bound_bytes(&self, bound_bytes: u64) {
         self.slots.set_bound_bytes(bound_bytes);
         self.slots.retain_keys(|_| false);
-        self.reserves.set_bound_bytes(bound_bytes);
-        self.reserves.retain_keys(|_| false);
+        self.bound_bytes.store(bound_bytes, Ordering::Relaxed);
         self.fields.set_bound_bytes(bound_bytes);
         self.fields.retain_keys(|_| false);
     }
@@ -691,7 +717,7 @@ impl FiguresCache {
             hits: stats.hits + fields.hits,
             misses: stats.misses + fields.misses,
             evictions: stats.evictions + fields.evictions,
-            resident_bytes: stats.bytes + self.reserves.stats().bytes + fields.bytes,
+            resident_bytes: stats.bytes + fields.bytes,
             entries: stats.entries + fields.entries,
             waiters: stats.waiters_now + fields.waiters_now,
             fills: self.counters.fills.load(Ordering::Relaxed),
@@ -701,8 +727,8 @@ impl FiguresCache {
             exact: self.counters.exact.load(Ordering::Relaxed),
             reserve_spent: self.counters.spent.load(Ordering::Relaxed),
             not_admitted: stats.oversized_admissions
-                + self.reserves.stats().oversized_admissions
-                + fields.oversized_admissions,
+                + fields.oversized_admissions
+                + self.counters.reserves_left_out.load(Ordering::Relaxed),
             labels_bytes: labels.bytes,
             labels_bound_bytes: labels.bound,
             labels_rows_read: labels.rows_read,
@@ -711,8 +737,9 @@ impl FiguresCache {
         }
     }
 
-    /// Remove every entry filed under an identity outside `live`, the identities of the shards
-    /// served: at open, and whenever a compaction rotates them.
+    /// Remove every entry filed under an identity outside `live`: at open, the identities of the
+    /// shards served, and whenever a compaction rotates them, those and the identities they
+    /// replaced, whose sides' walks a sum held from before the compaction is brought forward by.
     pub(crate) fn sweep(&self, live: impl IntoIterator<Item = [u8; 32]>) {
         let live: Vec<[u8; 32]> = live.into_iter().collect();
         self.field_left
@@ -723,40 +750,38 @@ impl FiguresCache {
         }
     }
 
-    /// The reserve walked with `key`'s counts at `filled_at`, where it is held.
-    pub(crate) fn reserve(&self, key: &FragmentKey, filled_at: u64) -> Option<Arc<Reserves>> {
-        let key = ReserveKey {
-            fragment: key.clone(),
-            filled_at,
-        };
-        match self.reserves.peek(&key) {
-            mosaica_cache::Peek::Ready(held) => Some(held),
-            _ => None,
+    /// The bound an entry, with its reserve, is held under.
+    pub(crate) fn bound_bytes(&self) -> u64 {
+        self.bound_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The sum built last for `address`, and its reserve, while either the cache or a request
+    /// holds it.
+    pub(crate) fn latest(&self, address: &SumAddress) -> Option<HeldSum> {
+        let latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = latest.get(address)?.upgrade()?;
+        Some((held.newest(), held.reserves.clone()))
+    }
+
+    /// Note `held` as the sum built last for `address`.
+    pub(crate) fn set_latest(&self, address: SumAddress, held: &Arc<SumEntry>) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        latest.insert(address, Arc::downgrade(held));
+        if latest.len() > 1024 && latest.len().is_power_of_two() {
+            latest.retain(|_, held| held.strong_count() > 0);
         }
     }
 
-    /// Hold `reserves` for `key`'s counts at `filled_at`, unless it is larger than the bound.
-    pub(crate) fn hold_reserve(&self, key: &FragmentKey, filled_at: u64, reserves: Reserves) {
-        let key = ReserveKey {
-            fragment: key.clone(),
-            filled_at,
-        };
-        let _ = self.reserves.get_or_derive(key, None, |_| reserves);
-    }
-
-    /// Every entry's newest counts not yet on disk: what a clean shutdown writes.
-    fn unwritten(&self) -> Vec<(FiguresKey, Arc<FragmentCounts>, Arc<CountsAt>)> {
+    /// Every entry's newest sum not yet on disk: what a clean shutdown writes.
+    fn unwritten(&self) -> Vec<(Arc<SumEntry>, Arc<CountsAt>)> {
         self.slots
             .ready_entries()
             .into_iter()
-            .filter_map(|(key, held)| {
+            .filter_map(|(_, held)| {
                 let written = held.written.as_ref()?;
                 let newest = held.newest();
-                (written.at.load(Ordering::Acquire) < newest.at).then_some((
-                    key,
-                    Arc::clone(&held),
-                    newest,
-                ))
+                let on_disk = written.ats.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                (on_disk != newest.ats()).then_some((Arc::clone(&held), newest))
             })
             .collect()
     }
@@ -785,8 +810,8 @@ impl FiguresCache {
         key: FiguresKey,
         turn: &DrawingTurn,
         cancel: Option<&crate::CancelToken>,
-        walk: impl FnOnce(&Build<'_>) -> Option<FragmentCounts>,
-    ) -> Result<Arc<FragmentCounts>, WaitEnded> {
+        walk: impl FnOnce(&Build<'_>) -> Option<SumEntry>,
+    ) -> Result<Arc<SumEntry>, WaitEnded> {
         self.get_or_build_in(&self.slots, key, turn, cancel, walk)
     }
 
@@ -962,20 +987,21 @@ impl FiguresCache {
 }
 
 impl Drop for FiguresCache {
-    /// The writes queued, then the newest counts of every entry whose last write is older: a write
-    /// is held back while an entry was written recently, and a clean shutdown keeps what that held
+    /// The writes queued, then the newest sum of every entry whose last write is older: a write is
+    /// held back while an entry was written recently, and a clean shutdown keeps what that held
     /// back.
     fn drop(&mut self) {
         self.worker.finish();
-        for (key, held, newest) in self.unwritten() {
+        for (held, newest) in self.unwritten() {
             let Some(written) = &held.written else {
                 continue;
             };
-            let reserve = match &key {
-                FiguresKey::Fragment(key) => self.reserve(key, newest.dense.filled_at),
-                FiguresKey::Exact(_) | FiguresKey::Field(_) | FiguresKey::FieldLeft(_) => None,
-            };
-            super::persist::write_counts(&written.dir, &written.stem, &newest, reserve.as_deref());
+            super::persist::write_sum(
+                &written.dir,
+                &written.stem,
+                &newest,
+                held.reserves.as_deref(),
+            );
         }
     }
 }
@@ -986,26 +1012,25 @@ mod tests {
 
     fn key(terms: u8, shards: u8) -> FiguresKey {
         FiguresKey::Exact(ExactKey {
-            shard: mosaica_types::ShardId::ZERO,
             geometry: Geometry::None,
             terms: [terms; 32],
             view: "s0".into(),
             space: LayerSpace::ZERO,
             level: 0,
-            level_version: 1,
+            level_versions: vec![1],
             shards: [shards; 32],
         })
     }
 
-    fn counts(values: &[u32]) -> FragmentCounts {
-        FragmentCounts::new(CountsAt::of_counts(1, values.to_vec()), None)
+    fn counts(values: &[u32]) -> SumEntry {
+        SumEntry::new(CountsAt::of_counts(values.to_vec()), None, None)
     }
 
     fn get(
         cache: &FiguresCache,
         key: FiguresKey,
-        build: impl FnOnce() -> FragmentCounts,
-    ) -> Arc<FragmentCounts> {
+        build: impl FnOnce() -> SumEntry,
+    ) -> Arc<SumEntry> {
         cache
             .get_or_build(key, &DrawingTurn::default(), None, |_| Some(build()))
             .expect("nothing else is building")

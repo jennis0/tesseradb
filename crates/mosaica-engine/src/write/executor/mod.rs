@@ -472,14 +472,12 @@ impl Executor {
         // fragments until the next rotation: a request still on the previous generation reads
         // them, and may be writing one.
         if rotation.is_some() {
-            self.deps
-                .figures
-                .sweep(next.shards().map(|shard| shard.identity));
             let kept: Vec<[u8; 32]> = next
                 .shards()
                 .chain(previous.shards())
                 .map(|shard| shard.identity)
                 .collect();
+            self.deps.figures.sweep(kept.iter().copied());
             let swept = self.deps.fragments.sweep(&kept);
             tracing::info!(
                 swept,

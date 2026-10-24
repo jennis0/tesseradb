@@ -258,46 +258,53 @@ struct Fixture {
     placed: BTreeSet<EntityId>,
 }
 
+/// The corpus built in `dir`, as shards of `shard_size` items where given and as one shard
+/// otherwise. The bundle's root.
+fn build(dir: &Path, corpus: Corpus, shard_size: Option<u64>) -> PathBuf {
+    let root = dir.join("bundle");
+    let points = dir.join("points.parquet");
+    write_points(&points, corpus);
+    let schema = id_schema();
+    let args = BuildArgs {
+        views: vec![mosaica_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: mosaica_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: AccessInput {
+                source: AccessSource::Field("access".to_string()),
+                default: None,
+            },
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
+        out: root.clone(),
+        limit: None,
+        shard_size,
+        strict: false,
+        identity_key: test_key(),
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    };
+    mosaica_build::build(&args).expect("the corpus builds");
+    root
+}
+
 impl Fixture {
     fn new(corpus: Corpus) -> Self {
         let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("bundle");
-        let points = tmp.path().join("points.parquet");
-        write_points(&points, corpus);
-        let schema = id_schema();
-        let args = BuildArgs {
-            views: vec![mosaica_build::ViewArgs {
-                visibility: None,
-                view_id: "s0".to_string(),
-                projection: mosaica_spatial::Projection::None,
-                extent: extent(),
-                points: points.clone(),
-                point_fields: Default::default(),
-                select: None,
-                access: AccessInput {
-                    source: AccessSource::Field("access".to_string()),
-                    default: None,
-                },
-            }],
-            anchor: 0,
-            groups: Vec::new(),
-            scoped_attributes: Vec::new(),
-            attribute_sources: mosaica_build::config::AttributeSource::over(points, &schema),
-            out: root.clone(),
-            limit: None,
-            shard_size: None,
-            strict: false,
-            identity_key: test_key(),
-            layers: Vec::new(),
-            layer_inputs: Vec::new(),
-            scoped_layers: Default::default(),
-            emit_oracle_pairs: false,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
-            schema,
-        };
-        mosaica_build::build(&args).expect("the corpus builds");
+        let root = build(tmp.path(), corpus, None);
         let entity: BTreeMap<u64, EntityId> = source_to_new_map(&root, "v00000")
             .into_iter()
             .map(|(s, e)| (s, EntityId::new(e)))
@@ -839,22 +846,24 @@ fn a_restart_reads_the_counts_and_the_denied_labels_back() {
         // The writes are off the request path; they are all on disk once the worker has run them.
         engine.figures_settled_for_test();
         let dir = fx.cache.join(mosaica_engine::figures::FIGURES_DIR);
-        assert!(files_under(&dir, "counts") >= 2 * fx.corpus.principals().len());
+        assert!(files_under(&dir, "sum") >= 2 * fx.corpus.principals().len());
         assert!(files_under(&dir, "denied") >= 2);
     }
     let engine = fx.open();
     check(&fx, &engine, "after the restart");
-    // Filed under the identity the fold stored for the shard, which the restart read back rather
-    // than derived.
+    // The denied rows' labels filed under the identity the fold stored for the shard, which the
+    // restart read back rather than derived, and the sums beside them.
     let stored = side_manifest(&fx.root).only_shard().identity;
     let hex: String = stored.iter().map(|byte| format!("{byte:02x}")).collect();
-    let filed: Vec<String> = std::fs::read_dir(fx.cache.join(mosaica_engine::figures::FIGURES_DIR))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut filed: Vec<String> =
+        std::fs::read_dir(fx.cache.join(mosaica_engine::figures::FIGURES_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+    filed.sort();
     assert_eq!(
         filed,
-        vec![hex],
+        vec![hex, "sums".to_string()],
         "the figures are filed under the stored identity"
     );
     let stats = engine.figures_stats();
@@ -1070,4 +1079,237 @@ fn a_name_registered_again_is_served_its_own_figures() {
     };
     let engine = fx.open();
     assert_eq!(figures(&engine), again, "after a restart");
+}
+
+/// What a principal is served of both layers: per artifact, its count, centroid and box.
+type ServedFigures = BTreeMap<(String, String), (u64, Option<[f64; 2]>, Option<[u32; 4]>)>;
+
+fn figures_of(engine: &Engine, principal: &Principal) -> ServedFigures {
+    let session = principal.session(engine);
+    served(engine, &session)
+        .into_iter()
+        .map(|artifact| {
+            (
+                (artifact.layer.clone(), artifact.key.clone().expect("every artifact is keyed")),
+                (
+                    artifact.masked_count,
+                    artifact.derived.centroid,
+                    artifact.derived.bbox,
+                ),
+            )
+        })
+        .collect()
+}
+
+/// What a walk of the principal's composed mask, a row at a time, gives every artifact of both
+/// layers it sees a member of.
+fn walked_of(engine: &Engine, principal: &Principal) -> ServedFigures {
+    let session = principal.session(engine);
+    let mut out = ServedFigures::new();
+    for layer in [FLAT, LIST] {
+        let walked = engine
+            .walked_figures_for_test(&session, "s0", layer, 0)
+            .expect("the walk answers");
+        for (key, figures) in walked.into_iter().filter(|(_, (count, ..))| *count > 0) {
+            out.insert((layer.to_string(), key), figures);
+        }
+    }
+    out
+}
+
+/// Publish both layers over `engine`, each artifact's members named by their `id`s.
+fn publish_by_id(engine: &Engine) {
+    let mut members: BTreeMap<(&'static str, String), Vec<u64>> = BTreeMap::new();
+    for s in 0..N {
+        for (layer, key) in memberships(s) {
+            members.entry((layer, key)).or_default().push(s);
+        }
+    }
+    for (layer, layout) in [
+        (FLAT, ServingLayout::RowMajorLabel),
+        (LIST, ServingLayout::RowMajorList),
+    ] {
+        engine.register_layer(declaration(layer, layout)).unwrap();
+        let artifacts = members
+            .iter()
+            .filter(|((l, _), _)| *l == layer)
+            .map(|((_, key), ids)| {
+                let mut artifact = IncomingArtifact::from_entities(Some(key.clone()), Vec::new());
+                artifact.members = mosaica_lifecycle::ShardSets::of_items(
+                    items_by_id(engine, ids.iter().copied()).into_iter().flatten(),
+                );
+                artifact
+            })
+            .collect();
+        engine
+            .publish_artifacts(layer.into(), 0, artifacts)
+            .unwrap();
+    }
+    tick(engine);
+}
+
+/// Grow `key` of `layer` by the items of `ids`.
+fn grow_by_id(engine: &Engine, layer: &str, key: &str, ids: &[u64]) {
+    let mut growth = IncomingGrowth::from_entities(key.to_string(), Vec::new());
+    growth.joining = mosaica_lifecycle::ShardSets::of_items(
+        items_by_id(engine, ids.iter().copied()).into_iter().flatten(),
+    );
+    engine.grow_memberships(layer.into(), 0, vec![growth]).unwrap();
+    tick(engine);
+}
+
+/// Deny the items of `ids` by `op`.
+fn deny_by_id(engine: &Engine, ids: impl IntoIterator<Item = u64>, op: ChangeOp) {
+    let targets = items_by_id(engine, ids)
+        .into_iter()
+        .flatten()
+        .map(|item| (item.target(), op))
+        .collect();
+    engine.accept_changes(targets).unwrap();
+}
+
+/// Ingest one item per `id`, at a place and under labels of the corpus's, and flush it.
+fn ingest_by_id(engine: &Engine, corpus: Corpus, batch: &str, ids: std::ops::Range<u64>) {
+    let rows = ids
+        .map(|id| {
+            let descriptors: Vec<Vec<u8>> = corpus
+                .labels(id)
+                .iter()
+                .map(|l| l.as_bytes().to_vec())
+                .collect();
+            UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                x: x_of(id) + 0.5,
+                y: y_of(id) + 0.5,
+                scalars: vec![mosaica_lifecycle::wal::WalScalar::U64(id)],
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
+    engine
+        .ingest_rows(rows, batch.to_string(), [0u8; 32])
+        .expect("ingest is accepted");
+    publish_buffered(engine);
+}
+
+/// Every principal is served the same figures over several shards as over one, and each is the
+/// walk of their visible rows.
+fn assert_served_as_one(one: &Engine, several: &Engine, corpus: Corpus, what: &str) {
+    let mut served_any = false;
+    for principal in corpus.principals() {
+        let over_several = figures_of(several, &principal);
+        assert_eq!(
+            over_several,
+            figures_of(one, &principal),
+            "{what}: {principal:?} over several shards and over one"
+        );
+        assert_eq!(
+            over_several,
+            walked_of(several, &principal),
+            "{what}: {principal:?} against the walk of the visible rows"
+        );
+        served_any |= !over_several.is_empty();
+    }
+    assert!(served_any, "{what}: nothing was served, so nothing was compared");
+}
+
+/// **Several shards' figures are one shard's holding the same items**: the same corpus built as
+/// three shards and as one serves every principal the same count, centroid and box of every
+/// artifact, each the walk of their visible rows, as published and folded, through deletions and
+/// suppressions in every shard, a growth in one shard, an ingest flushed into the open shard, a
+/// compaction of one shard, which walks that shard again and no other, a growth after it, and a
+/// restart, which walks nothing.
+#[test]
+fn several_shards_serve_the_figures_one_shard_holding_their_items_serves() {
+    let corpus = Corpus::MultiKey;
+    let one_dir = tempfile::TempDir::new().unwrap();
+    let several_dir = tempfile::TempDir::new().unwrap();
+    let one_root = build(one_dir.path(), corpus, None);
+    let several_root = build(several_dir.path(), corpus, Some(450));
+    assert_eq!(shards_of(&several_root).1.len(), 3, "the build wrote three shards");
+    let open = |dir: &tempfile::TempDir, root: &Path| {
+        let (cache, wal) = (dir.path().join("cache"), dir.path().join("wal.log"));
+        let engine = open_engine_publishing(root, &cache, &wal);
+        engine.set_background_refresh_for_test(false);
+        engine
+    };
+    let (one, several) = (open(&one_dir, &one_root), open(&several_dir, &several_root));
+    for engine in [&one, &several] {
+        publish_by_id(engine);
+    }
+    assert_served_as_one(&one, &several, corpus, "as published");
+    for engine in [&one, &several] {
+        fold(engine);
+    }
+    assert_served_as_one(&one, &several, corpus, "folded");
+
+    for engine in [&one, &several] {
+        deny_by_id(engine, (0..N).filter(|s| s % 11 == 0), ChangeOp::Delete);
+        deny_by_id(engine, (0..N).filter(|s| s % 13 == 1), ChangeOp::Suppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "denied in every shard");
+
+    let in_shard_zero: Vec<u64> = ids_in_shard(&several, N, 0)
+        .into_iter()
+        .filter(|s| s % 5 == 0)
+        .collect();
+    for engine in [&one, &several] {
+        grow_by_id(engine, LIST, "l4", &in_shard_zero);
+    }
+    assert_served_as_one(&one, &several, corpus, "grown in shard 0");
+
+    let fresh = N..N + 30;
+    for engine in [&one, &several] {
+        ingest_by_id(engine, corpus, "fresh", fresh.clone());
+        grow_by_id(engine, FLAT, "f1", &fresh.clone().collect::<Vec<_>>());
+    }
+    assert_served_as_one(&one, &several, corpus, "ingested into the open shard");
+    for engine in [&one, &several] {
+        fold(engine);
+    }
+    assert_served_as_one(&one, &several, corpus, "folded again");
+
+    // A deletion in shard 1 alone, which its compaction reclaims.
+    let in_shard_one: Vec<u64> = ids_in_shard(&several, N, 1)
+        .into_iter()
+        .filter(|s| s % 7 == 3)
+        .collect();
+    // And a growth in shard 2 since its fold, after which the compaction of shard 1 builds shard
+    // 2's form holding its own rows.
+    let in_shard_two: Vec<u64> = ids_in_shard(&several, N, 2)
+        .into_iter()
+        .filter(|s| s % 4 == 1)
+        .collect();
+    for engine in [&one, &several] {
+        deny_by_id(engine, in_shard_one.iter().copied(), ChangeOp::Delete);
+        grow_by_id(engine, LIST, "l5", &in_shard_two);
+    }
+    assert_served_as_one(&one, &several, corpus, "deleted in shard 1, grown in shard 2");
+    let walks = several.figures_stats().fills;
+    compact(&several, Some(shard(1)));
+    fold(&one);
+    assert_served_as_one(&one, &several, corpus, "shard 1 compacted");
+    let sums = 2 * corpus.principals().len() as u64;
+    assert_eq!(
+        several.figures_stats().fills - walks,
+        sums,
+        "each sum walked shard 1 again and no other shard"
+    );
+
+    for engine in [&one, &several] {
+        grow_by_id(engine, LIST, "l7", &in_shard_two);
+        deny_by_id(engine, (0..N).filter(|s| s % 13 == 1), ChangeOp::Unsuppress);
+    }
+    assert_served_as_one(&one, &several, corpus, "grown in shard 2, the suppressions lifted");
+
+    for engine in [&one, &several] {
+        engine.figures_settled_for_test();
+    }
+    drop((one, several));
+    let (one, several) = (open(&one_dir, &one_root), open(&several_dir, &several_root));
+    assert_served_as_one(&one, &several, corpus, "after a restart");
+    assert_eq!(several.figures_stats().fills, 0, "a restart walks nothing again");
 }

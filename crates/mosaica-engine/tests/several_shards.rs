@@ -1998,14 +1998,11 @@ fn a_growth_in_one_shard_leaves_the_others_files_and_figures() {
     );
     let (slices, records) = versions_of(&several.root);
 
-    let figures = |engine: &Engine| {
-        let stats = engine.figures_stats();
-        (stats.misses, stats.hits)
-    };
+    let figures = |engine: &Engine| engine.figures_stats().fills;
     let opened = figures(&engine);
     let served = artifacts_of(&engine, &full);
-    let cold = figures(&engine).0 - opened.0;
-    assert_eq!(cold, 2, "the first request takes each shard's figures");
+    let cold = figures(&engine) - opened;
+    assert_eq!(cold, 2, "the first request walks each shard's base rows");
 
     let joiner = *ids_in_shard(&engine, TWO_SHARD_N, 0)
         .iter()
@@ -2047,8 +2044,8 @@ fn a_growth_in_one_shard_leaves_the_others_files_and_figures() {
     );
     let now = figures(&engine);
     assert!(
-        now.0 - before.0 < cold && now.1 > before.1,
-        "shard 1's figures are held: {before:?} then {now:?}"
+        now - before < cold,
+        "shard 1's walk is held: {before} walks then {now}"
     );
 
     let first = |shard: u32| item_by_id(&engine, ids_in_shard(&engine, TWO_SHARD_N, shard)[0]);

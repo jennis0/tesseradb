@@ -355,7 +355,7 @@ fn sides<'a>(
         mask: Some(mask),
         denied,
         containment: None,
-        counts: None,
+        counted: false,
     }]
 }
 
@@ -472,7 +472,7 @@ fn walk(
     // `ArtifactRows::candidacy`, which is what `serve_artifacts` calls — so this drives the route
     // choice as well as the classification. These fixtures are all artifact-major, so the walk is
     // the route taken and the node count is real.
-    let candidates = rows.candidacy(&viewport, None);
+    let candidates = rows.candidacy(&viewport);
     let mosaica_engine::artifacts::Candidacy::Indexed(walked) = &candidates else {
         panic!("an artifact-major level is answered by the walk");
     };
@@ -551,6 +551,7 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
                 layer_reachable: true,
                 dependency_served: &always_served,
                 sides: sides(rows, &mask, &denied),
+                counts: None,
             };
             for (name, ranges) in viewports() {
                 let tiles = rows_of(&ranges);
@@ -721,6 +722,7 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
         layer_reachable: true,
         dependency_served: &always_served,
         sides: sides(&rows, &mask, &denied),
+        counts: None,
     };
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
@@ -1179,6 +1181,7 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         layer_reachable: true,
         dependency_served: &always_served,
         sides: sides(&rows, &mask, &denied),
+        counts: None,
     };
 
     let population = rows.len() as u64;

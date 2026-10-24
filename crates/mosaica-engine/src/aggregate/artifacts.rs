@@ -243,7 +243,7 @@ impl Layer {
         let figures = read
             .as_ref()
             .filter(|_| row_major && cx.sets.set.is_whole())
-            .and_then(|read| read.forms.figures.as_ref());
+            .and_then(|read| read.forms.figures());
         // And where every column is a label column, a row is in at most one artifact, so the
         // groups' sizes are sums of those figures.
         let summed = figures.is_some()

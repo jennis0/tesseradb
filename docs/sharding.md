@@ -497,7 +497,7 @@ response sends.
 | identity bands | its parts of the tile, each read at the one band chosen for the tile | one band per tile, chosen from the tile's count summed over every shard's parts, inside the two rows above |
 | a point's artifact tag in each layer | read from that shard's level column | none: whether the artifact is served comes from its combined figures |
 | artifacts of each tile | candidates from that shard's coverings, labels above the base or tile index, each tested for a visible member in the tile | union, one entry per artifact, ordered by combined count then `mosaica_id`, cut to `per_tile`; target layers first, and a dependent enters only where its target is held in the combined frame, taking no place in the quota, as today |
-| a level's figures: count, centroid, box | F per (grant, shard), D per (shard, deny version), T per (session, shard) | counts and position sums add; each side of the box is the extreme across shards of each shard's first kept extreme row that D does not hold, or of a walk of that shard where D holds all eight |
+| a level's figures: count, centroid, box | its walk of the grant's base rows, its denied base rows' labels, its rows above the base | one sum of the walks per grant (§3.6); D and T over every shard, each shard's left out of the request included; each side of the box is the first of the eight most extreme rows across shards that D does not hold, or a walk of the artifact's members in every shard where D holds all eight |
 | a `nested` or `dag` cut | its candidates in the request's tiles, each tested for a visible member there | union of the candidates, each judged by its combined verdict, then cut once over the union |
 | membership requirement | visible members of the artifact, and its members in that shard's row form | visible members summed; a count criterion compares the sum, and a fraction compares it with the members summed over every shard, a shard left out of the request included |
 | generating-set containment | per rank, `\|G_s ∩ visible_s\|` and `\|G_s\|` | per rank, each summed against the declared size held in the layer space; the first rank where both equal it is served, as today. A shard left out of the request adds nothing, so the test fails closed |
@@ -535,8 +535,8 @@ the pass-2 merge.
 |---|---|---|
 | fragment | bundle identity, rule hash, watermark, satisfied terms | the shard's identity, rule hash, the shard's watermark, satisfied terms |
 | row projection | token, view, segments version, prefix | grant, view, shard, the shard's identity, the shard's segments version, prefix |
-| a level's figures, F | terms, bundle identity, view, layer, level, column, geometry | the same with the shard and the shard's identity, on disc per shard |
-| D correction | view, deny version | view, shard, the shard's deny version |
+| a level's figures, F | terms, bundle identity, view, layer, level, column, geometry | terms, view, layer, level, geometry, and every shard with its identity and its column; on disc as one sum, and each shard's walk under the shard's identity |
+| D correction | view, deny version | F's key, and every shard's level version and deny version |
 | term images | partition, view | shard, view |
 | field tallies | view | shard, view |
 | the identity and content keys, the pin, the aggregate's recompose stamp | the fragment's identity and watermark, the overlay version, the segments version | every shard's fragment identity and watermark, every point shard's and layer space's overlay version, every shard's segments version |
@@ -549,13 +549,34 @@ which moves at that shard's flush, merge and compaction. A compaction of one sha
 invalidates only that shard's fragments, projections and figures. The background refresh runs per
 (grant, view, shard), so a flush into one shard extends only that shard's projections.
 
-A level's figures are summed across shards per request: each shard's counts and position sums are
-added, and each side of the box is the extreme across shards. Summing every shard's count vector
-costs about 0.8 ms per shard at a million artifacts, measured: 2% of a 50% viewer's walk of the
-level at N = 100, and nearly as much as the whole walk of a 0.1% viewer
-(`probes/2026-10-09-shard-read-costs/`). Not built yet: the sum kept per grant, which a change to
-one shard's figures would update by that shard's difference. §8.2's measurements decide whether it
-is needed.
+A level's figures are held as one sum per grant over every shard: each shard's walk of the grant's
+base rows added together, with what each shard's growth has added since. The sum is 40 B an
+artifact with a centroid and a box, as one shard's figures are, and a request reads each
+artifact's figures from it once, whatever the number of shards. It subtracts every shard's denied
+base rows and adds every shard's rows above the base. A shard the request leaves out is corrected
+too: the viewer sees nothing there, so its denied base rows are all the grant's base rows there. A
+growth or a publication is followed by each shard's steps.
+
+A shard whose walk is replaced moves the sum by that shard's difference. That is a shard whose
+identity a compaction rotated, a shard that opened, and a shard whose column's steps do not lead
+to the version a request reads. Its previous walk, read back from the cache directory, is taken
+away with what its growth added since, and its new walk is added. Counts, placed counts and
+position sums subtract exactly. A side of a box is an extreme across shards and cannot be taken
+away. An artifact whose box the previous walk reached, or whose eight most extreme rows on a side
+included one of the previous walk's rows, has its box and those rows worked out again from every
+shard's walk, read back. Every other artifact's box is widened by the new walk, and its extreme
+rows merged with the new walk's. Each shard's walk is written to the cache directory under the
+shard's identity, keeping each ordinal it counts a row of, with its box and its eight most extreme
+rows on each side. A compaction removes the directories of identities older than the one it
+replaced, and a restart all but those served. Where a walk the difference needs is not on disc,
+the sum is made again from every shard's walk, read back or walked.
+
+The shards' walks are sparse. On GeoNames at 128 shards, which a build lays out in space, the
+walks of the principal who sees every item hold 1.00 to 1.50 entries per artifact over the five
+administrative levels, so the cache directory holds about one dense entry's worth of them per
+grant and level, against 128 dense entries held per shard. The eight most extreme rows kept for a
+box name each row's shard beside the row, so they take 256 B an artifact against one shard's 128
+B.
 
 ### 3.7 A session's cost
 
@@ -707,8 +728,9 @@ per-shard compaction has been measured (§8.3).
 
 A membership's member resolves to (shard, entity) and lands in that shard's slice. A publication or
 a growth writes each shard's slice and that shard's row forms for the level, and publishes them in
-one publication (§4.10). A membership-only ingest row joins its item to the artifact in the item's shard. Each
-level's figures are kept per shard (§3.6).
+one publication (§4.10). A membership-only ingest row joins its item to the artifact in the item's shard. A
+level's figures are one sum over every shard, which a growth in one shard moves by that shard's
+steps (§3.6).
 
 A level has a records version, held in its layer space, and a slice version for each shard. A
 write that changes a level's records moves its records version and every shard's slice version. A

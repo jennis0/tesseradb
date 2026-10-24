@@ -447,7 +447,7 @@ impl Engine {
                 shards: mask_identity.shards,
                 properties: crate::derived::cache::properties_bits(&declared_derived),
             };
-            match forms.figures.as_ref().filter(|f| f.has_geometry()) {
+            match forms.figures().filter(|f| f.has_geometry()) {
                 // The accumulation the level's own figures carry.
                 Some(figures) => crate::derived::accumulated(&declared_derived, figures, ordinal),
                 None => {
@@ -1253,7 +1253,7 @@ impl Engine {
                 properties: crate::derived::cache::properties_bits(&layer.declared_derived),
             };
             // The accumulation where the level has one; nothing here walks the mask again.
-            match level.forms.figures.as_ref().filter(|f| f.has_geometry()) {
+            match level.forms.figures().filter(|f| f.has_geometry()) {
                 Some(figures) => {
                     crate::derived::accumulated(&layer.declared_derived, figures, ordinal)
                 }
@@ -1457,12 +1457,26 @@ pub(super) fn viewport_sets<'a>(
 /// The artifacts of one level holding a member the viewer sees in `sets`, ascending: each side
 /// proposes candidates from its own form and probes each against its own leaf, and an artifact is
 /// present where any side finds one. An artifact `admits_label` withholds has no membership
-/// probed.
+/// probed. Where the viewport covers the whole mask in every side the request reads, and the
+/// level's figures cover every one of them, the artifacts present are those the figures count a
+/// visible row of: the scan of every side finds nothing they have not already counted.
 pub(super) fn present_in(
     forms: &crate::layer_read::LevelForms,
     sets: &[ViewportSets<'_>],
     admits_label: impl Fn(u32) -> bool,
 ) -> croaring::Bitmap {
+    let covering: Vec<usize> = sets
+        .iter()
+        .filter(|set| set.viewport.covers_mask())
+        .map(|set| set.place)
+        .collect();
+    if let Some(populated) = (covering.len() == sets.len())
+        .then(|| forms.populated_over(&covering))
+        .flatten()
+    {
+        let admitted: Vec<u32> = populated.iter().filter(|&o| admits_label(o)).collect();
+        return croaring::Bitmap::of(&admitted);
+    }
     let mut present = croaring::Bitmap::new();
     for set in sets {
         let rows: &crate::artifacts::ArtifactRows = &forms.rows[set.place];
@@ -1470,7 +1484,7 @@ pub(super) fn present_in(
         // visible member, so skipping it withholds nothing. Holes and artifacts with no projected
         // membership stay live on the identifier route, which walks no index. Or, on a row-major
         // level, a scan over the viewport intersected with the mask.
-        let candidates = rows.candidacy(&set.viewport, forms.side_figures[set.place].as_deref());
+        let candidates = rows.candidacy(&set.viewport);
         for ordinal in candidates.iter() {
             if present.contains(ordinal) || !admits_label(ordinal) {
                 continue;
@@ -1929,5 +1943,68 @@ mod tests {
         assert_eq!(present_over(&[&a], 4), vec![0, 3]);
         assert_eq!(present_over(&[&b], 4), vec![1, 3]);
         assert_eq!(present_over(&[&Held::joined(&a, &b, 10)], 4), vec![0, 1, 3]);
+    }
+
+    /// A level served from its columns, with and without its figures over both shards: what each
+    /// shard's scan proposes, and what the figures give where the tiles cover every visible row in
+    /// both.
+    fn present_from_columns(shards: &[&Held], figures: bool) -> Vec<u32> {
+        let forms = LevelForms::synthetic(
+            shards
+                .iter()
+                .map(|held| {
+                    let sets: Vec<Option<&[u32]>> =
+                        held.sets.iter().map(|set| Some(set.as_slice())).collect();
+                    ArtifactRows::synthetic_column_only(&sets, held.rows)
+                })
+                .collect(),
+        );
+        let forms = match figures {
+            false => forms,
+            true => {
+                let counts: Vec<Vec<u32>> = shards
+                    .iter()
+                    .map(|held| {
+                        held.sets
+                            .iter()
+                            .map(|set| {
+                                set.iter().filter(|r| held.visible.contains(r)).count() as u32
+                            })
+                            .collect()
+                    })
+                    .collect();
+                forms.with_figures(crate::figures::LevelFigures::of_counts(&counts))
+            }
+        };
+        let leaves: Vec<EffectiveMask> = shards.iter().map(|held| held.leaf()).collect();
+        let rows: Vec<croaring::Bitmap> = shards.iter().map(|held| held.tile_rows()).collect();
+        present_in(&forms, &sets_over(&leaves, &rows), |_| true)
+            .iter()
+            .collect()
+    }
+
+    /// Where the tiles cover every visible row in both shards, the artifacts present are read off
+    /// the figures and are the scans'. Where they miss one shard's only visible row of an
+    /// artifact, that shard is scanned, and the artifact seen only off screen is not present.
+    #[test]
+    fn a_covering_viewport_reads_the_figures_and_any_other_scans() {
+        // Ordinal 2 is seen only at the second shard's row 1.
+        let a = Held {
+            sets: vec![vec![0, 1], vec![2, 3], vec![]],
+            rows: 4,
+            visible: vec![0, 2],
+            spans: vec![Range { start: 0, end: 4 }],
+        };
+        let mut b = Held {
+            sets: vec![vec![0], vec![], vec![1]],
+            rows: 2,
+            visible: vec![1],
+            spans: vec![Range { start: 0, end: 2 }],
+        };
+        assert_eq!(present_from_columns(&[&a, &b], true), vec![0, 1, 2]);
+        assert_eq!(present_from_columns(&[&a, &b], false), vec![0, 1, 2]);
+        b.spans = vec![Range { start: 0, end: 1 }];
+        assert_eq!(present_from_columns(&[&a, &b], true), vec![0, 1]);
+        assert_eq!(present_from_columns(&[&a, &b], false), vec![0, 1]);
     }
 }

@@ -78,12 +78,12 @@ The server holds these caches, each with a limit you can set under `[serve]`:
 |---|---|---|
 | `row_projection_cache_bytes` | 2 GiB | For each session, which rows of the bundle it may see |
 | `fragment_cache_bytes` | 1 GiB | For each distinct set of granted labels, the items it covers. Copies on disc in the cache directory outlive the memory |
-| `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation levels served from a column, one entry per grant and level. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 128 B for each artifact with more than sixteen placed rows. A level of 1.4 million artifacts is 56 MB a grant counted with geometry, and a layer serving a box keeps at most 185 MB more of reserves in a cache of its own, so the default holds the counts of about nineteen such grant-levels and the reserves of at least five. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, which `masked_count_cache.not_admitted` on `/control/status` counts. Empty in a corpus without such a layer |
-| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory, so a restart reads them back and does not walk each grant's rows again. Size it as the memory bound above times the number of grant-levels a restart should find, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
+| `masked_count_cache_bytes` | 1 GiB | Visible member counts, centroids and boxes for annotation levels served from a column, one entry per grant and level, whatever the number of shards. Per artifact: 4 B for counts alone, 40 B with a centroid and a box, and for a layer serving a box 4 B more plus 256 B for each artifact with more than sixteen placed rows. A level of 1.4 million artifacts is 56 MB a grant counted with geometry, and a layer serving a box keeps at most 364 MB more of reserves in the same entry, so the default holds the counts of about nineteen such grant-levels, and at least two with their reserves. Deployments where every user holds their own terms need one entry per user per level. An entry larger than the bound is served and not kept, and an entry that fits only without its reserve is kept without it; `masked_count_cache.not_admitted` on `/control/status` counts both. Empty in a corpus without such a layer |
+| `figures_disk_bytes` | 8 GiB | The same entries, and the labels of denied rows they are corrected with, kept in the cache directory, so a restart reads them back and does not walk each grant's rows again. In a bundle of several shards it also keeps each shard's walk of each grant's items, which a compaction of one shard reads back to walk that shard alone: up to 172 B for each artifact a shard holds a member of. Size it as the memory bound above times the number of grant-levels a restart should find, plus those walks, plus about 24 B per denied row per level. Past it, the files least recently written or read are removed |
 | `region_cache_bytes` | 256 MiB | Drawn filter regions broken into map tiles, shared between viewers |
 | `occupancy_cache_bytes` | 32 MiB | How many tiles at each zoom hold something a session can see |
 
-`masked_count_cache_bytes` bounds three caches, each to that size: the counts, the eight most
+`masked_count_cache_bytes` bounds two caches, each to that size: the counts, with the eight most
 extreme rows on each side kept for an annotation layer that serves a box, and the tallies of number
 and timestamp fields, which are under a kilobyte each. Beside them the server keeps what it
 subtracts and adds on each request for deleted and suppressed rows and for recently ingested ones,
@@ -223,7 +223,8 @@ deployment in which every user holds labels of their own, such as a label per do
 each user and each level they open.
 
 The result is written to the cache directory, and a restart reads it back. A compaction changes
-the bundle's identity, and each grant walks again the next time it reads each level.
+the identity of the shard it compacts, and each grant walks that shard's items again the next time
+it reads each level, and no other shard's.
 `figures_disk_bytes` decides how many results the directory keeps, and `masked_count_cache_bytes`
 how many stay in memory. `/control/status` counts walks under `masked_count_cache.fills` and
 results read back from disc under `masked_count_cache.loads`.

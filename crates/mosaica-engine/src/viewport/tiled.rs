@@ -347,7 +347,7 @@ type Stored<'a> = (Vec<(&'a RowColumn, &'a LevelMembers)>, &'a LevelFigures);
 /// [`Stored`] for a level where every side's form has a column holding its members and the
 /// level's figures are summed; `None` otherwise, and the tile index answers.
 fn stored(forms: &LevelForms) -> Option<Stored<'_>> {
-    let figures = forms.figures.as_ref()?;
+    let figures = forms.figures()?;
     let columns = forms
         .rows
         .iter()

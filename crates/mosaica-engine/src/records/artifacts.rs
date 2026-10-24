@@ -1000,7 +1000,7 @@ fn visible_geometry(
     ordinal: u32,
     wanted: &[ComputedProperty],
 ) -> DerivedContent {
-    if let Some(figures) = read.forms.figures.as_ref().filter(|f| f.has_geometry()) {
+    if let Some(figures) = read.forms.figures().filter(|f| f.has_geometry()) {
         return crate::derived::accumulated(wanted, figures, ordinal);
     }
     let locators = scope.open.served.locators();

@@ -222,10 +222,11 @@ are computed from the request's visible set in three parts:
 
 The visible set is F less D, together with T, and the three never overlap, so an artifact's count
 is its count over F, less its count over D, plus its count over T. The same holds for the number
-of its rows with a position and for the sums of their positions, which give the centroid. A bundle
-whose items are numbered in several point shards ([data model](data-model.md#identifiers)) keeps
-F, D and T per shard. An artifact's counts and position sums are added across the shards, and each
-side of its box is the extreme across them, before the artifact is tested or served.
+of its rows with a position and for the sums of their positions, which give the centroid. In a
+bundle whose items are numbered in several point shards ([data model](data-model.md#identifiers)),
+F, D and T are each the union of the shards' own. F's figures are held as one sum over every
+shard, so an artifact's count, centroid and box are read once, as in a bundle of one shard, before
+the artifact is tested or served.
 
 ```mermaid
 flowchart LR
@@ -248,23 +249,36 @@ while a viewport is drawing points, so that the viewport's reads do not queue be
 
 Once filled, F's figures are shared by every session with the same grant: the same set of
 satisfied index keys, or every key for a session that reads every item. They are held in memory
-under `serve.masked_count_cache_bytes`, the least recently used leaving first. An eviction costs a
-refill and never changes an answer. A growth or a publication between compactions adds its rows to
-them in place. A flush adds none, since its rows are above the base, so an ingest window never
-refills them. A compaction rotates each shard's identity, which is part of their key, so the first
-read of each level after it walks again.
+under `serve.masked_count_cache_bytes`, the least recently used leaving first, at 40 B an
+artifact with a centroid and a box whatever the number of shards. An eviction costs a read from
+the cache directory or a refill and never changes an answer. A growth or a publication between
+compactions adds its rows to them in place. A flush adds none, since its rows are above the base,
+so an ingest window never refills them.
 
-They are also written to the cache directory, under `figures/` and then the shard's identity, in
-files named by a digest of what they describe and checked against a SHA-256 when they are read, so
-a torn or altered file is read as a miss. A restart reads them back, and walks only a level it
-finds no file for. The
-directory is held under `serve.figures_disk_bytes`, the files least recently written or read
-removed first, and the directory of a shard identity a compaction has replaced is removed.
+A compaction rotates one shard's identity, which is part of their key. The first read of each level
+after it walks that shard's base rows again and moves the sum by that shard's difference: the
+shard's previous walk, read back from the cache directory, is taken away and its new walk added.
+Counts and position sums subtract exactly. A side of a box is the extreme across shards and cannot
+be taken away, so an artifact whose box the previous walk reached, or whose kept extreme rows
+included one of its rows, has its box and those rows worked out again from every shard's walk, read
+back from the cache directory. The same holds for a shard that opens, and for one whose column's
+steps do not lead to the version a request reads. Where a walk the difference needs is not on
+disc, the sum is made again from every shard's walk, read back or walked.
+
+They are also written to the cache directory, in files named by a digest of what they describe and
+checked against a SHA-256 when they are read, so a torn or altered file is read as a miss: each
+sum under `figures/sums/`, naming every shard's identity and version it is over, and in a bundle of
+several shards, each shard's walk under `figures/` and then the shard's identity. A restart reads
+the sums back, and walks again only what it cannot read back. The directory is held under
+`serve.figures_disk_bytes`, the files least
+recently written or read removed first. The directory of a shard identity a compaction has replaced
+is removed at the next compaction and at a restart.
 
 D's correction is computed at the request's start from the labels and positions of the view's denied
-base rows, which the server holds per view and level and writes beside the counts. It is cached per
-deny version, a number per view that moves exactly when the denied rows below the base change: at a
-deny, a lift or a compaction, and never at an ingest or a flush. A request that starts after a
+base rows, which the server holds per view, level and shard and writes beside the shard's walks. It
+is cached per sum and every shard's deny version, a number per view in each shard that moves exactly
+when that shard's denied rows below the base change: at a deny, a lift or a compaction, and never at
+an ingest or a flush. A request that starts after a
 suppression is accepted therefore reads a new correction. The labels are read for every denied base
 row in the view, whatever the grant. Where a request's own D holds a denied row and more than 4,096
 of the view's denied base rows have no label held for the level, that request walks its whole
@@ -274,9 +288,9 @@ held per session and generation.
 
 The box of F less D is F's box unless a row D leaves out lies on one of its edges. For a layer that
 serves a box, each artifact with more than sixteen placed rows keeps its eight most extreme rows on
-each side, and the first of them D does not hold becomes the edge. Where D holds all eight on a
-side, or the artifact has no more than sixteen placed rows, its box is worked out from its member
-bitmap and the visible set.
+each side, whichever shards they are in, and the first of them D does not hold becomes the edge.
+Where D holds all eight on a side, or the artifact has no more than sixteen placed rows, its box is
+worked out from its member bitmap and the visible set in every shard.
 
 The walk is the cost a new grant pays. On GBIF's 3,495,729,729 occurrences, with 12 threads, under
 a 24 GB memory cap, starting with the bundle's pages out of memory and with the machine's

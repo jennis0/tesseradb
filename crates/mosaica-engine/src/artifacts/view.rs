@@ -14,7 +14,7 @@ use mosaica_types::EntityId;
 
 use crate::compose::MaskedSet;
 use crate::containment::ContainmentAnswers;
-use crate::figures::Figures;
+use crate::figures::LevelFigures;
 
 use super::rows::satisfied_rank_over;
 use super::*;
@@ -150,6 +150,9 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
     /// One per point shard holding the view, seen or not.
     pub sides: Vec<ArtifactSide<'a, M>>,
+    /// This grant's masked counts over the level in every side marked `counted`, where the level
+    /// is served row-major there.
+    pub counts: Option<Arc<LevelFigures>>,
 }
 
 /// One point shard's part of [`ArtifactView`]: its form of the level, and the viewer's mask, the
@@ -171,11 +174,10 @@ pub struct ArtifactSide<'a, M: MaskedSet> {
     /// `Some` answers from terms and asks the mask only for the deny correction. The two must agree
     /// rank for rank.
     pub containment: Option<ContainmentAnswers<'a>>,
-    /// This session's masked counts over this shard's form of the level, where it is served
-    /// row-major, held per `(session, layer)` and byte-budgeted. `None` on an artifact-major level,
-    /// which answers `|membership ∩ M_auth|` one artifact at a time and has no per-session
-    /// structure to buy.
-    pub counts: Option<Arc<Figures>>,
+    /// Whether this side's masked counts are in the view's `counts`, where its form is served
+    /// row-major. An artifact-major form answers `|membership ∩ M_auth|` one artifact at a time
+    /// instead.
+    pub counted: bool,
 }
 
 impl<'a, M: MaskedSet> ArtifactView<'a, M> {
@@ -201,7 +203,14 @@ impl<'a, M: MaskedSet> ArtifactView<'a, M> {
                 .enumerate()
                 .map(|(place, side)| answer(place, side))
                 .collect(),
+            counts: None,
         }
+    }
+
+    /// This view, its sides marked `counted` counted by `counts`.
+    pub(crate) fn counted_by(mut self, counts: Option<Arc<LevelFigures>>) -> Self {
+        self.counts = counts;
+        self
     }
 }
 
@@ -483,22 +492,18 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
 
     /// The masked count over every side. An artifact-major level intersects each side's own
     /// membership with that side's mask; a row-major level has no per-artifact membership, and
-    /// takes each side's count from the level's masked counts there.
+    /// takes its sides' count from the level's masked counts over them.
     fn masked_count(&self, ordinal: u32) -> u64 {
-        self.sides
-            .iter()
-            .map(|side| {
-                let Some(mask) = side.mask else {
-                    return 0;
-                };
-                if side.rows.layout().is_row_major() {
-                    if let Some(counts) = &side.counts {
-                        return counts.get(ordinal);
-                    }
-                }
-                side.rows.masked_count(ordinal, mask)
-            })
-            .sum()
+        let counted = self.counts.as_ref().map_or(0, |counts| counts.get(ordinal));
+        counted
+            + self
+                .sides
+                .iter()
+                .map(|side| match (side.mask, side.counted && self.counts.is_some()) {
+                    (Some(mask), false) => side.rows.masked_count(ordinal, mask),
+                    _ => 0,
+                })
+                .sum::<u64>()
     }
 
     /// The proportional criterion's denominator over every side, in row terms so numerator and
@@ -684,6 +689,7 @@ mod tests {
                 layer_reachable: true,
                 dependency_served: &never,
                 sides: vec![side(&rows, Some(&mask))],
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::OwnLabel)
@@ -718,6 +724,7 @@ mod tests {
             layer_reachable: true,
             dependency_served: &dependency_served,
             sides: vec![side(&rows, Some(&all))],
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -736,6 +743,7 @@ mod tests {
             layer_reachable: true,
             dependency_served: &dependency_served,
             sides: vec![side(&rows, Some(&nearly))],
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -759,6 +767,7 @@ mod tests {
                 layer_reachable: true,
                 dependency_served: &dependency_served,
                 sides: vec![side(&rows, Some(mask))],
+                counts: None,
             }
             .verdict(EntityId::new(999), 0)
         };
@@ -792,6 +801,7 @@ mod tests {
             layer_reachable: true,
             dependency_served: &dependency_served,
             sides: vec![side(&rows, Some(&everything))],
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0),
@@ -850,6 +860,7 @@ mod tests {
                 layer_reachable: true,
                 dependency_served: prerequisite,
                 sides: vec![side(&rows, Some(&mask))],
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0)
         };
@@ -881,6 +892,7 @@ mod tests {
                 layer_reachable: true,
                 dependency_served: &dependency_served,
                 sides: vec![side(&rows, Some(&mask))],
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -901,6 +913,7 @@ mod tests {
                 layer_reachable: true,
                 dependency_served: &dependency_absent,
                 sides: vec![side(&rows, Some(&mask))],
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -922,6 +935,7 @@ mod tests {
             layer_reachable: true,
             dependency_served: &never,
             sides: vec![side(&rows, Some(&mask))],
+            counts: None,
         }
         .verdict(EntityId::new(999), 0)
         .is_served());

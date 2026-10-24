@@ -155,6 +155,7 @@ impl Fixture {
                 denied: &self.denied,
                 ..side(&self.rows, Some(&self.mask))
             }],
+            counts: None,
         }
     }
 }
@@ -185,6 +186,7 @@ pub(super) fn view_of<'a>(
         layer_reachable: true,
         dependency_served: &dependency_served,
         sides,
+        counts: None,
     }
 }
 
@@ -199,7 +201,7 @@ pub(super) fn side<'a>(
         mask,
         denied: no_denies(),
         containment: None,
-        counts: None,
+        counted: false,
     }
 }
 

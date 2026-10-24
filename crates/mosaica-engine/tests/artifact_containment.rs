@@ -350,8 +350,9 @@ fn served(
             mask: Some(mask),
             denied,
             containment: answers,
-            counts: None,
+            counted: false,
         }],
+        counts: None,
     };
     match view.verdict(EntityId::new(999), ordinal) {
         ArtifactVerdict::Serve {

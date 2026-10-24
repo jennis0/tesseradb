@@ -11,10 +11,14 @@ use std::sync::{Mutex, PoisonError};
 use croaring::Bitmap;
 use rustc_hash::FxHashMap;
 
-use crate::derived::{place, Placement};
-use crate::row_column::{reserve_row, reserve_value, RowColumn};
+use mosaica_types::ShardId;
 
-use super::counts::{deltas_weight, CountsAt, Deltas, Reserves};
+use crate::derived::{place, Placement};
+use crate::row_column::RowColumn;
+
+use super::counts::{
+    deltas_weight, sum_key_row, sum_key_value, CountsAt, Deltas, Reserves, SideRow,
+};
 
 /// A row's position, `None` where no segment places it.
 pub(crate) type Position = Option<(u32, u32)>;
@@ -187,40 +191,52 @@ impl DeniedLabels {
     }
 }
 
-/// What a request subtracts from a fragment's counts: every row of the composed mask's `minus`
-/// below the base, which is the fragment's base rows the viewer may not see.
+/// One side's part of a request's correction: the shard, the rows the mask's `minus` holds below
+/// the base there, the labels held of the view's denied base rows, and the side's column and
+/// positions, which label and place a row the held labels do not hold.
+pub(crate) struct Subtracted<'a> {
+    pub(crate) shard: ShardId,
+    pub(crate) rows: Bitmap,
+    pub(crate) labels: Option<&'a DeniedLabels>,
+    pub(crate) column: &'a RowColumn,
+    pub(crate) places: &'a [Placement<'a>],
+}
+
+/// What a request subtracts from a held sum: every row of the composed mask's `minus` below the
+/// base in every side, which is the sides' base rows the viewer may not see.
 pub(crate) struct DenyCorrection {
     pub(crate) deltas: Deltas,
-    /// The rows subtracted.
-    pub(crate) rows: Bitmap,
+    /// Per side, ascending by shard, the rows subtracted.
+    rows: Vec<(ShardId, Bitmap)>,
     /// Per artifact a denied row touches, the box of the rows left, worked out on first asking.
     boxes: Mutex<FxHashMap<u32, Option<[u32; 4]>>>,
 }
 
 impl DenyCorrection {
-    /// The correction for `rows`, each labelled from `labels` where it holds the row and from
-    /// `column` where it does not.
-    pub(crate) fn of(
-        rows: Bitmap,
-        labels: Option<&DeniedLabels>,
-        column: &RowColumn,
-        places: &[Placement<'_>],
-    ) -> Self {
+    /// The correction for each side's subtracted rows, each labelled from that side's labels where
+    /// they hold the row and from its column where they do not.
+    pub(crate) fn of<'a>(sides: impl IntoIterator<Item = Subtracted<'a>>) -> Self {
         let mut deltas = Deltas::default();
         let mut read: Vec<u32> = Vec::new();
-        for row in rows.iter() {
-            let (ordinals, position) = match labels.and_then(|labels| labels.of(row)) {
-                Some(held) => held,
-                None => {
-                    read.clear();
-                    column.for_each_label(row, |ordinal| read.push(ordinal));
-                    (read.as_slice(), place(places, row))
+        let mut rows = Vec::new();
+        for side in sides {
+            for row in side.rows.iter() {
+                let (ordinals, position) = match side.labels.and_then(|labels| labels.of(row)) {
+                    Some(held) => held,
+                    None => {
+                        read.clear();
+                        side.column
+                            .for_each_label(row, |ordinal| read.push(ordinal));
+                        (read.as_slice(), place(side.places, row))
+                    }
+                };
+                for &ordinal in ordinals {
+                    deltas.entry(ordinal).or_default().add(position);
                 }
-            };
-            for &ordinal in ordinals {
-                deltas.entry(ordinal).or_default().add(position);
             }
+            rows.push((side.shard, side.rows));
         }
+        rows.sort_by_key(|(shard, _)| *shard);
         DenyCorrection {
             deltas,
             rows,
@@ -232,30 +248,50 @@ impl DenyCorrection {
         deltas_weight(&self.deltas)
             + self
                 .rows
-                .get_serialized_size_in_bytes::<croaring::Portable>() as u64
+                .iter()
+                .map(|(_, rows)| {
+                    rows.get_serialized_size_in_bytes::<croaring::Portable>() as u64 + 8
+                })
+                .sum::<u64>()
     }
 
-    /// The box of the fragment's placed rows of `ordinal` that this does not subtract, or `None`
-    /// where it leaves none. A side no subtracted row reaches is the counted box's. A side one does
-    /// reach is read off the artifact's reserve, positions looked up by `position`; `exact` is the
-    /// box worked out from the rows themselves, for a side the reserve cannot answer.
+    /// The rows subtracted in `shard`'s side, where any are.
+    pub(crate) fn rows_of(&self, shard: ShardId) -> Option<&Bitmap> {
+        let at = self
+            .rows
+            .binary_search_by_key(&shard, |(held, _)| *held)
+            .ok()?;
+        Some(&self.rows[at].1)
+    }
+
+    fn subtracts(&self, (shard, row): SideRow) -> bool {
+        ShardId::new(shard)
+            .ok()
+            .and_then(|shard| self.rows_of(shard))
+            .is_some_and(|rows| rows.contains(row))
+    }
+
+    /// The box of the sum's placed rows of `ordinal` that this does not subtract, or `None` where
+    /// it leaves none. A side no subtracted row reaches is the counted box's. A side one does reach
+    /// is read off the artifact's reserve, positions looked up by `position`; `exact` is the box
+    /// worked out from the rows themselves, for a side the reserve cannot answer.
     pub(crate) fn bbox(
         &self,
         ordinal: u32,
         counts: &CountsAt,
         reserves: Option<&Reserves>,
-        position: &dyn Fn(u32) -> Option<(u32, u32)>,
+        position: &dyn Fn(SideRow) -> Option<(u32, u32)>,
         exact: impl FnOnce() -> Option<[u32; 4]>,
     ) -> Option<[u32; 4]> {
         let Some(delta) = self.deltas.get(&ordinal) else {
             return counts.bbox(ordinal);
         };
-        if counts.placed(ordinal) <= u64::from(delta.placed) {
+        if counts.wide(ordinal).placed <= delta.figures.placed {
             return None;
         }
         let counted = counts.bbox(ordinal)?;
         let reached = |side: usize| {
-            delta.placed > 0
+            delta.figures.placed > 0
                 && match side {
                     0 | 1 => delta.bbox[side] <= counted[side],
                     _ => delta.bbox[side] >= counted[side],
@@ -281,8 +317,8 @@ impl DenyCorrection {
                 let keys = counts.side(ordinal, side, reserves, position)?;
                 let kept = keys
                     .into_iter()
-                    .find(|&key| !self.rows.contains(reserve_row(key)))?;
-                *value = reserve_value(side, kept);
+                    .find(|&key| !self.subtracts(sum_key_row(key)))?;
+                *value = sum_key_value(side, kept);
             }
             Some(out)
         };

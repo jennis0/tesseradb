@@ -589,6 +589,17 @@ impl ShardedMask {
             .map(|at| &self.leaves[at].1)
     }
 
+    /// `shard`'s leaf, whether or not the viewer sees anything there: for a figure a request keeps
+    /// over every shard, which a shard left out of the request must correct as well.
+    pub fn any_leaf(&self, shard: ShardId) -> Option<&EffectiveMask> {
+        self.leaf(shard).or_else(|| {
+            self.left_out
+                .binary_search_by_key(&shard, |(held, _)| *held)
+                .ok()
+                .map(|at| &self.left_out[at].1)
+        })
+    }
+
     /// The visible rows over every shard: θ's anchor. Filter-blind, as
     /// [`EffectiveMask::visible_total`] is.
     pub fn visible_total(&self) -> u64 {

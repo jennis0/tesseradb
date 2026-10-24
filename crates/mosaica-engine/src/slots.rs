@@ -852,8 +852,7 @@ impl Engine {
         let mut stats = SlotStats::default();
         let figures = read
             .forms
-            .figures
-            .as_ref()
+            .figures()
             .filter(|figures| centred_by_figures(layer, read) && figures.has_geometry());
         let own: Vec<Option<[f64; 2]>> = match figures {
             Some(figures) => {
