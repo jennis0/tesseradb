@@ -2,7 +2,7 @@
 
 # CLI
 
-`mosaica <subcommand> --help` prints the text on this page. `mosaica --version` prints the commit the binary was built from. It prints `unknown` when `MOSAICA_BUILD_COMMIT` was unset at build time and git could not name the commit, as in a build outside a git checkout.
+`mosaica <subcommand> --help` prints the text on this page. `mosaica --version` prints the release version and the commit the binary was built from, as in `mosaica 0.1.0 (3c872b11a)`. It prints the release version alone when `MOSAICA_BUILD_COMMIT` was unset at build time and git could not name the commit, as in a build outside a git checkout.
 
 `build`, `check`, `health` and `serve` read the deployment file `mosaica.toml` from the working directory, or from the nearest directory above it that has one. `--deployment` names a different file.
 

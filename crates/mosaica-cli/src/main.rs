@@ -13,14 +13,26 @@ use mosaica_types::IdentityKey;
 #[cfg(test)]
 mod reference;
 
+/// What `mosaica --version` prints after the name: the release version, then the commit the
+/// binary was built from where `build.rs` could name one. A measurement is read against a tree, and
+/// the release version does not move between two of them.
+fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        let release = env!("CARGO_PKG_VERSION");
+        match mosaica_build::BUILD_COMMIT {
+            "unknown" => release.to_string(),
+            commit => format!("{release} ({})", commit.get(..9).unwrap_or(commit)),
+        }
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "mosaica",
     about = "Build a Mosaica bundle from a corpus declaration, check the declaration, verify the \
              bundle and serve it.",
-    // The commit rather than the crate version: a measurement is read against a tree, and the
-    // crate version does not move between two of them.
-    version = mosaica_build::BUILD_COMMIT
+    version = version()
 )]
 struct Cli {
     #[command(subcommand)]
