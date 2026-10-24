@@ -64,8 +64,9 @@ class ServeRefused(Refusal):
     `Database.serve()` raises it, and so does every call that starts the server, such as the
     first `commit()`, when the process prints no line naming its viewer, session and control
     addresses within `MOSAICA_SERVE_TIMEOUT` seconds (30 by default), or prints one that leaves
-    an address out. The process is stopped. The message holds the last lines it wrote to its
-    output and its error stream. It is a kind of `Refusal`.
+    an address out. The process is stopped. On a timeout the message holds the last lines it
+    wrote to its output and its error stream; otherwise it holds the line that left an address
+    out. It is a kind of `Refusal`.
     """
 
 

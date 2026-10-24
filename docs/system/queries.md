@@ -689,7 +689,7 @@ extreme rows on each side, or from a walk of F − D where D holds all eight.*
 A build and a fold tally the base in entity order, a span of 2^18 entities at a time, so they read
 each entity's key list and held values in the order they are stored and ask one rank a span. The
 entity terms reader finds an entity's rank from a table of each block's rank below it. An item card
-reads its labels through the same table. A tally takes about 370 bytes on disk.
+reads its labels through the same table.
 
 **Not built yet:** a summary over a filtered set, which would need a walk of the set's values for
 each request; bins of a number or timestamp field within cells; breakdowns of keyword fields and

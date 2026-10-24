@@ -690,8 +690,6 @@ beside its range instead, and a lookup that finds no row in the base or a range 
 merge keeps the listed rows, and the
 compaction folds them into the base like any other.
 
-Freed ids land among other terms' runs in the term index rather than in a run of their own.
-
 A compaction runs off the request path, over files a viewport is also reading. Its duration
 is not bounded: nothing observes it directly, so the compaction is designed to disturb a live viewport
 as little as possible rather than to finish quickly. The one moment a compaction is visible to a client

@@ -78,8 +78,7 @@ Mosaica runs on one machine, with no cluster.
 One streaming pass produces the whole bundle. There is no separate spatial-index build, because
 the row order the geometry is written in, Morton order, is the index. A build plans its memory
 layout before the pass starts, from the corpus's declared term cardinality, and peak memory follows
-that plan and the number of distinct terms rather than the point count. Build rate depends more on
-what a corpus declares, such as text indexes, polygons and hierarchy layers, than on its size.
+that plan and the number of distinct terms rather than the point count.
 
 ## What it consists of
 
@@ -135,7 +134,7 @@ any framework, with a deck.gl layer and React bindings alongside them.
 | Bulk reads of items and artifacts | Built, over HTTP and in the TypeScript client, the Python client and the CLI. A read pinned to one version of the corpus is not built yet |
 | Live ingest and denies | Built. A deletion or suppression hides the item from the next request; its rows are removed from disk later, at compaction, which runs on a schedule |
 | Clients: web components, a deck.gl layer, React bindings, a Python notebook widget | Built. Not yet published to a package index |
-| Conformance suite (the check that the guarantees hold) | Built and run on every change against an independent oracle. Its own record states where its coverage stands |
+| Conformance suite (the check that the guarantees hold) | Built. It checks a running server's answers against an independent reference implementation |
 | Partitions and replicas | Not built |
 
 ## Where to go next

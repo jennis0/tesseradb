@@ -145,8 +145,8 @@ how many have been refused.
 The server refuses a configuration that sets `serve.max_page_rows` or `serve.max_page_bytes` to 0,
 `serve.max_page_bytes` above 2 GiB, or `serve.bulk_response_bytes` below `serve.max_page_bytes`.
 
-The server allows seven pages of `serve.max_page_bytes` for each bulk read. Building a page takes
-about three, and an engine test holds it below eight. Encoded pages on their way to
+The server allows seven pages of `serve.max_page_bytes` for each bulk read. Building one page takes a few
+multiples of the page size, and an engine test holds it below eight. Encoded pages on their way to
 the socket take at most two more, one in the body channel and one being written. All bulk reads
 together can hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`, 896 MiB at the defaults. The
 server has no memory cap of its own to hold that against, so it logs the figure at startup as
