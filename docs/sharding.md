@@ -909,9 +909,13 @@ cache. They give, for principals seeing about 1%, 7%, 85% and 100%:
 - time to `/readyz` and peak anonymous memory.
 
 Each figure is reported as its ratio to one shard. The interactive bench runs its camera script
-once, at one shard, and every shard count replays that run's requests (`--replay`): two shard
-counts serve slightly different points per tile (§3.4), so the client would ask each for different
-work next. The serve battery needs no replay, since it chooses its cells from exact counts. A request with nothing to combine should show a
+once, at one shard, and every shard count replays that run's requests (`--replay`), one shard
+included, since a replay's wire times run a little faster than a normal run's. Without a replay
+the client would ask each bundle for different work: each build draws a new `mosaica_id` key
+([data-model.md](system/data-model.md)) and a tile's points are chosen in `mosaica_id` order, so
+two builds serve different points, and the client's next requests follow what it was served. Above
+one segment, θ's occupied tiles also come from a sketch (§3.4). The serve battery needs no replay,
+since it chooses its cells from exact counts. A request with nothing to combine should show a
 ratio near 1 at every N. Where one does not, the extra work is removed before anything is added.
 
 ### 8.3 The write side
