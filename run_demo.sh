@@ -7,18 +7,18 @@
 # API key that mints each principal's session reaches the browser, and `serve.dev_cors_origins` is
 # typed in to let it talk. Neither is anything to copy into an integration — see client-interaction §7.
 #
-#   ./run_demo.sh                 # build what is missing, serve every scale, open the viewer
-#   ./run_demo.sh --scale 2m4     # one scale only. Repeatable; the order is the picker's order
+#   ./run_demo.sh                 # build and serve the two example datasets, open the viewer
+#   ./run_demo.sh --scale arxiv   # one scale only. Repeatable; the order is the picker's order
+#   ./run_demo.sh --scale places  # 150,000 GeoNames features on a world map
+#   ./run_demo.sh --scale 2m4     # the whole arXiv corpus, from data/ (see below)
 #   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
 #   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
-#   ./run_demo.sh --deployment D/mosaica.toml --terms "$(cat D/country-terms.txt)" --ranks D/country-ranks.json
+#   ./run_demo.sh --deployment D/mosaica.toml --terms-file D/country-terms.txt --ranks D/country-ranks.json
 #                                 # …a rung of the dataset ladder, served on its own deployment:
 #                                 # its ports, its credentials, its disclosure floor, unrewritten
 #   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name'] [--prose name]
 #                                 # …whose dictionary is its own, not the fixtures' 0..200
-#   ./run_demo.sh --deployment D/mosaica.toml --terms-file D/terms.txt --ranks D/ranks.json
-#                                 # …whose keys carry commas, so the list is one term per line
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
@@ -36,9 +36,11 @@
 # off 5173, and whatever port it lands on is what the generated deployments enumerate in
 # `serve.dev_cors_origins`.
 #
-# ## The five scales, and why they differ
+# ## The scales, and why they differ
 #
 #     scale         items          prose indexed        bundle
+#     arxiv         50,000         title                ~12 MB
+#     places        150,000        name                 ~18 MB
 #     notebook      50,000         title + abstract     ~35 MB
 #     notebook-2m4  2,422,486      title + abstract     ~2.3 GB
 #     2m4        2,422,486      title + abstract     ~1.4 GB
@@ -46,18 +48,23 @@
 #     250m       250,000,000    none                 ~5 GB
 #     1b         1,000,000,000  none                 ~20 GB
 #
-# `notebook` is the odd one out, and it is in the picker for what the other four lack. They
-# publish one flat k-means layer; `notebook` is `data/notebook/`, which the ladder's arXiv rung
-# (`test_corpora/arxiv/`) writes — a uniform sample of the same corpus carrying **five declared layers**: k-means flat
-# under a `{ count = 50 }` floor, HDBSCAN's condensed tree nested under `{ fraction = 0.05 }`, a
-# TF-IDF topic label attached to every cluster of each, and arXiv's own classification as a tiered
-# layer whose two levels are joined by containment edges. It builds in seconds. Its principals are
-# written in the corpus's own vocabulary — an arXiv category is a term — where the others' are the
-# integer ids of a synthetic dictionary, so its presets read `math.AG` rather than `14`. The item
-# count is whatever the notebook sampled, read from the points file rather than tabled here.
-# `notebook-2m4` is `data/notebook-2m4-live/`: the whole corpus through the same pipeline, with a
-# fourth clustering — `clusters/toponymy`, four tiered levels named by a language model — and a
-# label layer over it. It builds in minutes rather than seconds.
+# `arxiv` and `places` are the two example datasets, the only scales whose files are in git
+# (`examples/data/`), so they are the default and the only ones a fresh clone can build. `arxiv` is
+# 50,000 papers cut from `notebook-2m4`, with its layers, a second layout as a second view, and no
+# abstracts. `places` is 150,000 GeoNames features of every class, every populated place of 15,000
+# people or more and a sample of the rest, on a `web_mercator` map, each visible to a principal
+# holding its country. Each `NOTICE.md` says where the data came from and how to make it again.
+#
+# Every other scale reads `data/`, which is gitignored. `2m4`, `25m`, `250m` and `1b` publish one
+# flat k-means layer over the arXiv corpus and its synthetic scale-ups, and their principals are the
+# integer ids of a synthetic dictionary. `notebook` is `data/notebook/`, which the ladder's arXiv
+# rung (`test_corpora/arxiv/`) writes: a uniform sample of the corpus with k-means flat under a
+# `{ count = 50 }` floor, HDBSCAN's condensed tree nested under `{ fraction = 0.05 }`, a topic label
+# on every cluster of each, and arXiv's own classification as two tiered levels joined by
+# containment edges. `notebook-2m4` is `data/notebook-2m4-live/`, the whole corpus through the same
+# pipeline with a fourth clustering, `clusters/toponymy`, whose four tiered levels a language model
+# named. `arxiv`, `notebook` and `notebook-2m4` write their principals in arXiv's own categories,
+# so a preset reads `math.AG` rather than `14`; `places` writes them as country codes.
 #
 # The two large scales are worth starting deliberately rather than by default: between them they
 # are ~135 GB of bundle and the better part of an afternoon to build. `--scale 2m4 --scale 25m`
@@ -252,12 +259,11 @@ if [[ -n "$terms_file_override" ]]; then
   terms_file_override="$(cd "$(dirname "$terms_file_override")" && pwd)/$(basename "$terms_file_override")"
 fi
 
-# `1b` is deliberately NOT in the default set, and the reason is the served side rather than the
-# build: its hot columns alone are 11.16 GiB resident (the figure the build prints), so on a
-# machine that does not have that to spare *on top of* the other scales, adding it to the picker
-# makes every scale slower rather than adding one that works. Build it with
+# The default is the two example datasets, the only scales whose data a fresh clone holds. `1b`
+# wants the machine to itself when it is served: its hot columns alone are 11.16 GiB resident (the
+# figure the build prints), so beside other scales it makes every scale slower. Build it with
 # `--scale 1b --build-only` and serve it by itself with `--scale 1b`.
-[[ ${#scales[@]} -eq 0 ]] && scales=(2m4 25m 250m)
+[[ ${#scales[@]} -eq 0 ]] && scales=(arxiv places)
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
@@ -293,9 +299,9 @@ fi
 items_of() {
   case "$1" in
     2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;;
-    # The notebook decides its own sample; the Parquet footer is the record of what it chose.
-    notebook*) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
-                "$(notebook_dir_of "$1")/points.parquet" ;;
+    # A corpus directory decides its own size; the Parquet footer is the record of it.
+    notebook*|arxiv|places) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
+                "$(corpus_dir_of "$1")/points.parquet" ;;
     *) echo 0 ;;
   esac
 }
@@ -309,18 +315,27 @@ side = newest_side_manifest(sys.argv[1])
 print(sum(record['high_water'] for record in side['shards']['records']))
 " "$1" "$REPO/reference"
 }
-prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m|arxiv) echo '"title"' ;; places) echo '"name"' ;; *) echo '' ;; esac; }
 # The column the viewer titles a record by: `title` wherever the scale declares it, else none.
-title_of()   { case "$1" in 2m4|25m|notebook*) echo 'title' ;; *) echo '' ;; esac; }
-viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; *) echo 0 ;; esac; }
-session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; *) echo 0 ;; esac; }
-control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; *) echo 0 ;; esac; }
-# The two notebook scales are directories the notebook wrote, each holding its points, its
-# per-layer files and its own declaration; empty for every other scale.
-notebook_dir_of() { case "$1" in notebook) echo "$DATA/notebook" ;; notebook-2m4) echo "$DATA/notebook-2m4-live" ;; *) echo '' ;; esac; }
+title_of()   { case "$1" in 2m4|25m|notebook*|arxiv) echo 'title' ;; places) echo 'name' ;; *) echo '' ;; esac; }
+viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; arxiv) echo 37591 ;; places) echo 37592 ;; *) echo 0 ;; esac; }
+session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; arxiv) echo 49309 ;; places) echo 49310 ;; *) echo 0 ;; esac; }
+control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; arxiv) echo 45727 ;; places) echo 45728 ;; *) echo 0 ;; esac; }
+# The scales built from a corpus directory, which holds its points, its per-layer files and its
+# own declaration: the two notebook corpora under `data/` and the two example datasets in git.
+# Empty for every other scale.
+corpus_dir_of() {
+  case "$1" in
+    notebook) echo "$DATA/notebook" ;; notebook-2m4) echo "$DATA/notebook-2m4-live" ;;
+    arxiv) echo "$REPO/examples/data/arxiv" ;; places) echo "$REPO/examples/data/geonames" ;;
+    *) echo '' ;;
+  esac
+}
+# The column holding each item's access terms, from which the candidate principals are measured.
+access_of() { case "$1" in places) echo country ;; *) echo categories ;; esac; }
 # The declaration each scale is built from. The notebook writes its own beside its files, with
 # every source path relative to it (configuration.md §3); the demo scales share one generator.
-schema_of()  { case "$1" in notebook*) echo "$(notebook_dir_of "$1")/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
+schema_of()  { case "$1" in notebook*|arxiv|places) echo "$(corpus_dir_of "$1")/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
 
 # `--bundle` is the escape hatch: one server, one entry in the picker, no build.
 if [[ -n "$bundle_override" ]]; then
@@ -479,7 +494,7 @@ build_scale() {
   bundle="$(bundle_of "$scale")"
   config="$(schema_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  [[ -n "$(notebook_dir_of "$scale")" ]] && points="$(notebook_dir_of "$scale")/points.parquet"
+  [[ -n "$(corpus_dir_of "$scale")" ]] && points="$(corpus_dir_of "$scale")/points.parquet"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -499,16 +514,21 @@ build_scale() {
   # The notebook's declaration names every file it reads, so the points and the declaration are
   # the two worth checking here; `mosaica check` in the build reports the rest by name.
   local -a fixtures=("$points" "$config")
-  [[ -n "$(notebook_dir_of "$scale")" ]] || fixtures+=("$DATA/demo/archive.parquet"
+  [[ -n "$(corpus_dir_of "$scale")" ]] || fixtures+=("$DATA/demo/archive.parquet"
            "$DATA/demo/primary_category.parquet"
            "$DATA/scaled/pairs/categories-subclass.pairs.parquet")
   for f in "${fixtures[@]}"; do
     [[ -f "$f" ]] || {
       echo "missing fixture: $f" >&2
-      if [[ -n "$(notebook_dir_of "$scale")" ]]; then
+      if [[ "$scale" == arxiv || "$scale" == places ]]; then
+        echo "the example datasets are in git under examples/data/; restore them with git, or" >&2
+        echo "make them again with the command in $(corpus_dir_of "$scale")/NOTICE.md" >&2
+        exit 1
+      fi
+      if [[ -n "$(corpus_dir_of "$scale")" ]]; then
         echo "the notebook corpus is written by the ladder's arXiv rung:" >&2
         echo "  ~/venvs/arxiv/bin/python -m test_corpora.arxiv.prepare \\" >&2
-        echo "      --sample 50000 --out $(notebook_dir_of "$scale")" >&2
+        echo "      --sample 50000 --out $(corpus_dir_of "$scale")" >&2
         echo "  (add 'python -m test_corpora.arxiv.toponymy' for the named-topic layer)" >&2
         exit 1
       fi
@@ -537,7 +557,7 @@ build_scale() {
   # build refuses rather than silently dropping the entities it cannot place. The notebook's
   # files are all one corpus, so it takes no limit.
   local -a limit=(--limit "$(items_of "$scale")")
-  [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
+  [[ -n "$(corpus_dir_of "$scale")" ]] && limit=()
   # `MOSAICA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
   # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
   # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
@@ -679,14 +699,15 @@ for scale in "${scales[@]}"; do
   # An overridden term list means an overridden dictionary, so the demo fixtures' ranking is not
   # merely unhelpful for it — it names terms this bundle does not have.
   ranks="${ranks_override:-$([[ -n "$terms_override$terms_file_override" ]] && echo '' || echo "$RANKS")}"
-  if [[ -n "$(notebook_dir_of "$scale")" ]]; then
+  if [[ -n "$(corpus_dir_of "$scale")" ]]; then
     ranks="$DEMO/presets/$scale.term-ranks.json"
-    terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
+    terms="$(python3 - "$(corpus_dir_of "$scale")/points.parquet" "$ranks" "$(access_of "$scale")" <<'CANDIDATES'
 import collections, json, sys
 import pyarrow.parquet as pq
+# A list of terms per item, or one term (a place's country).
 counts = collections.Counter(
-    t for cats in pq.read_table(sys.argv[1], columns=["categories"]).column("categories").to_pylist()
-    for t in (cats or []))
+    t for held in pq.read_table(sys.argv[1], columns=[sys.argv[3]]).column(0).to_pylist()
+    for t in ([held] if isinstance(held, str) else held or []))
 ranked = [{"term": t, "pairs": n} for t, n in counts.most_common()]
 open(sys.argv[2], "w").write(json.dumps(ranked) + "\n")
 print(",".join(r["term"] for r in ranked))
@@ -724,6 +745,8 @@ fresh="$DEMO/presets/datasets-this-run.json"
     first=0
     label="$scale"
     case "$scale" in
+      arxiv) label="arXiv $(items_of arxiv | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · example: toponymy, k-means, HDBSCAN, taxonomy" ;;
+      places) label="GeoNames $(items_of places | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') features · example: countries and regions" ;;
       notebook) label="arXiv $(items_of notebook | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook corpus: HDBSCAN tree, topics, taxonomy" ;;
       notebook-2m4) label="arXiv $(items_of notebook-2m4 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook pipeline, whole corpus: HDBSCAN tree, toponymy, topics, taxonomy" ;;
       2m4) label="arXiv 2.4M · titles + abstracts" ;;
