@@ -50,3 +50,9 @@ openai
 # thousands of short phrases — and the GPU is where the language model lives.
 sentence-transformers
 torch
+
+# ---------------------------------------------------------------- the example dataset
+
+# `example.py` lays the shipped sample out a second time on the CPU, seeded, which `umap-learn`
+# reproduces from run to run and cuML's UMAP does not promise.
+umap-learn

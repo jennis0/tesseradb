@@ -1,0 +1,291 @@
+# The arXiv example dataset: 50,000 papers, two 2D layouts, four clusterings and their labels.
+# `test_corpora/arxiv/example.py` writes the Parquet files beside this; NOTICE.md says where they
+# came from. The declaration is the notebook corpus's, without the abstracts and with the floors
+# scaled to a corpus a fiftieth of the size.
+
+# **Every file this declaration reads, named once.** A `source` anywhere below names one of these
+# keys rather than repeating a path, so staging one of them elsewhere is a single `--file` override
+# that moves everything reading it. `[defaults].source` is what a view or a column takes when it
+# names none. Here it is the points file, which carries identity, the first layout and every
+# attribute column.
+[sources]
+points                = "points.parquet"
+points_wide           = "points-umap200.parquet"
+archive               = "archive.parquet"
+primary_category      = "primary_category.parquet"
+kmeans                = "clusters-kmeans.parquet"
+kmeans_members        = "clusters-kmeans-members.parquet"
+kmeans_topics         = "topics-kmeans.parquet"
+kmeans_topic_members  = "topics-kmeans-members.parquet"
+hdbscan               = "clusters-hdbscan.parquet"
+hdbscan_members       = "clusters-hdbscan-members.parquet"
+hdbscan_topics        = "topics-hdbscan.parquet"
+hdbscan_topic_members = "topics-hdbscan-members.parquet"
+taxonomy              = "taxonomy-arxiv.parquet"
+taxonomy_members      = "taxonomy-arxiv-members.parquet"
+toponymy              = "clusters-toponymy.parquet"
+toponymy_members      = "clusters-toponymy-members.parquet"
+toponymy_topics       = "topics-toponymy.parquet"
+toponymy_topic_members = "topics-toponymy-members.parquet"
+
+[defaults]
+source          = "points"
+# Rows are ordered by position in this view, so a cluster laid out compactly in it is a few
+# contiguous runs of rows.
+allocation_view = "topics"
+
+# Two layouts of the same papers, each a view with its own frame. `auto` squares a box around a
+# view's coordinates with a small margin, so a circle stays a circle and nothing clamps onto the
+# edge. The build prints, per view, the bounds, the cells occupied and the share of points with a
+# position of their own. `topics` is UMAP with 15 neighbours, which breaks subjects into many small
+# islands; `topics-wide` is UMAP with 200, which keeps them in broad regions. Each view's file
+# carries the categories its access terms are read from.
+[[view]]
+name             = "topics"
+title            = "arXiv topic map"
+extent           = "auto"
+source           = "points"
+point_visibility = { field = "categories", default = "public" }
+
+[[view]]
+name             = "topics-wide"
+title            = "arXiv topic map, wide neighbourhoods"
+extent           = "auto"
+source           = "points_wide"
+point_visibility = { field = "categories", default = "public" }
+
+# arXiv's archive names and subject classes are published taxonomy, so the value sets disclose
+# nothing about this corpus's contents. Closed: a paper filed under a value neither set names is
+# refused.
+[[vocabulary]]
+name       = "archive"
+title      = "arXiv archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "archive"
+
+[[vocabulary]]
+name       = "primary_category"
+title      = "arXiv subject class"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "primary_category"
+
+# Unique: every file names its paper by it, the points as `entity_id` and the member files as `entity`.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
+[[attribute]]
+name       = "archive"
+title      = "Archive"
+type       = "category"
+vocabulary = "archive"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "primary_category"
+title      = "Primary category"
+type       = "category"
+vocabulary = "primary_category"
+render     = true
+index      = true
+
+# `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
+# than a convention it has to be told.
+[[attribute]]
+name   = "submitted_at"
+title  = "Submitted"
+type   = "timestamp_us"
+render = true
+
+# Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
+# refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
+# `match` and `phrase`.
+[[attribute]]
+name  = "title"
+type  = "text"
+index = true
+
+[[attribute]]
+name  = "arxiv_id"
+title = "arXiv ID"
+type  = "keyword"
+index = true
+
+# Four clusterings and a label set over each of the three that have one. Every layer states its two
+# disclosure controls, because neither has a default: `visibility` is the label a viewer must hold
+# to know the layer exists at all, and `require_member_visibility` is how much of a cluster a
+# viewer must already see before that cluster is served to them.
+
+[[layer]]
+name       = "clusters/kmeans"
+title      = "k-means clusters"
+source     = "kmeans"
+views      = ["topics", "topics-wide"]
+membership = "enumerated"
+hierarchy  = { kind = "flat", prune_children = false }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+# The absolute form: a fixed floor, whatever the cluster's size.
+require_member_visibility = { count = 5 }
+# `hull` beside the box: the explorer draws a cluster as its served hull, and every computed
+# property is recomputed per viewer from `membership ∩ M_auth`, so a hull discloses no more than
+# the box did.
+content                   = { computed = ["centroid", "box", "hull"] }
+
+  # Membership in its own source: one row per (artifact, entity).
+  [layer.members]
+  source = "kmeans_members"
+  fields = { id = "entity" }
+
+  # The label set, written where it is used. It expands to a flat layer of its own on the same
+  # views, carrying one supplied `text` content. A viewer reaches a label only where they reach
+  # the cluster it names.
+  [layer.labels]
+  name                      = "topics/kmeans"
+  title                     = "k-means topics"
+  source                    = "kmeans_topics"
+  type                      = "text"
+  membership                = "enumerated"
+  artifact_visibility       = { default = "inherited" }
+  # The layer grain: nothing beyond the cluster's own gate decides whether a label exists.
+  require_member_visibility = "none"
+
+    # The content grain: a label's text is read only by a viewer who can see every one of its
+    # member papers.
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    # One row per (artifact, rank, entity). The words were ranked over the titles of every paper
+    # in the cluster; the members are a seeded draw of up to 200 of them for the description and a
+    # third of those for the fallback.
+    [layer.labels.members]
+    source = "kmeans_topic_members"
+    fields = { id = "entity" }
+
+[[layer]]
+name       = "clusters/hdbscan"
+title      = "HDBSCAN clusters"
+source     = "hdbscan"
+views      = ["topics", "topics-wide"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = false }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+# The proportional form: a share of the cluster's own size, so the bar scales. Expect holes in the
+# lineage: a share does not shrink downward, so a small child can clear what its parent cannot.
+require_member_visibility = { fraction = 0.05 }
+content                   = { computed = ["centroid", "box", "hull"] }
+
+  [layer.members]
+  source = "hdbscan_members"
+  fields = { id = "entity" }
+
+  [layer.labels]
+  name                      = "topics/hdbscan"
+  title                     = "HDBSCAN topics"
+  source                    = "hdbscan_topics"
+  type                      = "text"
+  membership                = "enumerated"
+  artifact_visibility       = { default = "inherited" }
+  require_member_visibility = "none"
+
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    [layer.labels.members]
+    source = "hdbscan_topic_members"
+    fields = { id = "entity" }
+
+# The taxonomy: arXiv's own classification, as levels with containment edges between them.
+#
+# A budget does not climb the edges: substituting an archive for its subject classes would draw
+# one shape across a region whose neighbours are still drawn as classes. The client chooses a
+# level, and the edges let it nest what it draws or filter to one archive's subtree.
+
+[[layer]]
+name       = "taxonomy/arxiv"
+title      = "arXiv classification"
+source     = "taxonomy"
+views      = ["topics", "topics-wide"]
+membership = "enumerated"
+hierarchy  = { kind = "tiered", prune_children = false }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+content                   = { computed = ["centroid", "box"] }
+
+  [[layer.levels]]
+  level = 0
+  title = "archive"
+
+  [[layer.levels]]
+  level = 1
+  title = "subject class"
+
+  [layer.members]
+  source = "taxonomy_members"
+  fields = { id = "entity" }
+
+# Toponymy's rungs: a tiered layer over a density clustering. Levels are the rungs, coarsest
+# first; the edges are the library's own tree between them; and the names on every rung came
+# from the language model, attached the way the k-means and HDBSCAN labels are.
+[[layer]]
+name       = "clusters/toponymy"
+title      = "Toponymy clusters"
+source     = "toponymy"
+views      = ["topics", "topics-wide"]
+membership = "enumerated"
+hierarchy  = { kind = "tiered", prune_children = false }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 5 }
+content                   = { computed = ["centroid", "box", "hull"] }
+
+  [[layer.levels]]
+  level = 0
+  title = "16 topics, 832+ papers each"
+
+  [[layer.levels]]
+  level = 1
+  title = "46 topics, 263+ papers each"
+
+  [[layer.levels]]
+  level = 2
+  title = "161 topics, 78+ papers each"
+
+  [[layer.levels]]
+  level = 3
+  title = "574 topics, 20+ papers each"
+
+  [layer.members]
+  source = "toponymy_members"
+  fields = { id = "entity" }
+
+  [layer.labels]
+  name                      = "topics/toponymy"
+  title                     = "Toponymy topics"
+  source                    = "toponymy_topics"
+  type                      = "text"
+  membership                = "enumerated"
+  artifact_visibility       = { default = "inherited" }
+  require_member_visibility = "none"
+
+    # A name was written from the titles of six exemplar papers, which are its members at rank 0,
+    # so it is read only by a viewer who can see all six. Rank 1, the keyphrases, has three of them.
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    [layer.labels.members]
+    source = "toponymy_topic_members"
+    fields = { id = "entity" }

@@ -1,5 +1,7 @@
 target/
 data/
+# The example datasets are small and tracked; every other `data/` holds local corpora.
+!/examples/data/
 *.venv
 .venv/
 __pycache__/

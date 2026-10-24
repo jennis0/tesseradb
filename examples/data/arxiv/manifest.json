@@ -1,0 +1,33 @@
+{
+  "cut_from": "notebook-2m4-live",
+  "papers": 50000,
+  "toponymy_exemplars": 4284,
+  "seed": 0,
+  "second_layout": {
+    "file": "points-umap200.parquet",
+    "embeddings": "BGE-large-en-v1.5",
+    "pca": 64,
+    "n_neighbors": 200,
+    "min_dist": 0.9
+  },
+  "rows": {
+    "archive.parquet": 38,
+    "clusters-hdbscan-members.parquet": 263847,
+    "clusters-hdbscan.parquet": 197,
+    "clusters-kmeans-members.parquet": 50000,
+    "clusters-kmeans.parquet": 64,
+    "clusters-toponymy-members.parquet": 124108,
+    "clusters-toponymy.parquet": 797,
+    "points-umap200.parquet": 50000,
+    "points.parquet": 50000,
+    "primary_category.parquet": 171,
+    "taxonomy-arxiv-members.parquet": 100000,
+    "taxonomy-arxiv.parquet": 201,
+    "topics-hdbscan-members.parquet": 86058,
+    "topics-hdbscan.parquet": 195,
+    "topics-kmeans-members.parquet": 29824,
+    "topics-kmeans.parquet": 64,
+    "topics-toponymy-members.parquet": 11955,
+    "topics-toponymy.parquet": 797
+  }
+}
