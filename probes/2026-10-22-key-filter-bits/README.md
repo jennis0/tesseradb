@@ -7,7 +7,7 @@ GeoNames-sized and the first half of the 2²⁶ runs, and 7 to 14 after. Each sh
 its raw line. The bench is one thread, run under `nice -n 10`. Every figure is measured unless
 marked modelled.
 
-Tables 1 to 4 were measured with the run reader at ed2e5a742. The reader then changed how it reads
+Tables 1 to 4 were measured with the run reader at 72d87c112. The reader then changed how it reads
 the filter at open and for a batch; Tables 5 and 6 measure it before and after, at loads of 2 to
 13.
 
@@ -90,7 +90,7 @@ filter passes reads two pages, about 320 µs. Over 14 runs: 2.6 ms without a fil
 **A write resolving new values gains most.** A batch of 10,000 absent keys against one 2²⁶ run takes
 11.6 ms warm without a filter and 0.36 ms at 10 bits; with the entry pages cold, 101 ms and 2.6 ms
 (Table 3). Across 14 runs that is 160 ms against 5 ms warm. With the filter's pages cold, the
-reader at ed2e5a742 was slower with a filter: 1.6 s at 10 bits against 78 ms without, and 13 to 60
+reader at 72d87c112 was slower with a filter: 1.6 s at 10 bits against 78 ms without, and 13 to 60
 times the time without a filter at every size and shape. A batch prefetched the entry pages it
 needed in ranges, and the filter's probes faulted one page at a time. A batch now asks the kernel
 for the filter pages it will probe that the page cache lacks, and a cold batch takes 27 ms on a 2²⁶
@@ -196,7 +196,7 @@ One unique column's filters over a whole corpus, modelled as items × bits ÷ 8,
 | 16 | 0.03 | 0.47 | 7.00 |
 | index | 0.06 | 1.00 | 14.98 |
 
-Cold open of one run with the reader at ed2e5a742, ms; in brackets, with the filter advised
+Cold open of one run with the reader at 72d87c112, ms; in brackets, with the filter advised
 `WILLNEED` first. Table 5 has the open as it reads now.
 
 | Bits:hashes | 13.5 M | 2²⁶ | 233 M | 2²⁶ spread |
@@ -289,33 +289,38 @@ round's figure is itself a median where the bench takes several. Another job rai
 10 to 13 during one round. Single lookups are 2,000 warm and 300 cold; the 10,000-key batches are
 warm fastest of five and cold median of three. "Cold batch major faults" is per batch.
 
-- **ed2e5a742**: the open checks the filter's checksum through the mapping, a page at a time, and
+The three benches were built before the branch was rebased onto main at 8f05e0ef3, from the same
+run reader, read-ahead helper and key filter code that 72d87c112, dd78dddd5 and d6ae4b00d hold;
+the rebase changed none of those files. "now" is d6ae4b00d's reader. The later change to the open's
+fallback for a kernel without `MADV_POPULATE_READ` does not run on this host.
+
+- **72d87c112**: the open checks the filter's checksum through the mapping, a page at a time, and
   a batch probes the filter without asking for its pages.
-- **147eb1b0f**: the open reads the filter for its checksum through the file in 1 MiB reads into
+- **dd78dddd5**: the open reads the filter for its checksum through the file in 1 MiB reads into
   one buffer. A batch of more than one key takes one `mincore` over the span of the filter pages
   its keys hash to and asks the kernel for those the page cache does not hold. Every read-ahead
   request goes out in pieces of at most 128 KiB.
-- **now**: as 147eb1b0f, and the open then maps the filter's pages in (`MADV_POPULATE_READ`). Each
+- **now**: as dd78dddd5, and the open then maps the filter's pages in (`MADV_POPULATE_READ`). Each
   key in a batch is hashed once for the prefetch and the probe, and every read-ahead request in
   the store goes through one helper.
 
 An earlier set of rounds also measured a reader that asked for every filter page a batch hashes to,
 resident or not: 1.7 ms for a warm 10,000-key batch on a 2²⁶ run against 0.79 ms with the
 `mincore`. Those raw files were replaced by this set's, which has the small batches; git holds them
-at 147eb1b0f.
+at dd78dddd5.
 
 | run | reader | filter | open cold ms | open major faults | 10,000 warm ms | 10,000 pages cold ms | 10,000 cold ms | cold batch major faults | present warm µs | refused warm µs | refused cold µs | present cold µs | rounds | load |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2²⁶ | ed2e5a742 | 0 | 1.03 | 1.00 | 8.41 | 50.9 | 55.3 | 161 | 1.68 | – | – | 158 | 3 | 2.3–10.1 |
-| 2²⁶ | ed2e5a742 | 10:7 | 2,027 | 20,481 | 0.38 | 1.68 | 1,076 | 7,890 | 1.87 | 0.09 | 144 | 300 | 3 | 2.2–11.8 |
-| 2²⁶ | 147eb1b0f | 0 | 2.15 | 1.00 | 8.03 | 52.3 | 55.8 | 161 | 1.72 | – | – | 155 | 3 | 2.2–12.9 |
-| 2²⁶ | 147eb1b0f | 10:7 | 34.1 | 1.00 | 0.81 | 2.24 | 30.7 | 4.33 | 1.85 | 0.07 | 139 | 299 | 3 | 2.2–12.0 |
+| 2²⁶ | 72d87c112 | 0 | 1.03 | 1.00 | 8.41 | 50.9 | 55.3 | 161 | 1.68 | – | – | 158 | 3 | 2.3–10.1 |
+| 2²⁶ | 72d87c112 | 10:7 | 2,027 | 20,481 | 0.38 | 1.68 | 1,076 | 7,890 | 1.87 | 0.09 | 144 | 300 | 3 | 2.2–11.8 |
+| 2²⁶ | dd78dddd5 | 0 | 2.15 | 1.00 | 8.03 | 52.3 | 55.8 | 161 | 1.72 | – | – | 155 | 3 | 2.2–12.9 |
+| 2²⁶ | dd78dddd5 | 10:7 | 34.1 | 1.00 | 0.81 | 2.24 | 30.7 | 4.33 | 1.85 | 0.07 | 139 | 299 | 3 | 2.2–12.0 |
 | 2²⁶ | now | 0 | 1.91 | 1.00 | 7.81 | 51.9 | 50.1 | 162 | 1.66 | – | – | 155 | 3 | 2.1–12.0 |
 | 2²⁶ | now | 10:7 | 35.2 | 1.00 | 0.68 | 2.24 | 27.4 | 4.33 | 1.87 | 0.07 | 138 | 280 | 3 | 2.2–11.7 |
-| 233 M | ed2e5a742 | 0 | 3.32 | 1.00 | 10.6 | 71.6 | 77.2 | 88.3 | 1.79 | – | – | 167 | 3 | 2.3–10.8 |
-| 233 M | ed2e5a742 | 10:7 | 7,356 | 71,107 | 0.35 | 1.76 | 1,349 | 9,300 | 1.98 | 0.07 | 150 | 336 | 3 | 2.2–10.4 |
-| 233 M | 147eb1b0f | 0 | 3.62 | 1.00 | 11.7 | 73.3 | 74.2 | 88.3 | 1.81 | – | – | 166 | 3 | 2.4–6.3 |
-| 233 M | 147eb1b0f | 10:7 | 104 | 1.00 | 3.71 | 5.72 | 54.0 | 1.67 | 2.03 | 0.07 | 154 | 329 | 3 | 2.4–6.7 |
+| 233 M | 72d87c112 | 0 | 3.32 | 1.00 | 10.6 | 71.6 | 77.2 | 88.3 | 1.79 | – | – | 167 | 3 | 2.3–10.8 |
+| 233 M | 72d87c112 | 10:7 | 7,356 | 71,107 | 0.35 | 1.76 | 1,349 | 9,300 | 1.98 | 0.07 | 150 | 336 | 3 | 2.2–10.4 |
+| 233 M | dd78dddd5 | 0 | 3.62 | 1.00 | 11.7 | 73.3 | 74.2 | 88.3 | 1.81 | – | – | 166 | 3 | 2.4–6.3 |
+| 233 M | dd78dddd5 | 10:7 | 104 | 1.00 | 3.71 | 5.72 | 54.0 | 1.67 | 2.03 | 0.07 | 154 | 329 | 3 | 2.4–6.7 |
 | 233 M | now | 0 | 1.75 | 1.00 | 11.1 | 69.0 | 77.2 | 87.7 | 1.79 | – | – | 165 | 3 | 2.2–6.9 |
 | 233 M | now | 10:7 | 106 | 1.00 | 3.44 | 5.27 | 53.2 | 1.67 | 2.05 | 0.08 | 150 | 326 | 3 | 2.2–6.4 |
 
@@ -330,15 +335,15 @@ but not mapped into the run.
 
 | run | reader | filter | 2 just_opened µs | 2 warm µs | 2 after_eviction µs | 10 just_opened µs | 10 warm µs | 10 after_eviction µs | 100 just_opened µs | 100 warm µs | 100 after_eviction µs | 10000 just_opened µs | 10000 warm µs | 10000 after_eviction µs | rounds | load |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2²⁶ | ed2e5a742 | 0 | 16.7 | 1.88 | 1.70 | 84.8 | 13.2 | 15.9 | 801 | 125 | 119 | 64,458 | 9,039 | 8,539 | 3 | 2.3–10.1 |
-| 2²⁶ | ed2e5a742 | 10:7 | 0.60 | 0.04 | 0.04 | 1.40 | 0.09 | 0.08 | 17.6 | 1.77 | 1.53 | 1,116 | 463 | 366 | 3 | 2.2–11.8 |
-| 2²⁶ | 147eb1b0f | 0 | 16.6 | 1.83 | 1.67 | 82.0 | 13.0 | 12.6 | 825 | 124 | 122 | 65,410 | 9,077 | 8,151 | 3 | 2.2–12.9 |
-| 2²⁶ | 147eb1b0f | 10:7 | 337 | 313 | 81.8 | 992 | 906 | 230 | 1,374 | 1,108 | 248 | 4,480 | 570 | 540 | 3 | 2.2–12.0 |
+| 2²⁶ | 72d87c112 | 0 | 16.7 | 1.88 | 1.70 | 84.8 | 13.2 | 15.9 | 801 | 125 | 119 | 64,458 | 9,039 | 8,539 | 3 | 2.3–10.1 |
+| 2²⁶ | 72d87c112 | 10:7 | 0.60 | 0.04 | 0.04 | 1.40 | 0.09 | 0.08 | 17.6 | 1.77 | 1.53 | 1,116 | 463 | 366 | 3 | 2.2–11.8 |
+| 2²⁶ | dd78dddd5 | 0 | 16.6 | 1.83 | 1.67 | 82.0 | 13.0 | 12.6 | 825 | 124 | 122 | 65,410 | 9,077 | 8,151 | 3 | 2.2–12.9 |
+| 2²⁶ | dd78dddd5 | 10:7 | 337 | 313 | 81.8 | 992 | 906 | 230 | 1,374 | 1,108 | 248 | 4,480 | 570 | 540 | 3 | 2.2–12.0 |
 | 2²⁶ | now | 0 | 16.5 | 1.81 | 1.67 | 82.0 | 12.8 | 12.5 | 789 | 123 | 116 | 64,462 | 9,076 | 8,192 | 3 | 2.1–12.0 |
 | 2²⁶ | now | 10:7 | 13.7 | 8.87 | 82.9 | 29.5 | 22.1 | 238 | 43.5 | 27.6 | 254 | 1,012 | 409 | 410 | 3 | 2.2–11.7 |
-| 233 M | ed2e5a742 | 0 | 16.9 | 2.17 | 2.03 | 81.3 | 12.5 | 12.1 | 802 | 121 | 110 | 72,016 | 12,050 | 11,058 | 3 | 2.3–10.8 |
-| 233 M | ed2e5a742 | 10:7 | 1.11 | 0.05 | 0.04 | 17.5 | 1.75 | 1.46 | 26.7 | 1.94 | 1.57 | 1,742 | 758 | 388 | 3 | 2.2–10.4 |
-| 233 M | 147eb1b0f | 0 | 18.7 | 2.19 | 2.06 | 82.3 | 12.7 | 12.2 | 808 | 120 | 111 | 72,127 | 12,084 | 11,100 | 3 | 2.4–6.3 |
-| 233 M | 147eb1b0f | 10:7 | 1,281 | 1,146 | 904 | 2,747 | 2,457 | 1,501 | 4,512 | 4,316 | 2,875 | 16,041 | 1,535 | 1,123 | 3 | 2.4–6.7 |
+| 233 M | 72d87c112 | 0 | 16.9 | 2.17 | 2.03 | 81.3 | 12.5 | 12.1 | 802 | 121 | 110 | 72,016 | 12,050 | 11,058 | 3 | 2.3–10.8 |
+| 233 M | 72d87c112 | 10:7 | 1.11 | 0.05 | 0.04 | 17.5 | 1.75 | 1.46 | 26.7 | 1.94 | 1.57 | 1,742 | 758 | 388 | 3 | 2.2–10.4 |
+| 233 M | dd78dddd5 | 0 | 18.7 | 2.19 | 2.06 | 82.3 | 12.7 | 12.2 | 808 | 120 | 111 | 72,127 | 12,084 | 11,100 | 3 | 2.4–6.3 |
+| 233 M | dd78dddd5 | 10:7 | 1,281 | 1,146 | 904 | 2,747 | 2,457 | 1,501 | 4,512 | 4,316 | 2,875 | 16,041 | 1,535 | 1,123 | 3 | 2.4–6.7 |
 | 233 M | now | 0 | 17.5 | 2.23 | 2.09 | 82.3 | 12.8 | 12.5 | 802 | 122 | 112 | 73,096 | 12,557 | 11,810 | 3 | 2.2–6.9 |
 | 233 M | now | 10:7 | 37.2 | 25.5 | 890 | 78.2 | 47.7 | 1,486 | 127 | 91.1 | 2,862 | 1,500 | 648 | 987 | 3 | 2.2–6.4 |

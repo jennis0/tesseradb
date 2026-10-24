@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The before and after runs for how a run reads its key filter: the bench built against the run
-# reader at ed2e5a742 (before), at 147eb1b0f (prev) and as committed (now), run on the largest run a
+# reader at 72d87c112 (before), at dd78dddd5 (prev) and as committed (now), run on the largest run a
 # unique index writes and on 233 million keys, with no filter and at 10:7. Each run waits until no
 # serve benchmark or bundle build is running on the host. Writes
 # raw-reads-<step>-<entries>-<round>.txt here, ROUNDS rounds of the three builds in turn.
@@ -13,8 +13,8 @@ for round in $(seq 1 "${ROUNDS:-3}"); do
   for entries in 67108864 233000000; do
     for step in before prev now; do
       case $step in
-        before) bin=${BEFORE:?the bench built against the reader at ed2e5a742} ;;
-        prev) bin=${PREV:?the bench built against the reader at 147eb1b0f} ;;
+        before) bin=${BEFORE:?the bench built against the reader at 72d87c112} ;;
+        prev) bin=${PREV:?the bench built against the reader at dd78dddd5} ;;
         now) bin=${NOW:?the bench built against the reader as committed} ;;
       esac
       while pgrep -f '[i]nteractive_bench|[s]erve_battery|[m]osaica build' > /dev/null; do

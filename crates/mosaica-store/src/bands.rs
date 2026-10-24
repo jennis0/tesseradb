@@ -118,14 +118,14 @@ pub fn element<T>(slice: &[T], i: usize) -> usize {
 
 /// The most bytes one request to read ahead asks for. Linux reads at most the larger of the file's
 /// read-ahead size and the device's largest I/O for one request, and drops the rest of a longer
-/// one. The default read-ahead size, 128 KiB, is the least that cap can be; a disc's own can be far
-/// more, 8 MiB on the one the probes ran on.
-pub const READ_AHEAD: usize = 128 << 10;
+/// one. That cap is 128 KiB by default; a disc's own can be far more, 8 MiB on the one the probes
+/// ran on.
+const READ_AHEAD: usize = 128 << 10;
 
 /// `MADV_WILLNEED` over the page of every address in `pages`, one request per run of adjacent
-/// pages. The pages are read in the background, so the faults of the reads that follow find them
-/// in the page cache, and the kernel's read-ahead around a fault, sized for a sequential reader, is
-/// not triggered.
+/// pages, split into pieces of at most `READ_AHEAD` bytes. The pages are read in the background, so
+/// the faults of the reads that follow find them in the page cache, and the kernel's read-ahead
+/// around a fault, sized for a sequential reader, is not triggered.
 pub fn will_need(pages: &mut [usize]) {
     let page = page_size();
     for at in pages.iter_mut() {
@@ -138,7 +138,7 @@ pub fn will_need(pages: &mut [usize]) {
 /// `MADV_WILLNEED` over the address `ranges`, ascending by start, each widened to whole pages. Two
 /// ranges no more than `gap` bytes apart are asked for as one, gap included: reading a few unneeded
 /// pages costs less than a system call where the pages are already resident. A request asks for at
-/// most [`READ_AHEAD`] bytes, so the kernel drops none of it.
+/// most `READ_AHEAD` bytes, so the kernel drops none of it.
 pub fn will_need_ranges(ranges: impl IntoIterator<Item = std::ops::Range<usize>>, gap: usize) {
     let page = page_size();
     let advise = |range: std::ops::Range<usize>| {

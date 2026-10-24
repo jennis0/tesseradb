@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SIZES = [("67108864", "2²⁶"), ("233000000", "233 M")]
-STEPS = [("before", "ed2e5a742"), ("prev", "147eb1b0f"), ("now", "now")]
+STEPS = [("before", "72d87c112"), ("prev", "dd78dddd5"), ("now", "now")]
 OPEN_AND_BATCH = [
     ("open cold ms", lambda r: r["open_cold_ns"] / 1e6),
     ("open major faults", lambda r: r["open_cold_major_faults"]),

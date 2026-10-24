@@ -158,17 +158,18 @@ impl<K: Key> KeyRun<K> {
         if len == 0 {
             return;
         }
+        // Only a kernel without `MADV_POPULATE_READ` (`EINVAL`) falls back to touching each page.
+        // Any other failure is left alone: `EFAULT` means a page would raise SIGBUS, which a touch
+        // would deliver to the server.
         #[cfg(target_os = "linux")]
         {
-            if self
-                .map
-                .advise_range(Advice::PopulateRead, start, len)
-                .is_ok()
-            {
-                return;
+            match self.map.advise_range(Advice::PopulateRead, start, len) {
+                Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+                _ => return,
             }
         }
-        for at in (start..start + len).step_by(page_size()) {
+        let page = page_size();
+        for at in ((start & !(page - 1))..start + len).step_by(page) {
             std::hint::black_box(self.map[at]);
         }
     }
