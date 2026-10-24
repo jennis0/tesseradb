@@ -4,6 +4,9 @@
 # against a real `mosaica serve`, then the components' browser suite in headless Chromium, which
 # also decodes through the built worker and renders the built elements.
 #
+# It starts by checking that every copy of the release version (the pyprojects, the npm manifests
+# and lockfile, the crates' pins) matches `[workspace.package] version` in Cargo.toml.
+#
 # The operator scripts are plain `.mjs` and are checked with `checkJs`, so a block-scoped variable
 # used before its declaration (TS2448) fails here rather than at run time.
 #
@@ -12,6 +15,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+echo "check-clients: every copy of the release version agrees with Cargo.toml"
+python3 scripts/version.py check
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "check-clients: npm is not on PATH. Install Node (>=22.15) and re-run, or say in your report" >&2

@@ -27,8 +27,8 @@ members = [
 
 [workspace.package]
 # The one version of the release: every crate, both Python wheels and the npm packages carry it.
-# `scripts/set-version.sh` writes it everywhere else and `scripts/check-version.sh` refuses a copy
-# that differs.
+# `python3 scripts/version.py set X.Y.Z` writes it everywhere else, and `scripts/version.py check`
+# refuses a copy that differs.
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
@@ -42,7 +42,7 @@ categories = ["database-implementations", "visualization", "web-programming::htt
 [workspace.dependencies]
 # The workspace's own crates. Each carries the release version, pinned exactly, so that `cargo publish`
 # accepts the path dependency and a published crate resolves only the set it was released with.
-# `scripts/set-version.sh` rewrites these pins with the version above.
+# `scripts/version.py set` rewrites these pins with the version above.
 mosaica-access = { path = "crates/mosaica-access", version = "=0.1.0" }
 mosaica-types = { path = "crates/mosaica-types", version = "=0.1.0" }
 mosaica-roaring = { path = "crates/mosaica-roaring", version = "=0.1.0" }
