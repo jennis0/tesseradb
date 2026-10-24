@@ -3,7 +3,8 @@
   "include": [
     "src",
     "test",
-    "vite-plugin-decorators.ts"
+    "vite-plugin-decorators.ts",
+    "vite-plugin-licences.ts"
   ],
   "compilerOptions": {
     "noEmit": true,

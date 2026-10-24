@@ -30,7 +30,8 @@ from pathlib import Path
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 BUNDLE = "mosaica-components.js"
-FILES = (BUNDLE, BUNDLE + ".sri")
+# The bundle, its integrity hash, and the notices of the third-party packages inside it.
+FILES = (BUNDLE, BUNDLE + ".sri", BUNDLE + ".LICENSE.txt")
 
 
 def npm_install_is_current(ts: Path) -> bool:

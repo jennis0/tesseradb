@@ -1,6 +1,9 @@
 import {fileURLToPath} from 'node:url';
 import {defaultClientConditions, defineConfig} from 'vite';
 import {mosaicaDecorators} from './vite-plugin-decorators.js';
+import {mosaicaLicences} from './vite-plugin-licences.js';
+
+const licences = mosaicaLicences('mosaica-components.js');
 
 /**
  * The self-contained bundle: one minified ESM file with lit and deck.gl inside it and the decode
@@ -8,7 +11,7 @@ import {mosaicaDecorators} from './vite-plugin-decorators.js';
  * with those as dependencies and peers.
  */
 export default defineConfig({
-  plugins: [mosaicaDecorators()],
+  plugins: [mosaicaDecorators(), licences.main],
   // The workspace packages resolve to their sources, so the bundle needs no prior library build.
   // The deck package's lazy loader of the aggregation layers becomes a static one here: one file
   // holds them either way, and an inlined dynamic import makes the bundler wrap every module in a
@@ -45,5 +48,5 @@ export default defineConfig({
     minify: 'oxc',
     target: 'es2022'
   },
-  worker: {format: 'es'}
+  worker: {format: 'es', plugins: () => [licences.worker]}
 });

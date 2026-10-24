@@ -35,6 +35,7 @@ def fake_run(ts):
         if cmd[1] == "run":
             (ts / "components" / "dist" / "mosaica-components.js").write_text("bundle")
             (ts / "components" / "dist" / "mosaica-components.js.sri").write_text("sha384-x")
+            (ts / "components" / "dist" / "mosaica-components.js.LICENSE.txt").write_text("notices")
         return subprocess.CompletedProcess(cmd, 0)
 
     return ran, run
@@ -47,7 +48,9 @@ def test_builds_and_copies_the_bundle_skipping_npm_ci_when_current(tmp_path, mon
     static = tmp_path / "py" / "mosaica" / "static"
     copied = hatch_build.build_bundle(ts, static, run=run, log=lambda m: None)
     assert ran == [["run", "bundle", "-w", "@mosaicajs/components"]]
-    assert [p.name for p in copied] == ["mosaica-components.js", "mosaica-components.js.sri"]
+    assert [p.name for p in copied] == [
+        "mosaica-components.js", "mosaica-components.js.sri", "mosaica-components.js.LICENSE.txt"
+    ]
     assert (static / "mosaica-components.js").read_text() == "bundle"
 
 

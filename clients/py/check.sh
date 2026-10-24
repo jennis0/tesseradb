@@ -76,9 +76,10 @@ wheel = sys.argv[1]
 with zipfile.ZipFile(wheel) as z:
     names = z.namelist()
     want = "mosaica/static/mosaica-components.js"
-    if want not in names:
-        print(f"check-python: {wheel} does not contain {want}", file=sys.stderr)
-        sys.exit(1)
+    for name in (want, want + ".LICENSE.txt"):
+        if name not in names:
+            print(f"check-python: {wheel} does not contain {name}", file=sys.stderr)
+            sys.exit(1)
     packaged = z.read(want)
     built = pathlib.Path("../ts/components/dist/mosaica-components.js").read_bytes()
     if hashlib.sha384(packaged).digest() != hashlib.sha384(built).digest():

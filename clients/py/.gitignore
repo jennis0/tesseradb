@@ -2,6 +2,7 @@
 mosaica/static/*.js
 mosaica/static/*.sri
 mosaica/static/*.json
+mosaica/static/*.txt
 dist/
 build/
 *.egg-info/
