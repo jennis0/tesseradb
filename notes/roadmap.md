@@ -420,6 +420,23 @@ the provider's login page and collects the token afterwards, so the embedding ap
 The components and the Python client would run the authorization code flow with PKCE and hand the
 token to `/v1/login`. No issue or design exists.
 
+**Drawing a circle or an ellipse on the map.** High priority. The HTTP API takes circle, ellipse
+and polygon regions, but the map component offers only a box and a freehand lasso
+(`clients/ts/components/src/map.ts`, `clients/ts/core/src/selectedRegion.ts`), so a viewer cannot
+draw either shape that the server already answers. No issue exists.
+
+**Keeping a drawn selection across a change of view.** Filters carry across views, but a drawn
+selection is dropped when the next view's frame differs, because the region is held in the
+outgoing view's data coordinates (`clients/ts/core/src/store.ts`, at the view switch). Keeping it
+needs the selection carried as the set of items it selected, or mapped into the new view. No issue
+exists.
+
+**Declaring a rendered field at a running server.** A field declared with `render = true` is
+refused at the control plane (`crates/mosaica-engine/src/attributes.rs`), because a rendered value
+lives in a row's drawn columns and a column declared live has no rows written for it. It can only
+be declared at a build, which breaks the rule that a build is an ingest into an empty database.
+Left as it is for the first release. No issue exists.
+
 [#3]: https://github.com/jennis0/tessera-index/issues/3
 [#4]: https://github.com/jennis0/tessera-index/issues/4
 [#73]: https://github.com/jennis0/tessera-index/issues/73
