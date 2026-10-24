@@ -1,0 +1,153 @@
+# The places example dataset: 150,000 GeoNames features of every kind on a world map, every
+# populated place of 15,000 people or more and a seeded sample of the rest.
+# `test_corpora/geonames/example.py` writes the Parquet files beside this; NOTICE.md says where
+# they came from. The declaration is a cut of the GeoNames ladder rung's
+# (`test_corpora/geonames/corpus.toml`), which says more about each choice.
+
+[sources]
+points        = "points.parquet"
+feature_class = "vocab-feature-class.parquet"
+feature_code  = "vocab-feature-code.parquet"
+country       = "vocab-country.parquet"
+admin1        = "vocab-admin1.parquet"
+members_admin = "members-admin.parquet"
+admin         = "artifacts-admin.parquet"
+
+[defaults]
+source = "points"
+
+# lon and lat are degrees as GeoNames publishes them, and the extent is written in degrees: Web
+# Mercator's whole domain, so the frame is the world square and the build does the projection.
+#
+# GeoNames has no rights field, so each feature's access term is its country code, standing in for
+# a compartment: a principal is a set of countries. A feature with no country is `public`.
+[[view]]
+name             = "world"
+title            = "GeoNames"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+point_visibility = { field = "country", default = "public" }
+
+# Feature classes and codes are GeoNames' published lists, so their names disclose nothing about
+# this data. A country or a division is contained in one compartment, so its name is served only
+# where the viewer can see a feature carrying it.
+[[vocabulary]]
+name       = "feature_class"
+title      = "Feature class"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "feature_class"
+
+[[vocabulary]]
+name       = "feature_code"
+title      = "Feature code"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "feature_code"
+
+[[vocabulary]]
+name       = "country"
+title      = "Country"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "country"
+
+[[vocabulary]]
+name       = "admin1"
+title      = "First-level administrative division"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "admin1"
+
+# The GeoNames id. Every file names a feature by it: the points as `geonameid`, the members as
+# `entity`.
+[[attribute]]
+name   = "geonameid"
+title  = "GeoNames id"
+type   = "i64"
+unique = true
+
+[[attribute]]
+name   = "name"
+type   = "text"
+index  = true
+
+[[attribute]]
+name       = "feature_class"
+title      = "Feature class"
+type       = "category"
+vocabulary = "feature_class"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "feature_code"
+title      = "Feature code"
+type       = "category"
+vocabulary = "feature_code"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "country"
+title      = "Country"
+type       = "category"
+vocabulary = "country"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "admin1"
+title      = "First-level division"
+type       = "category"
+vocabulary = "admin1"
+index      = true
+
+# Null where GeoNames gives no population.
+[[attribute]]
+name   = "population"
+title  = "Population"
+type   = "i64"
+render = true
+
+# Countries over their first-level divisions. The member file gives each feature a list whose
+# positions are the two levels; a null entry is in no region at that level. A region is served
+# only to a viewer who can see one of its features, and its name with it: a region's name is true
+# whether or not any feature exists, so it needs no generating set.
+[[layer]]
+name                      = "admin/hierarchy"
+title                     = "Countries and regions"
+source                    = "admin"
+views                     = ["world"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "tiered", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[[layer.levels]]
+level = 0
+title = "Country"
+zoom  = [0, 5]
+
+[[layer.levels]]
+level = 1
+title = "First-level division"
+zoom  = [4, 16]
+
+[layer.content]
+computed = ["centroid", "box"]
+
+[[layer.content.supplied]]
+name                      = "name"
+type                      = "text"
+require_member_visibility = "inherited"
+
+[layer.members]
+source = "members_admin"
+fields = { geonameid = "entity" }

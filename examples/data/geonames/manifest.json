@@ -1,0 +1,29 @@
+{
+  "cut_from": "geonames/2026-08-27/allCountries.txt",
+  "min_population": 15000,
+  "populous": 34143,
+  "drawn": 115857,
+  "seed": 0,
+  "features": 150000,
+  "feature_classes": {
+    "settlement": 78724,
+    "water": 22791,
+    "building": 21978,
+    "mountain": 15848,
+    "region": 4595,
+    "area": 4308,
+    "forest": 1089,
+    "road": 483,
+    "undersea": 137,
+    "null": 47
+  },
+  "rows": {
+    "artifacts-admin.parquet": 3705,
+    "members-admin.parquet": 150000,
+    "points.parquet": 150000,
+    "vocab-admin1.parquet": 3460,
+    "vocab-country.parquet": 244,
+    "vocab-feature-class.parquet": 9,
+    "vocab-feature-code.parquet": 475
+  }
+}
