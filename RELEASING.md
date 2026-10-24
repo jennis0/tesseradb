@@ -12,25 +12,21 @@ These are done once, by the owner of the repository and the registry accounts.
 
 1. **The `release` environment.** In the repository's Settings, Environments, create `release`.
    Add yourself as a required reviewer, and under deployment branches and tags allow only tags
-   matching `v*`. The publish jobs run in this environment, and its secrets are visible only to
-   them.
+   matching `v*`. The publish jobs run in this environment, and only they can ask the registries
+   for a publish token.
 2. **PyPI trusted publishers.** For each of the projects `mosaica-native` and `mosaica`, open the
    project on PyPI, then Settings, Publishing, and add a GitHub publisher with owner `jennis0`,
    repository `mosaica`, workflow `release.yml` and environment `release`. No token is stored.
-3. **npm.** Create the organisation `mosaicajs` on npmjs.com, which owns the `@mosaicajs` scope.
-   A trusted publisher can only be added to a package that exists, so the first release publishes
-   with a token:
-   - Create a granular access token with read and write access to the `@mosaicajs` scope, and add
-     it to the `release` environment as the secret `NPM_TOKEN`.
-   - After the first release, add a trusted publisher to each of `@mosaicajs/client`,
-     `@mosaicajs/deck`, `@mosaicajs/components` and `@mosaicajs/react` (package Settings, Trusted
-     publishing: GitHub Actions, repository `jennis0/mosaica`, workflow `release.yml`,
-     environment `release`), then delete the `NPM_TOKEN` secret and revoke the token. The workflow
-     publishes through the trusted publisher when the secret is absent.
-4. **crates.io.** Create an API token at crates.io (Account Settings, API Tokens) with the
-   `publish-update` scope, limited to crates matching `mosaica*`, and add it to the `release`
-   environment as the secret `CARGO_REGISTRY_TOKEN`. The account must own all twenty published
-   crate names.
+3. **npm trusted publishers.** The organisation `mosaicajs` on npmjs.com owns the `@mosaicajs`
+   scope, and each of `@mosaicajs/client`, `@mosaicajs/deck`, `@mosaicajs/components` and
+   `@mosaicajs/react` exists as a 0.0.0 placeholder. On each package's Settings page, under Trusted
+   publishing, add GitHub Actions with repository `jennis0/mosaica`, workflow `release.yml` and
+   environment `release`. No token is stored, and npm records provenance for each publish.
+4. **crates.io trusted publishers.** All twenty published crates exist as 0.0.0 placeholders. On
+   each crate's Settings page at crates.io, under Trusted Publishing, add GitHub with repository
+   owner `jennis0`, repository `mosaica`, workflow `release.yml` and environment `release`. No
+   token is stored: `rust-lang/crates-io-auth-action` exchanges the job's OIDC token for a publish
+   token that lasts thirty minutes.
 5. **GHCR.** Under Settings, Actions, General, set workflow permissions so that a workflow can be
    granted `packages: write` (the release workflow asks for it per job). After the first release,
    open the `mosaica` package under your GitHub profile's Packages, check that it is linked to
@@ -88,8 +84,8 @@ Every third-party action in `release.yml` and `wheels.yml` is pinned to a commit
 | `archives` | One `.tar.gz` (`.zip` for Windows) per target with the binary, `LICENSE`, `THIRD_PARTY_LICENSES`, `README.md` and `CHANGELOG.md`, and `SHA256SUMS`. |
 | `npm-pack` | Builds the four npm packages and packs them. |
 | `pypi` | Publishes `mosaica-native`, waits until PyPI serves it, then publishes `mosaica`, through trusted publishing. |
-| `npm` | Publishes the four tarballs in dependency order with provenance; a pre-release goes to the `next` dist-tag. |
-| `crates` | `cargo publish --workspace`, which publishes the twenty crates in dependency order. |
+| `npm` | Publishes the four tarballs in dependency order through trusted publishing, with provenance; a pre-release goes to the `next` dist-tag. |
+| `crates` | Packages and builds the twenty crates, then `cargo publish --workspace --no-verify` through trusted publishing, in dependency order. |
 | `image-build`, `image` | Builds the image natively on amd64 and arm64, pushes both by digest, then tags the pair as the version, the minor version and `latest` (not for a pre-release). |
 | `github-release` | Creates the release with the changelog section as its notes, marked pre-release for an `-rc` tag. |
 
@@ -97,7 +93,8 @@ Every third-party action in `release.yml` and `wheels.yml` is pinned to a commit
 
 Fix the cause, then re-run the failed jobs from the Actions tab. `pypi` and `npm` skip what an
 earlier attempt published, and pushing the image again is harmless. `crates` stops at the first
-crate crates.io already has, so publish the rest by hand from the tagged commit:
+crate crates.io already has, so publish the rest by hand from the tagged commit, after
+`cargo login` with a personal token scoped to `publish-update` on `mosaica*`:
 
 ```bash
 cargo publish --workspace --locked --exclude mosaica-bench --exclude mosaica-docgen \
