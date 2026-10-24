@@ -3,15 +3,16 @@
 # The `mosaica` binary on a distroless glibc base. The server tunes glibc's malloc, so the runtime
 # is glibc. See docker/README.md for how to run it.
 #
-# The compiler is the one in the rust image named by RUST_VERSION; rust-toolchain.toml is left out
-# of the context so rustup does not fetch another.
+# The compiler is the one in the rust image below; rust-toolchain.toml is left out of the context
+# so rustup does not fetch another. Both base images are pinned by digest, so a rebuild of the same
+# source uses the same compiler and runtime libraries. To move to newer ones, read the current
+# digests with `docker buildx imagetools inspect rust:1-bookworm` and
+# `docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot`.
 #
-#   docker build --build-arg MOSAICA_BUILD_COMMIT=$(git rev-parse HEAD) -t mosaica .
+#   docker build --build-arg MOSAICA_BUILD_COMMIT=$(git rev-parse HEAD) \
+#     --build-arg MOSAICA_VERSION=$(python3 scripts/version.py) -t mosaica .
 
-ARG RUST_VERSION=1
-ARG DEBIAN=bookworm
-
-FROM rust:${RUST_VERSION}-${DEBIAN} AS build
+FROM rust:1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS build
 WORKDIR /src
 ARG MOSAICA_BUILD_COMMIT=unknown
 ENV MOSAICA_BUILD_COMMIT=${MOSAICA_BUILD_COMMIT} \
@@ -25,8 +26,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && install -D target/release/mosaica /out/usr/local/bin/mosaica \
     && install -d -o 65532 -g 65532 /out/var/lib/mosaica /out/etc/mosaica
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+ARG MOSAICA_BUILD_COMMIT=unknown
+ARG MOSAICA_VERSION=unknown
+LABEL org.opencontainers.image.title="mosaica" \
+      org.opencontainers.image.description="Serve an interactive map over billions of points from one machine, with every view computed over what each viewer may see." \
+      org.opencontainers.image.source="https://github.com/jennis0/mosaica" \
+      org.opencontainers.image.url="https://github.com/jennis0/mosaica" \
+      org.opencontainers.image.documentation="https://github.com/jennis0/mosaica/blob/main/docs/guides/docker.md" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.authors="Joe Ennis <joe.ennis0@gmail.com>" \
+      org.opencontainers.image.version="${MOSAICA_VERSION}" \
+      org.opencontainers.image.revision="${MOSAICA_BUILD_COMMIT}"
 COPY --from=build /out/ /
+COPY LICENSE THIRD_PARTY_LICENSES /usr/share/doc/mosaica/
 WORKDIR /etc/mosaica
 VOLUME ["/var/lib/mosaica"]
 EXPOSE 8080 8081 8082
