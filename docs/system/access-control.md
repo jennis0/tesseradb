@@ -252,7 +252,7 @@ or been revoked; a corpus change on its own produces no such refusal.
 ## The identity key
 
 The `mosaica_id` a client holds for an item is derived from the item's
-[entity id](data-model.md#naming-an-item) by a keyed permutation
+[entity id](security.md#a-client-never-sees-an-entity-id) by a keyed permutation
 ([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). The key is
 drawn at random by `mosaica build` each time it creates a bundle and is stored in the bundle's
 manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,

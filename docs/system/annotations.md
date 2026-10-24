@@ -55,7 +55,7 @@ nothing.
 On the wire an artifact is a `mosaica_id`, as an item is, and the server resolves it on every
 request. The identity key permutes a 64-bit input. Its top bit, the kind, is 1 for an artifact or a
 layer, and the next 31 bits are the layer space and the low 32 the entity in it. An item's input has
-kind 0 and holds its shard, tenancy and number ([data model](data-model.md#naming-an-item)). An
+kind 0 and holds its shard, tenancy and number ([write path](write-path.md#freed-entity-ids)). An
 artifact's identifier therefore never names an item. The item card answers it as an identifier
 naming nothing, as the artifact card answers an item's, and a member table, a generating set or an
 ingest row naming it has that row refused as naming no item. `/control/changes` deletes and

@@ -345,7 +345,7 @@ between a value that is held and one that is not, which the timing row below cov
 **Stored order shows which items share a full set of index keys.** A read of items in stored order
 returns a viewer's items shard by shard, in shard number order, and within a shard in the order of
 their numbers, the entity id each was first given there. Shards are cut from the build's one
-numbering ([data model](data-model.md#naming-an-item)), so the walk shows nothing that numbering does
+numbering ([write path](write-path.md#admission)), so the walk shows nothing that numbering does
 not. Within each build batch and each ingest window, numbers are assigned in order of each item's
 full set of index keys: its labels read as one disjunction, each term among its operands, and one
 key for each conjunction among them ([access control](access-control.md#how-labels-are-indexed)),
