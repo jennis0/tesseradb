@@ -7,5 +7,4 @@ A corpus is declared once, with one or more two-dimensional layouts over it, suc
 - [Start](start/index.md) holds the tutorials, which take a new user from nothing to a working map.
 - [Guides](guides/index.md) hold the steps for particular tasks.
 - [Reference](reference/index.md) holds the HTTP API, the clients' interfaces, the command line and the declaration format, and a table of which surface does what.
-- [How it works](system/overview.md) describes the system: its data model, access control, security argument, queries, annotations, write path, serving and clients.
-- [Developer](developer/index.md) covers building, testing and changing Mosaica itself.
+- [How it works](system/overview.md) describes the system: its data model, queries, serving, write path, clients, annotations, access control and security argument.

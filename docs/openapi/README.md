@@ -1,4 +1,4 @@
-# The wire, for a stranger
+# Wire framing
 
 Three things a power user who installs nothing needs, and where each is:
 

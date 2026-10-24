@@ -140,7 +140,10 @@ any framework, with a deck.gl layer and React bindings alongside them.
 
 ## Where to go next
 
-- Checking the security argument: the security chapter.
-- Evaluating the approach: the data model, access control, queries and write-path chapters.
-- Operating a deployment: the guide.
-- Building against the client, or against the wire directly: the clients chapter and the guide.
+- Evaluating the approach: the [data model](data-model.md), [queries](queries.md),
+  [write path](write-path.md) and [access control](access-control.md) chapters.
+- Operating a deployment: [the operating guide](../guides/operating.md).
+- Building against the client, or against the wire directly: the [clients](clients.md) chapter,
+  the [TypeScript client reference](../reference/typescript.md) and the
+  [wire framing](../openapi/README.md) page.
+- Checking the security argument: the [security](security.md) chapter.

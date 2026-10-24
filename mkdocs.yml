@@ -1,5 +1,5 @@
 site_name: Mosaica
-site_description: A per-viewer, access-controlled map over billions of records, served from one machine.
+site_description: An interactive map over billions of points, served from one machine while the data changes.
 repo_url: https://github.com/jennis0/mosaica
 edit_uri: ""
 docs_dir: docs
@@ -151,12 +151,10 @@ nav:
   - How it works:
       - Overview: system/overview.md
       - Data model: system/data-model.md
+      - Queries: system/queries.md
+      - Serving: system/serving.md
+      - Write path: system/write-path.md
+      - Clients: system/clients.md
+      - Annotations: system/annotations.md
       - Access control: system/access-control.md
       - Security: system/security.md
-      - Queries: system/queries.md
-      - Annotations: system/annotations.md
-      - Write path: system/write-path.md
-      - Serving: system/serving.md
-      - Clients: system/clients.md
-  - Developer:
-      - developer/index.md

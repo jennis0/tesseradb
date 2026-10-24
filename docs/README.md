@@ -5,8 +5,7 @@ This directory is the source of the documentation site, configured by `mkdocs.ym
 - [start/](start/index.md): tutorials for a new user.
 - [guides/](guides/index.md): the steps for particular tasks.
 - [reference/](reference/index.md): the HTTP API, the clients, the command line and the declaration format.
-- [system/](system/overview.md): how Mosaica works, in this reading order: [overview](system/overview.md), [data model](system/data-model.md), [access control](system/access-control.md), [security](system/security.md), [queries](system/queries.md), [annotations](system/annotations.md), [write path](system/write-path.md), [serving](system/serving.md), [clients](system/clients.md).
-- [developer/](developer/index.md): building, testing and changing Mosaica.
+- [system/](system/overview.md): how Mosaica works, in this reading order: [overview](system/overview.md), [data model](system/data-model.md), [queries](system/queries.md), [serving](system/serving.md), [write path](system/write-path.md), [clients](system/clients.md), [annotations](system/annotations.md), [access control](system/access-control.md), [security](system/security.md).
 - [openapi/](openapi/): the HTTP contract, rendered into the reference.
 
 [writing.md](writing.md) is the style for prose. It and this file are not part of the site. Working notes are in [notes/](../notes/).
