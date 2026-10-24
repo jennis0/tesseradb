@@ -101,6 +101,21 @@ describe('MarkSlab', () => {
     expect(slab.departed).toBe(0);
   });
 
+  it('holds a tile served with no marks, whether written by append or by compaction', () => {
+    const slab = new MarkSlab();
+    const full = band(1, 200_000);
+    const empty = band(2, 0);
+    // The first sync compacts, since nothing is reserved yet.
+    slab.sync([full, empty], 2, UNIFORM_ENCODING, null);
+    expect(slab.holds(empty)).toBe(true);
+
+    const more = band(3, 5);
+    const emptyAgain = band(4, 0);
+    slab.sync([full, empty, more, emptyAgain], 2, UNIFORM_ENCODING, null);
+    expect(slab.holds(emptyAgain)).toBe(true);
+    expect(slab.drawn).toBe(200_005);
+  });
+
   it('keeps what it draws within the mark budget: past it, marks that left the frame are dropped', () => {
     const slab = new MarkSlab();
     const a = band(1, 150_000);

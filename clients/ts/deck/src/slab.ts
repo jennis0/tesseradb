@@ -240,7 +240,6 @@ class Partition {
     this.slots.clear();
     this.live = 0;
     for (const band of bands) {
-      if (band.ids.length === 0) continue;
       this.write(band, this.live, encoding, colourBy);
       this.slots.set(band.prefix, {from: this.live, length: band.ids.length, band});
       this.live += band.ids.length;
