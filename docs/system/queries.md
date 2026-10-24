@@ -107,7 +107,7 @@ map.
 A tile can hold far more visible items than a screen can usefully draw. Rather than a flat cap on
 how many marks appear, each tile is served a number of points chosen from three density rules
 working together. Every item carries a fixed, pseudo-random rank derived from its own
-[`mosaica_id`](data-model.md#items) rather than from any internal ordering, so which
+[`mosaica_id`](data-model.md#naming-an-item) rather than from any internal ordering, so which
 items appear first at a coarse zoom is unrelated to how an item came to be authorised.
 
 | Rule | What it does |
@@ -225,7 +225,7 @@ leading `-`. A JSON number is read as a 64-bit float by most parsers, which is e
 2^53; the string form is exact across the whole 64-bit range. This holds on every integer and
 timestamp field.
 
-A field declared unique ([data model](data-model.md#unique-fields)) answers `eq` and `in` from its
+A field declared unique ([data model](data-model.md#naming-an-item)) answers `eq` and `in` from its
 unique index. The server looks up each named value, takes the items holding them, drops deleted
 items, and intersects the result with the viewer's visible set before any other clause reads it. An
 `in` naming a thousand values costs a thousand lookups in the index, and reads none of the field's
@@ -387,7 +387,7 @@ record fields until that flush.
 The rows come in one of two orders, which return the same rows. Map order is by map cell in the
 view, then by `mosaica_id`, merged across the view's segments in every shard, which is the order
 rendered fields are stored in. Stored order walks the bundle's point shards, the spaces its items
-are numbered in ([data model](data-model.md#items)), in shard number order, and within a shard
+are numbered in ([data model](data-model.md#naming-an-item)), in shard number order, and within a shard
 follows the server's internal item numbering, which is the order the shard's record store holds
 items in. In map order a page's items are scattered through the record store, so each page
 decompresses blocks it uses only a few rows of, and the smaller the pages, the more often each block
