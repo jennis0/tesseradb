@@ -908,7 +908,10 @@ cache. They give, for principals seeing about 1%, 7%, 85% and 100%:
 - a bulk read in each order;
 - time to `/readyz` and peak anonymous memory.
 
-Each figure is reported as its ratio to one shard. A request with nothing to combine should show a
+Each figure is reported as its ratio to one shard. The interactive bench runs its camera script
+once, at one shard, and every shard count replays that run's requests (`--replay`): two shard
+counts serve slightly different points per tile (§3.4), so the client would ask each for different
+work next. The serve battery needs no replay, since it chooses its cells from exact counts. A request with nothing to combine should show a
 ratio near 1 at every N. Where one does not, the extra work is removed before anything is added.
 
 ### 8.3 The write side

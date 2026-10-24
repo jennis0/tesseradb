@@ -21,6 +21,8 @@ const cred = process.env.MOSAICA_BENCH_SESSION_CRED;
 if (!cred) throw new Error('set MOSAICA_BENCH_SESSION_CRED to the deployment operator credential');
 
 const now = () => performance.timeOrigin + performance.now();
+/** Every `at_ms` in the output is measured from here. */
+const origin = now();
 
 // ---------------------------------------------------------------------------------------------
 // The wire: fetch in a worker thread, timing each response's frames as they arrive
@@ -77,8 +79,9 @@ parentPort.on('message', async (m) => {
         i += n;
         remaining -= n;
         if (remaining > 0) break;
-        if (kind === 1) t.counts ??= at;
-        if (kind === 3) t.points ??= at;
+        // The first counts and points frames are posted as they arrive, for a replay waiting on them.
+        if (kind === 1 && t.counts === undefined) parentPort.postMessage({id, frame: 'counts', t: (t.counts = at)});
+        if (kind === 3 && t.points === undefined) parentPort.postMessage({id, frame: 'points', t: (t.points = at)});
         if (kind === 4) t.trailer = JSON.parse(new TextDecoder().decode(trailer));
         remaining = -1;
         if (i === value.length) break;
@@ -103,11 +106,22 @@ let lastActivity = now();
 /** Every request, in issue order, with what was sent and when its parts arrived. */
 const log = [];
 let step = null;
+/** Called on every arrival on the wire: a replay waits on them. */
+const waiters = new Set();
+const changed = () => new Promise((r) => waiters.add(r));
+function notify() {
+  for (const w of waiters) w();
+  waiters.clear();
+}
 
 wire.on('message', (m) => {
   const p = pending.get(m.id);
   if (!p) return;
-  if (m.head) {
+  if (m.frame) {
+    p.record.events[m.frame] = m.t;
+    notify();
+  } else if (m.head) {
+    p.record.events.headers = m.t;
     const body = new ReadableStream({
       start(c) {
         p.stream = c;
@@ -138,32 +152,55 @@ wire.on('message', (m) => {
       shed: m.done && p.record.framed ? !t.trailer : false,
       error: m.error ?? null
     });
+    p.record.events.last_byte = t.lastByte ?? now();
     pending.delete(m.id);
     inFlight -= 1;
     lastActivity = now();
+    notify();
   }
 });
 
-/** The `fetch` the store's client uses. */
-function wireFetch(url, init = {}) {
+/**
+ * One request on the wire: its record, logged at once, and its response. `fields` are added to
+ * the record; a replay names the reference request it sends again, and whether it was `extra`.
+ */
+function send(url, init = {}, fields = {}) {
   const id = nextId++;
   const body = typeof init.body === 'string' ? init.body : init.body ? new TextDecoder().decode(init.body) : null;
+  const headers = Object.fromEntries(new Headers(init.headers ?? {}));
   const t0 = now();
-  const record = {id, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0};
+  const record = {id, ...fields, step: step?.id ?? null, path: new URL(url).pathname, method: init.method ?? 'GET', body, t0};
+  record.at_ms = Math.round((t0 - origin) * 10) / 10;
+  record.headers = placeholders(headers);
   record.start_ms = step?.t0 === undefined ? null : Math.round((t0 - step.t0) * 10) / 10;
   record.kind = kindOf(record);
   record.whole_level = wholeLevel(record, step?.zoom ?? 0);
-  record.extra = beyondReference(record);
+  record.extra = fields.extra ?? beyondReference(record);
   record.framed = FRAMED.has(record.path);
+  // When each part arrived, on this thread's clock, for a replay to wait on.
+  record.events = {};
   log.push(record);
   inFlight += 1;
   lastActivity = now();
-  return new Promise((resolve, reject) => {
+  const response = new Promise((resolve, reject) => {
     pending.set(id, {resolve, reject, record});
     init.signal?.addEventListener('abort', () => wire.postMessage({abort: id}));
-    const headers = Object.fromEntries(new Headers(init.headers ?? {}));
     wire.postMessage({id, url, init: {method: init.method, headers, body}});
   });
+  return {record, response};
+}
+
+/** The `fetch` the store's client uses. */
+function wireFetch(url, init = {}) {
+  return send(url, init).response;
+}
+
+/** A request's headers with its credentials as placeholders, which a replay fills with its own. */
+function placeholders(headers) {
+  const out = {...headers};
+  if (out.authorization === `Bearer ${cred}`) out.authorization = 'Bearer <credential>';
+  else if (out.authorization?.startsWith('Bearer ')) out.authorization = 'Bearer <token>';
+  return out;
 }
 
 const FRAMED = new Set(['/v1/viewport', '/v1/items', '/v1/artifacts/viewport']);
@@ -245,6 +282,13 @@ async function show(store, q, s) {
   // Map zoom 0 fits the extent's height, 512 world units, in H pixels.
   store.setView({bbox: boxAt(q, s.centre, s.zoom), zoom: s.zoom + Math.log2(H / 512), width: W, height: H});
   const ok = await settled(t0);
+  const result = summarise(s, t0, ok);
+  step = null;
+  return result;
+}
+
+/** A step's figures from the requests it sent, timed from `t0`. */
+function summarise(s, t0, ok) {
   const requests = log.filter((r) => r.step === s.id);
   const rel = (r, field) => (r[field] === null || r[field] === undefined ? null : r.t0 - t0 + r[field]);
   // The view's own requests: without a prefetch's work beyond the reference run.
@@ -260,13 +304,17 @@ async function show(store, q, s) {
   const extraAt = extra.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
   const layers = viewed.filter((r) => r.kind === 'artifacts');
   const layersAt = layers.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  // The points requests in flight at some moment an artifacts request of the view was.
+  // The points requests in flight at some moment an artifacts request of the view was; in a
+  // replay, those that were in the reference, so both time the same requests.
   const span = (r) => [r.t0, r.t0 + (r.last_byte_ms ?? 0)];
-  const beside = viewed.filter((r) => r.kind === 'marks' && layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]));
+  const overlaps = (r) => layers.some((a) => span(a)[0] < span(r)[1] && span(r)[0] < span(a)[1]);
+  const beside = viewed.filter((r) => r.kind === 'marks' && (r.ref_beside_layers ?? overlaps(r)));
+  for (const r of viewed) if (r.kind === 'marks') r.beside_layers = beside.includes(r);
   const besideAt = beside.map((r) => rel(r, 'last_byte_ms')).filter((x) => x !== null);
-  const result = {
+  return {
     ...s,
     t0,
+    t0_at_ms: Math.round((t0 - origin) * 10) / 10,
     timed_out: !ok,
     requests: requests.length,
     counts_ms: firstOf('counts_ms'),
@@ -283,8 +331,6 @@ async function show(store, q, s) {
     shed: requests.filter((r) => r.shed).length,
     errors: requests.filter((r) => r.error || (r.status && r.status >= 400)).length
   };
-  step = null;
-  return result;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -335,31 +381,33 @@ async function open(principal, label, keepIds) {
   if (plan.title_field) store.setPointColumns('map#1', [plan.title_field]);
   const centre = [(q.xMin + q.xMax) / 2, (q.yMin + q.yMax) / 2];
   const opened = await show(store, q, {id: `${principal.label}/${label}`, kind: 'open', region: 'world', zoom: 0, centre});
+  return {store, q, view, ids, token: session.token, result: openResult(opened, t0, tToken)};
+}
+
+/** An opening's figures: from the token's arrival, and the moments a replay times it from. */
+function openResult(opened, t0, tToken) {
   const rel = (x) => (x === null ? null : Math.round((x + (opened.t0 - tToken)) * 10) / 10);
+  const at = (x) => Math.round((x - origin) * 10) / 10;
   return {
-    store,
-    q,
-    view,
-    ids,
-    token: session.token,
-    result: {
-      authorise_ms: Math.round((tToken - t0) * 10) / 10,
-      counts_ms: rel(opened.counts_ms),
-      first_points_ms: rel(opened.first_points_ms),
-      last_byte_ms: rel(opened.last_byte_ms),
-      settled_ms: rel(opened.settled_ms),
-      layers_ms: rel(opened.layers_ms),
-      points_beside_layers_ms: rel(opened.points_beside_layers_ms),
-      extra_ms: rel(opened.extra_ms),
-      extra_requests: opened.extra_requests,
-      whole_level: opened.whole_level,
-      bytes: opened.bytes,
-      kinds: opened.kinds,
-      requests: opened.requests,
-      shed: opened.shed,
-      errors: opened.errors,
-      timed_out: opened.timed_out
-    }
+    start_at_ms: at(t0),
+    token_at_ms: at(tToken),
+    show_at_ms: at(opened.t0),
+    authorise_ms: Math.round((tToken - t0) * 10) / 10,
+    counts_ms: rel(opened.counts_ms),
+    first_points_ms: rel(opened.first_points_ms),
+    last_byte_ms: rel(opened.last_byte_ms),
+    settled_ms: rel(opened.settled_ms),
+    layers_ms: rel(opened.layers_ms),
+    points_beside_layers_ms: rel(opened.points_beside_layers_ms),
+    extra_ms: rel(opened.extra_ms),
+    extra_requests: opened.extra_requests,
+    whole_level: opened.whole_level,
+    bytes: opened.bytes,
+    kinds: opened.kinds,
+    requests: opened.requests,
+    shed: opened.shed,
+    errors: opened.errors,
+    timed_out: opened.timed_out
   };
 }
 
@@ -429,7 +477,136 @@ function script(principal, regions, q) {
   return steps.map((s, i) => ({...s, id: `${principal.label}/map/${i}`}));
 }
 
+// ---------------------------------------------------------------------------------------------
+// A replay: a reference run's requests sent again
+// ---------------------------------------------------------------------------------------------
+
+/** A session a replayed step authorises, and the token and meta it receives. */
+function newSession() {
+  const session = {meta: null, value: null};
+  session.token = new Promise((resolve, reject) => {
+    session.resolve = (token) => resolve((session.value = token));
+    session.reject = reject;
+  });
+  return session;
+}
+
+/** Send one reference request again, under `session`'s token or the session credential. */
+function issue(ref, session) {
+  const entry = {record: null};
+  entry.done = (async () => {
+    const headers = {...ref.headers};
+    if (headers.authorization === 'Bearer <credential>') headers.authorization = `Bearer ${cred}`;
+    else if (headers.authorization === 'Bearer <token>') headers.authorization = `Bearer ${await session.token}`;
+    const base = ref.path.startsWith('/session/') ? plan.session : plan.viewer;
+    const controller = new AbortController();
+    const sent = send(base + ref.path, {method: ref.method, headers, body: ref.body ?? undefined, signal: controller.signal}, {ref_id: ref.ref_id, extra: ref.extra, ref_beside_layers: ref.beside_layers});
+    entry.record = sent.record;
+    // The reference's store cancelled this one part-way: so does the replay, as long after it began.
+    if (ref.abort_after_ms != null) setTimeout(() => controller.abort(), ref.abort_after_ms);
+    let r;
+    try {
+      r = await sent.response;
+    } catch {
+      if (ref.path === '/session/authorise') throw new Error(`replaying ${ref.ref_id}: authorise failed`);
+      return;
+    }
+    if (ref.path === '/session/authorise') {
+      if (!r.ok) throw new Error(`replaying ${ref.ref_id}: authorise answered ${r.status}`);
+      session.resolve((await r.json()).token);
+    } else if (ref.path === '/v1/meta') {
+      session.meta = await r.json();
+    } else {
+      try {
+        const reader = r.body.getReader();
+        while (!(await reader.read()).done);
+      } catch {
+        // Recorded on the request: aborted, or cut.
+      }
+    }
+  })();
+  return entry;
+}
+
+/**
+ * Send one step's reference requests, each as late after the step began as it was sent in the
+ * reference, and later by as much as anything it followed there arrived later here: a request
+ * waits for every part of another request (its headers, first counts, first points, last byte)
+ * that had arrived before it was sent. What ran together in the reference runs together here,
+ * and what waited still waits. Then wait for quiet, as a camera step does.
+ */
+async function replayStep(sp, session) {
+  const S = now();
+  step = {...sp.spec, t0: S};
+  const reqs = sp.requests;
+  const entries = [];
+  const happened = (i, name) => {
+    const r = entries[i]?.record;
+    return r ? r.events[name] ?? r.events.last_byte ?? null : null;
+  };
+  // The reference parts that had arrived `off` ms into the step, of the first `upto` requests.
+  const before = (off, upto) => {
+    const out = [];
+    for (let i = 0; i < upto; i++) for (const [name, e] of Object.entries(reqs[i].events)) if (e !== null && e < off) out.push({i, name, e});
+    return out;
+  };
+  const delay = (parts) => Math.max(0, ...parts.map(({i, name, e}) => happened(i, name) - (S + e)));
+  for (const [j, ref] of reqs.entries()) {
+    const parts = before(ref.offset, j);
+    while (!parts.every(({i, name}) => happened(i, name) !== null)) await changed();
+    // A timer waits whole milliseconds and at least one, so a wait is rounded down, not up.
+    const wait = Math.floor(S + ref.offset + delay(parts) - now());
+    if (wait > 0) await sleep(wait);
+    entries.push(issue(ref, session));
+  }
+  await Promise.all(entries.map((x) => x.done));
+  const ok = await settled(S);
+  step = null;
+  // A moment of the reference step, such as the token's arrival, moved as its requests were.
+  const moment = (off) => S + off + delay(before(off, reqs.length));
+  return {ok, S, moment};
+}
+
+/** Every principal's steps, replayed in the reference's order. */
+async function replay(rp) {
+  for (const principal of rp.principals) {
+    const entry = {label: principal.label, terms: principal.terms};
+    const sessions = {};
+    for (const sp of principal.steps) {
+      if (sp.open) {
+        console.error(`${principal.label}: replaying ${sp.open}`);
+        const session = (sessions[sp.open] = newSession());
+        const {ok, S, moment} = await replayStep(sp, session);
+        entry[sp.open] = openResult(summarise(sp.spec, moment(sp.show_off), ok), S, moment(sp.token_off));
+        if (sp.open === 'again' && principal.densest) {
+          // The bench's own counts request between opening and the map, as the reference made it.
+          const view = session.meta.views[0];
+          const q = view.quantisation;
+          const found = await densest(session.value, view, {xMin: q.x_min, yMin: q.y_min, xMax: q.x_max, yMax: q.y_max}, plan.regions);
+          entry.visible = found.visible;
+          entry.regions = found.regions;
+        }
+      } else {
+        if (!entry.map) console.error(`${principal.label}: replaying the map`);
+        const {ok, S} = await replayStep(sp, sessions[sp.session]);
+        (entry.map ??= []).push(summarise(sp.spec, S, ok));
+      }
+    }
+    if (principal.lookups) entry.token = sessions.again.value;
+    out.principals.push(entry);
+  }
+}
+
+/** The request log as written: every time relative, and nothing of this process's clock. */
+const written = () => log.map(({t0, events, ...r}) => r);
+
 const out = {principals: []};
+if (plan.replay) {
+  await replay(plan.replay);
+  out.requests = written();
+  writeFileSync(outPath, JSON.stringify(out));
+  process.exit(0);
+}
 // After a restart over the same cache: each principal opens once more, as the first viewer of a
 // server that has kept what the last one computed.
 if (plan.phase === 'reopen') {
@@ -439,7 +616,7 @@ if (plan.phase === 'reopen') {
     reopen.store.dispose();
     out.principals.push({label: principal.label, reopen: reopen.result});
   }
-  out.requests = log.map(({t0, ...r}) => r);
+  out.requests = written();
   writeFileSync(outPath, JSON.stringify(out));
   process.exit(0);
 }
@@ -475,6 +652,6 @@ for (const principal of plan.principals) {
   again.store.dispose();
   out.principals.push(entry);
 }
-out.requests = log.map(({t0, ...r}) => r);
+out.requests = written();
 writeFileSync(outPath, JSON.stringify(out));
 process.exit(0);
