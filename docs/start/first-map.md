@@ -206,7 +206,7 @@ render = true
 You only write these when building from files on disc. The Python client writes them for you from
 the data you insert.
 
-**The view.** A [view](../system/data-model.md#views-and-view-groups) is one way of laying the
+**The view.** A [view](../system/data-model.md#views) is one way of laying the
 places out on a flat map. It has a projection, which turns longitude and latitude into a position on
 the map, and an extent, which is the part of the map it covers. A corpus can have several views. A
 collection of documents might have a geographic map and a layout drawn from an embedding, for

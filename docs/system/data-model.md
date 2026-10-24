@@ -1,274 +1,125 @@
 # Data model
 
-Mosaica serves one shared collection of items through several different maps at once. An item
-exists once, with one identity, one access label and one set of declared field values. It can have
-a position in more than one map, because switching which map a viewer looks at changes only where
-an item is drawn and how it is queried, never what the item is or who may see it.
-
-## What an item carries
-
-An item is one record in the corpus. It carries an access label, an expression over the
-[terms that decide who may see it](access-control.md#terms-and-access-labels) that the operator declares per item,
-and a value, present or absent, for every field the corpus declares. The operator addresses an item
-again by its `mosaica_id` or by the value of a field declared [unique](#unique-fields): a DOI, an
-accession number, a GeoNames id.
-
-## Views and view groups
-
-A view is a named coordinate system over the corpus: a projection and a frame that decide where
-each item is drawn and how a client queries it. Everything about an item that does not depend on
-layout is stored once and shared by every view: its identity, its label, and its declared values,
-unless a field says otherwise. Everything that depends on layout belongs to one view alone: the
-item's position, the order those positions are stored in for that view, and how a query addresses
-them. One mapping, from an item's identity to its position, joins the two for each view. An item
-absent from a view's mapping has no position there.
-
-```mermaid
-flowchart TB
-  subgraph entity["entity space: one per corpus, shared by every view"]
-    direction LR
-    ids["item identities<br/>entity id, mosaica_id, unique values"]
-    terms["who may see it"]
-    fields["field values"]
-    members["membership of annotation layers"]
-  end
-
-  subgraph v1["view: world (web_mercator)"]
-    direction TB
-    p1["a position per item"] --> t1["tiles"]
-  end
-  subgraph v2["view: topics (embedding, none)"]
-    direction TB
-    p2["a position per item"] --> t2["tiles"]
-  end
-
-  entity -- "one permutation<br/>entity id → position" --> v1
-  entity -- "one permutation<br/>entity id → position" --> v2
-```
-*One identity, several positions: a view owns everything downstream of its own mapping and nothing
-above it.*
-
-A view is declared once, when the corpus is built, and does not change afterwards: adding a plain
-view is a rebuild.
-
-A view group is a set of views that share every layout setting: projection, frame, and the access
-label an item gets when it declares none of its own. Views in the group differ only by a key the
-operator chooses and a handful of per-view facts, such as a display name or a date range. A view
-of a group can be created and dropped while the service is running, which lets a corpus that
-gains a new time slice, region or batch acquire a new layout without a rebuild. Once created, a
-group's view has its own positions, like a plain view.
-
-A view reads its geometry from a points file named in its declaration, with columns for the
-item's coordinates and its entity id. A group's views can share one such file instead of each
-having its own, distinguished by a column that says which view each entry in the file belongs to.
-
-A view's record cannot be edited once created. Correcting a wrong access label or a wrong
-per-view fact means dropping the view and creating a fresh one, under the same key if the operator
-chooses: a dropped key can be reused, and a view created under it starts empty, carrying none of
-its predecessor's items.
-
-Dropping a view deletes every item it leaves with a row in no view, flushed or buffered, as any
-deletion does: its rows and values leave at the next compaction, which frees its number for a new
-item under a different `mosaica_id`, so the deleted item's goes on naming nothing. The drop's
-response counts them. An item with a row in another view keeps it and everything it holds.
-
-Two view groups can share one set of views: a quarterly map and a quarterly embedding built over
-the same quarters can use the same keys and per-view facts, rather than declaring them twice.
-
-A field can be declared to vary by view of a group instead of holding one value for the whole
-item: a sentiment score recomputed each quarter, for instance. Reading it under a view of that
-group returns that view's own value. Reading it from anywhere else requires naming the view
-explicitly, because the field holds no single value outside one.
-
-An ingest row names an item by its `mosaica_id` and the value of every unique field it carries,
-and names no item where none of them is held; a change and a layer's member name an item the same
-way, by those columns ([resolving a batch](write-path.md#resolving-a-batch)).
-A row naming an item that has no row in the batch's view, carrying a position there and changing
-nothing else, adds the item to that view under its existing identity and entity, keeping its label
-and every value declared once for the whole item. The item stays served in its other views, and
-is served in the new one from the next flush. This is how one item comes to exist in more than one
-view. A row that names an item and carries what the item stores changes nothing. Any other row
-naming an item edits it: it changes a value, the label or a position. An edit
-keeps the item's `mosaica_id`, the views it is in, its layer
-memberships, the contents generated from it and a suppression standing against it
-([the write path](write-path.md#edits)). A row that places an item in a layer's artifact changes
-the artifact, not the item: the item is not edited and keeps its entity.
-
-A view, or a view group, can also carry its own access label, narrower than the corpus's default.
-This is an additional gate on top of each item's own label, not a replacement for it: a viewer
-must satisfy both to see an item through that view.
-
-## Identifiers
-
-Four identifiers name an item or a view, one for each party that needs to address it:
-
-| Identifier | Assigned by | Held by | What changes it |
-|---|---|---|---|
-| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit or a deletion left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
-| `mosaica_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
-| unique value | the operator, in a field declared `unique` | the operator, and any record of a write naming it | an edit of that field |
-| view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
-
-The entity id is the server's own internal key: a dense integer, assigned as items are committed,
-in an order that groups together the items sharing the same index keys. A build numbers its items
-in batches sized to its memory budget, each a dense range sorted that way, and a build that fits in
-one batch sorts the whole corpus as one range. A later ingest commits its own new items above what
-already exists, in a range sorted the same way within itself but appended after the corpus already
-on disc rather than interleaved with it. The exception is an id a compaction has freed: an edit
-leaves the item's old entity deleted, the compaction that removes its rows frees the id, and the
-allocator issues freed ids before new ones. An item's first entity id, its number, is freed only
-once the item is deleted and a compaction has removed its last entity, and the item that takes it
-next has a different `mosaica_id` ([freed entity ids](write-path.md#freed-entity-ids) has the
-rules).
-
-The entity ids come from a point shard, a space the items are numbered in, and an entity id names
-an item only together with its shard. One shard at a time is open to new items. The shard size is
-the high water, the id past the highest a shard has issued, at which the open shard seals. The size
-is `[shards] size` in the declaration a build reads, or what `PUT /control/shards` declares at a
-running service, and 4,026,531,840 where neither declares one. A build numbers its items in one
-sequence and cuts it into shards at the size: shard k holds the items numbered from k × size, each
-at its number less k × size, so every shard but the last holds `size` items, and a corpus no larger
-than the size is one shard. Each shard has an identity, SHA-256 over the bundle's `MANIFEST.json`
-digest and the shard's number, under which caches key what they hold of that shard.
-
-At a running service, new items take the ids a compaction freed in the shard holding the most of
-them, where that is at least one in 1,024 of the size, and otherwise the open shard's freed ids and
-then ids past its high water. A window that takes the open shard to the size seals it and opens the
-next shard for the items left. Lowering the size to the open shard's high water or below seals it,
-and the next shard opens when a new item needs it. A sealed shard stays sealed. An edit takes its
-new entity in its item's shard, and may carry a sealed shard's high water past the size.
-[Admission](write-path.md#admission) gives the rule.
-
-The `mosaica_id` is what a client receives and holds instead of the entity id. The key of the
-permutation is drawn at random by `mosaica build` each time it creates a bundle and is stored in
-the bundle's manifest. Nobody configures it, and no response carries it. A `mosaica_id` is stable
-for the item's life in that bundle, across edits, sessions, restarts, flushes, merges and
-compactions, and a copy of the bundle keeps it. A rebuild issues a new `mosaica_id` for every item, and one from
-the old bundle does not name an item in the new one.
-
-An annotation artifact and a layer are named by a `mosaica_id` from the same permutation. Their
-input carries a kind bit that sets them apart from items, so none of them names an item
-([an artifact's identity](annotations.md#an-artifacts-identity)).
-
-## Projections and the frame
-
-Every view's positions are quantised against a frame, a fixed square grid chosen when the view is
-declared. Declaring a projection over that frame lets a client line up a basemap with the points,
-invert a stored position back to a real coordinate, and compare two views built under the same
-projection tile for tile.
-
-A view with no geography, such as an embedding layout, declares no projection. It still declares
-a frame: a square the operator states explicitly, or `auto` to fit whatever range its coordinates
-span.
-
-A geographic view declares one of two projections, both fixed transforms the service applies and
-never negotiates: there is no caller-supplied projection, datum shift or national grid.
-
-| Projection | Reaches the poles | What it distorts |
-|---|---|---|
-| `web_mercator` | No, cuts off past about 85° north and south | Area, increasingly away from the equator. Shape is preserved everywhere the projection is defined, and every standard map tile server uses it |
-| `equirectangular` | Yes | Shape, away from the equator. A plain scaling of longitude and latitude |
-
-A coordinate is always supplied as longitude and latitude, in degrees, at a build and on every
-later ingest (the service does the projecting, never the caller), and is carried at full
-precision from the file or the wire through to the moment it is quantised onto the grid.
-
-```toml
-[[view]]
-name       = "world"
-projection = "web_mercator"
-extent     = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
-```
-
-A view's frame is either the whole space its projection covers, or a smaller square aligned to a
-grid boundary, which keeps the [tiling](queries.md#the-viewport) a viewport request resolves to
-exact at every zoom level.
-
-Two distinct things can move a stored position onto the frame's edge, and each is reported on its
-own:
-
-| | Cause |
-|---|---|
-| Clamping | The coordinate is outside the view's declared frame |
-| Clipping | The coordinate is outside the projection's own domain, beyond `web_mercator`'s polar cut, for instance |
-
-Neither is a reason to refuse. A build stores the point on the frame's edge and its report counts
-how many points clamped and how many clipped, whatever the proportion. A live ingest does the
-same, and its receipt counts the rows it clamped as `clamped` and the rows it clipped as
-`clipped`. Both refuse a coordinate that is not a finite number, and under a projection one
-outside WGS84's range.
-
-## Fields: five families, one declaration
-
-A field is one of five families, chosen by what the value is:
-
-| Family | What it holds | Searched by |
-|---|---|---|
-| number | any numeric type | an exact match, a set of values, or a range |
-| datetime | a timestamp, stored as a number | the same as number |
-| category | one value from a vocabulary | an exact match, membership in a set, or a listing of the vocabulary's own values |
-| keyword | a short exact string with no vocabulary, an identifier, a hostname | an exact match, a set, a prefix, or a substring |
-| text | prose, in any script | a search for the words it contains |
-
-A field's declaration says what it is, not where it is stored: a type, and two independent
-choices: whether it draws on the map (`render`) and whether it can be searched (`index`).
-
-```toml
-[[attribute]]
-name   = "submitter"
-type   = "keyword"
-index  = true    # can be searched (default false)
-render = false   # draws on the map (default false)
-```
-
-A field's value is kept in one or more of three homes, which `/v1/meta` lists for each field as its
-`homes`. A field with `render` set is stored beside every item's position in each view (`rendered`)
-and read for every point drawn. A field other than text with `index` set, and a category whose
-vocabulary is derived, has a column of one value per item (`value_column`), read by filters, counts
-and category listings. A field with neither, and every text field, is kept in the compact record
-store (`record`): the cheapest home, and the one a field takes by default. A text field's search
-index answers a search but cannot give its prose back, so its value stays in the record store. The
-record store is read when an item is opened, when a bulk read names the field, and to confirm a
-text phrase.
+A Mosaica database holds items. Each item has a set of field values and an access label, and a position in one or more views. This chapter describes each of those, what you choose when you declare them, and what can change once the database is running. Annotation layers, which add clusters and regions over the items, have their own [chapter](annotations.md).
 
 ```mermaid
 flowchart LR
-  decl["field declaration<br/>type, render, index"]
-  decl -- "render = true" --> hot["rendered<br/>beside every point"]
-  decl -- "index = true, or a<br/>derived vocabulary" --> idx["value column<br/>one value per item"]
-  decl -- "neither, or text" --> blob["record store<br/>compact, per item"]
-  hot --> mark["a mark on the map"]
-  idx --> filter["a filter, a count, a listing"]
-  blob --> card["an item card, a bulk read"]
+  item["an item<br/>field values, access label"]
+  item --> w["view: world<br/>(longitude and latitude)"]
+  item --> e["view: topics<br/>(an embedding)"]
+  item --> y["view group: years<br/>one view per year"]
 ```
-*A field with neither flag still has a home: the record store, read by the item card and by a bulk
-read.*
 
-A category over a derived vocabulary keeps its value column, and the record of which items carry
-each value, whatever its declaration says, because that record decides which of the vocabulary's
-values a viewer is shown. Every other field builds a search structure only when `index` is set.
+*One item, with one set of values, placed in several views.*
 
-A field can be both drawable and searchable at once, since the two choices are independent.
+## Items
 
-Turning search on for a field already declared costs one pass over the stored corpus. Turning
-drawing on rewrites the view: a value that draws has to be stored alongside every item's
-position, whether or not that item carries one.
+An item is one record: a place, a paper, a specimen, a log event. Every item has:
 
-A field that draws but carries no value for some item is stored as absent rather than as a
-numeric zero, so a range query that happens to include zero does not wrongly match items that
-have no value at all.
+- a value, or no value, for each field the database declares;
+- an access label, which decides who may see it ([access control](access-control.md));
+- a position in each view it belongs to.
 
-A build requires every declared field: it refuses a source file that lacks the column, or that
-has no row for an item the build creates, and a null is how a source says an item has no value.
-An ingest row may leave any field out. On a row naming an item, a field left out keeps the item's
-value and a null clears it; on a row creating one, either leaves the item with no value. A row
-without coordinates changes only the columns it names. A field may not take the name of a column the system reads
-itself, `level` among them.
+An item can be named in two ways.
 
-### Unique fields
+- **Its `mosaica_id`.** Mosaica gives every item a `mosaica_id`, a 64-bit number, and every response that returns an item includes it. It stays the same for the item's whole life in a database, through edits, restarts and compactions. Building the database again from files gives every item a new one.
+- **A unique field of your own.** A field declared `unique`, such as a DOI, an accession number or a GeoNames id, names the item that holds each value. Inserts, edits, deletions and annotation memberships can all name items this way, so your own ids keep working across rebuilds. See [unique fields](#unique-fields).
 
-A field declared `unique` holds each value on at most one item. It suits an identifier the
-operator's data already carries: a DOI, an accession number, a GeoNames id.
+A database with no unique field treats each row of a view's points as a new item. Declare one if you will ever update, delete or annotate items by your own ids.
+
+## Views
+
+A view lays the items out on a map. Each view has a name, and gives each of its items an x and a y.
+
+- **A plain view** takes any two coordinates, such as a UMAP or t-SNE projection of embeddings, and draws them as they are.
+- **A projected view** takes longitude and latitude in degrees, and the server projects them. You always send longitude and latitude, at a build and on every later insert.
+
+The projections are:
+
+| Projection | Reaches the poles | What it distorts |
+|---|---|---|
+| `web_mercator` | No: it stops at about 85° north and south | Area, more and more away from the equator. Shapes are kept. Standard web map tiles use it, so it lines up with a basemap |
+| `equirectangular` (also `plate_carree`) | Yes | Shape, away from the equator. Longitude and latitude are scaled as they are |
+| `gall_isographic` | Yes | The same transform as `equirectangular`, true to scale at 45° north and south, which gives a less stretched world |
+
+### The frame
+
+Each view stores its positions on a fixed grid, called its frame or extent. You declare it as `auto`, which fits the frame to the data at the build with a small margin, or as an explicit range of coordinates.
+
+A point outside the frame is stored on the frame's edge, and the build's report or the insert's answer counts it:
+
+- *clamped*: outside the declared frame;
+- *clipped*: outside the projection itself, such as beyond `web_mercator`'s cut-off near the poles.
+
+A build refuses a frame that more than half of the points fall outside. A coordinate that is not a finite number is always refused, and so, under a projection, is a longitude or latitude outside its range.
+
+The frame cannot change once the view exists, so a view declared at a running server needs an explicit one.
+
+### Who may see a view
+
+A view can carry its own access label. A viewer must satisfy both the view's label and an item's own label to see that item through the view. Use it to keep a whole layout, such as an internal embedding, to some viewers.
+
+### Declaring a view at a running server
+
+A plain view can be declared at a running server. It starts empty and takes items as they are inserted into it. Declaring it again with the same settings changes nothing, and declaring it with different settings is refused. Not built yet: dropping a plain view. A view in a [view group](#view-groups) can be dropped.
+
+## One item in several views
+
+An item can belong to several views, such as a world map and an embedding of the same places. It has one identity, one access label and one set of values across all of them. Only its position differs. A viewer who switches from one view to another keeps their filters.
+
+At a build, a row of a second view's points that carries a unique value an earlier view gave names that item, and places it in the second view. At a running server, an insert into a view that names an existing item, by its `mosaica_id` or a unique value, and carries a position, adds the item to that view. The item stays in its other views. It appears in the new one at the next flush.
+
+## View groups
+
+A view group is a family of views that share their settings and differ by a key, such as one view per year or per region. Each view is named `<group>:<key>`, as in `years:2024`.
+
+- **Created and dropped while running.** A group's views can be created and dropped at a running server, so a new year or a new batch gets its own layout without a rebuild.
+- **Per-view facts.** A group can declare facts each of its views carries, such as a year or a date range.
+- **Shared membership.** Two groups can share one set of views. A yearly map and a yearly embedding can use the same keys and facts rather than declaring them twice.
+- **Fields that vary by view.** A field can hold a different value for each view of a group, such as a score recomputed every year. Reading it under a view of the group gives that view's value. Reading it anywhere else needs the view named, since the item holds no single value for it.
+
+A group's view cannot be changed once it is created. To correct one, drop it and create it again; the key can be reused, and the new view starts empty.
+
+Dropping a view deletes every item that is in no other view, as a deletion would. The answer to the drop says how many. Items that are also in another view keep everything they hold.
+
+## Fields
+
+Each column you declare becomes a field. A field has a type:
+
+| Kind | Types | Filtered by |
+|---|---|---|
+| Number | integers of 8 to 64 bits, signed or unsigned; 32- or 64-bit floats | an exact value, a set of values, or a range |
+| True or false | `bool` | the same as numbers |
+| Date and time | `timestamp_us`, microseconds since 1970 | the same as numbers |
+| Category | one value from a [vocabulary](#vocabularies) | a value, or a set of values; its values can be listed and suggested as a viewer types |
+| Keyword | a short string matched exactly, such as an identifier or a hostname | an exact value, a set, a prefix, or a substring |
+| Text | prose in any script | the words it contains |
+
+For each field you also make two choices, which are independent.
+
+- **`render`**: the value is stored beside every point and sent with every point drawn, so the map can colour or size points by it. It makes every point larger, so render only what the map needs. Keywords and text cannot be rendered.
+- **`index`**: the field gets an index, so it can be filtered, searched and counted. An index costs disc space and build time.
+
+A field with neither is stored compactly and shown when someone opens the item or reads it in bulk. That is the cheapest choice. A category whose values are visible per viewer (a `derived` vocabulary, below) is always indexed, because the server needs the index to decide which values each viewer may see.
+
+A field's type and choices are fixed once it is declared. The one exception is `unique`, described below. To change the others, rebuild from files.
+
+### Values that are missing
+
+An item can hold no value for a field. A missing number arrives as null, never as zero, so a range that includes zero does not match items with no value.
+
+- **At a build** every declared column must be in the source file. A null is how a row says the item has no value.
+- **On an insert** any field may be left out. For an existing item, a field left out keeps its value and a null clears it. For a new item, both leave it with no value.
+
+### Declaring a field at a running server
+
+A new field can be declared at a running server. Every item starts with no value in it, and inserts can fill it from then on. Declaring it again with the same settings changes nothing, and with different settings is refused. Not built yet: declaring a rendered field at a running server. Declare it at a build.
+
+These names are used by Mosaica itself and are refused as field names: `mosaica_id`, `residual`, `x`, `y`, `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and `highlighted`.
+
+## Unique fields
+
+A field declared `unique` holds each value on at most one item. Use it for an identifier your data already carries.
 
 ```toml
 [[attribute]]
@@ -277,88 +128,39 @@ type   = "keyword"
 unique = true
 ```
 
-`unique` is allowed on a keyword, an integer of any width and a timestamp. A float has no exact
-equality to index, a boolean has two values, a category's codes are assigned by the server, and a
-text field holds no single value, so `unique` on any of them is refused. It is also refused on a
-field that varies by view of a group, since such a field holds one value per view. A null is no
-value, and any number of items may have none. A deleted item holds nothing, so its value may be
-given to a new item at once. A suppressed item keeps its value, because a suppression is lifted
-later and the item comes back with it.
+- **Types.** Keywords, integers of any width and timestamps can be unique. Floats, booleans, categories, text and fields that vary by view cannot.
+- **Missing values.** Any number of items can have no value.
+- **Deleted and suppressed items.** A deleted item gives up its value at once, so a new item can take it. A suppressed item keeps its value, because lifting the suppression brings the item back.
+- **Naming items.** A row carrying a unique value names the item holding it. An insert that names an existing item edits it. A row inserted into a view that names no item creates a new one. A row whose values name two different items is refused.
+- **Keyword values** are compared by a 128-bit hash of their bytes. Two different keywords would collide only at around 2^64 distinct values.
 
-Each unique field has an index from value to the item holding it, stored in entity space. An
-integer or a timestamp is indexed by its value. A keyword is indexed by a 128-bit hash of its bytes,
-so two different keywords with the same hash would count as one value; that becomes likely only
-at around 2^64 distinct values. The index is added to whatever homes the field's flags give it, and
-the value is still read from those. `/v1/meta` does not list the index among a field's `homes`. It
-publishes the field's `unique` flag, and in `filter_operands` it gives `eq` and `in` alone for a
-unique field with neither `render` nor `index`, because the index is then the field's only filter
-structure ([queries](queries.md#filters)).
+### Refused rows
 
-A build is an ingest into an empty database, and it names items by the rule an ingest uses
-([resolving a batch](write-path.md#resolving-a-batch)). It reads its files by kind, and the files of
-one kind in declaration order: each view's points, then the attribute files, the access relation and
-each layer's members. A points row whose unique values name no item creates one, as does a points
-row carrying no unique value, so a corpus that declares no unique field makes each row of its
-points an item of its own. A points row carrying a value an earlier view's points gave names that
-item, and this is how one item comes to be in two views. A row of any other file must name an
-item, so the build is refused where a file other than a view's points carries neither a
-`mosaica_id` column nor a unique field's column. A `mosaica_id` column meets that requirement, but
-an empty database holds no `mosaica_id`, so each row naming an item by one is refused as
-`unknown_mosaica_id`.
+A build leaves out a row that names two items, or that names or sets something an earlier row of its file already did. It keeps the first of two such rows, goes on with the rest, and prints a count for each file and reason with up to ten examples. It writes the same list to `reports/refused.json` in the bundle. `mosaica build --strict` stops at the first refused row instead.
 
-A build leaves out a row that names two items, names an item or sets a value an earlier row of its
-file names or sets, or names no item in a file that cannot create one. Of two rows naming one item,
-the first is kept. The build goes on without the refused rows and prints a count for each file and
-reason with the values of up to ten of the rows. Where it refused any, it writes the same list to
-`reports/refused.json` in the bundle. `mosaica build --strict` refuses the build at the first file
-with a refused row instead ([CLI reference](../reference/cli.md)).
+An insert at a running server works the same way: the answer lists each refused row, and the batch's other rows apply. A strict insert is refused whole if any row is refused.
 
-`unique` is the one part of a field's declaration that can change once the field exists, at a
-build or at a running service. Declaring it `true` at a running service builds the index over every
-stored value, and the declaration takes effect once that finds no value held twice. Otherwise it is
-refused with a count of the values held more than once and up to ten of them, and the field stays
-as it was. Declaring it `false` drops the index at once and keeps the values. Both survive a
-restart. How the index is built while writes continue is in
-[the write path](write-path.md#unique-values). An ingest row carrying a unique value names the item
-that holds it; a row whose values name two items is refused, as is a later row setting a value an
-earlier row of its batch sets. A refused row is listed in the answer and the batch's other rows
-apply, unless the caller asks for a strict batch, which is refused whole
-([resolving a batch](write-path.md#resolving-a-batch)).
+### Making a field unique later
+
+`unique` is the one setting you can change on an existing field, at a build or at a running server. Turning it on builds the index over every stored value. If any value is held by more than one item, it is refused, with a count and up to ten of the values, and the field stays as it was. Turning it off drops the index and keeps the values. Inserts and deletions carry on while the index is built.
 
 ## Vocabularies
 
-A category's value set is a named object, a vocabulary, and more than one field can draw values
-from the same one: several fields naming the same list of departments, for instance, so the names
-and their properties are maintained once. Which items carry which value is still tracked
-separately per field, because two fields sharing a vocabulary still mean different things.
+A category field takes its values from a vocabulary: a named list of values, each a key with an optional title. Several fields can share one vocabulary, such as two fields that both name departments. Which items carry which value is still tracked for each field separately.
 
-A vocabulary answers two independent questions:
+A vocabulary's settings are:
 
-- **Closed or open.** Is an unrecognised value at ingest refused, or minted on the spot?
-- **Public or derived.** Is the vocabulary's value list served to every viewer as declared, or
-  only where the viewer can see at least one item carrying that value? A derived vocabulary is
-  what keeps a value list from disclosing something the viewer cannot see through any item: its
-  visibility is worked out from inside the viewer's own visible set each time it is asked, never
-  stored or maintained.
+- **Width**: `u8`, `u16` or `u32`, which sets how many values it can hold (255, 65,535 or about 4.3 billion). It cannot change later.
+- **Closed or open**: a closed vocabulary refuses a value it does not hold, at a build and on insert. An open one adds it.
+- **Public or derived**: a public vocabulary lists every value to every viewer. A derived one lists to each viewer only the values carried by items that viewer may see. Use derived when the list of values would itself reveal something.
 
-A category value's underlying code is assigned from the vocabulary's declared width at random,
-not in the order values were first seen, and is never reused or reassigned once given out. A
-visible code therefore discloses nothing about how many values the vocabulary holds or which
-arrived first.
+Each value is stored as a code. Mosaica draws codes at random, unless you pin them in the declaration, and never reuses one. A code a viewer sees therefore says nothing about how many values exist or which came first. Retired codes can be reserved so that no value takes them.
 
-## What is not built
+At a running server you can add values to a vocabulary and change their titles. A changed title is what clients show from then on, and every item keeps its value.
 
-- **Not built yet: list-valued fields.** A field holds at most one value per item. Declaring more
-  than one is refused when the corpus is built.
-- **Not built yet: amending a vocabulary value's properties without a rebuild.** No control-plane
-  route exists for it; changing a value's label or colour today needs a rebuild.
+## Not built yet
 
-## Where this is tested and where it lives
-
-Integration tests cover a view group's build and its live creation, an item joined into a second
-view, and a field's build pass.
-
-The data model lives in `mosaica-types` (the declared shapes: a view, a vocabulary, a field),
-`mosaica-build` (compiling a declaration into a bundle), `mosaica-spatial` (the projection and
-frame transforms), `mosaica-store` (vocabularies and each view's own files on disc), and
-`mosaica-engine` (viewport reads and category serving).
+- **Fields holding a list of values.** A field holds at most one value per item.
+- **Titles of views, fields and vocabularies.** A declaration may give one, and it is accepted but not yet sent to clients. A category value's title is sent.
+- **Declaring a rendered field at a running server.** Declare it at a build.
+- **Dropping a plain view.** A view in a view group can be dropped.

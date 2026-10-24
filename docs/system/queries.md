@@ -107,7 +107,7 @@ map.
 A tile can hold far more visible items than a screen can usefully draw. Rather than a flat cap on
 how many marks appear, each tile is served a number of points chosen from three density rules
 working together. Every item carries a fixed, pseudo-random rank derived from its own
-[`mosaica_id`](data-model.md#what-an-item-carries) rather than from any internal ordering, so which
+[`mosaica_id`](data-model.md#items) rather than from any internal ordering, so which
 items appear first at a coarse zoom is unrelated to how an item came to be authorised.
 
 | Rule | What it does |
@@ -387,7 +387,7 @@ record fields until that flush.
 The rows come in one of two orders, which return the same rows. Map order is by map cell in the
 view, then by `mosaica_id`, merged across the view's segments in every shard, which is the order
 rendered fields are stored in. Stored order walks the bundle's point shards, the spaces its items
-are numbered in ([data model](data-model.md#identifiers)), in shard number order, and within a shard
+are numbered in ([data model](data-model.md#items)), in shard number order, and within a shard
 follows the server's internal item numbering, which is the order the shard's record store holds
 items in. In map order a page's items are scattered through the record store, so each page
 decompresses blocks it uses only a few rows of, and the smaller the pages, the more often each block

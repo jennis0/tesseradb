@@ -222,7 +222,7 @@ are computed from the request's visible set in three parts:
 The visible set is F less D, together with T, and the three never overlap, so an artifact's count
 is its count over F, less its count over D, plus its count over T. The same holds for the number
 of its rows with a position and for the sums of their positions, which give the centroid. In a
-bundle whose items are numbered in several point shards ([data model](data-model.md#identifiers)),
+bundle whose items are numbered in several point shards ([data model](data-model.md#items)),
 F, D and T are each the union of the shards' own. F's figures are held as one sum over every
 shard, so an artifact's count, centroid and box are read once, as in a bundle of one shard, before
 the artifact is tested or served.
