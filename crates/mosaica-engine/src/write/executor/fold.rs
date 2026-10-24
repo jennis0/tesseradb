@@ -947,6 +947,31 @@ fn kept_derived(
         .collect()
 }
 
+/// Whether another shard's `extent` still pairs with the member pack this fold writes again from
+/// that shard's slice as it stands. A row-major column behind its slice is completed at open by
+/// the members joined since the pack it was written with, and against the new pack those joins
+/// read as already held, so such a column and its member file leave and the level is composed
+/// again on first use.
+fn pairs_with_its_members(
+    store: &ArtifactStore,
+    shard: ShardId,
+    extent: &mosaica_store::manifest::DerivedExtent,
+) -> bool {
+    use mosaica_store::manifest::DerivedForm;
+    if !matches!(
+        extent.form,
+        DerivedForm::RowColumn { .. } | DerivedForm::RowMembers
+    ) {
+        return true;
+    }
+    let Some(layer) = store.layer_in(extent.space) else {
+        return true;
+    };
+    store.slice(shard).is_none_or(|slice| {
+        slice.level_version(layer, extent.level) == extent.slice_version
+    })
+}
+
 /// A level's shape over `row_count` rows from `walk`, and the ordinals holding a row there.
 fn observe_held(
     row_count: u32,
@@ -2254,6 +2279,9 @@ impl Executor {
         // shard's carry-forwards.
         let mut kept = kept_derived(&self.side_manifests.derived_extents, shard_id, &derived);
         kept.retain(|(_, extent)| !superseded_by_a_move(extent, &moved));
+        self.live.with_artifacts(|store| {
+            kept.retain(|(shard, extent)| pairs_with_its_members(store, *shard, extent))
+        });
         carried_rels.extend(others.bundle.into_keys());
         carried_rels.extend(others.side.into_keys());
         carried_rels.extend(kept.iter().map(|(_, extent)| extent.path.clone()));

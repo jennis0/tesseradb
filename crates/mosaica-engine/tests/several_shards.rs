@@ -2078,6 +2078,82 @@ fn a_growth_in_one_shard_leaves_the_others_files_and_figures() {
     );
 }
 
+/// A growth in one shard, by the growth route or by membership rows in an ingest, survives a
+/// compaction of the other alone and a restart after the log has rotated, with the cache directory
+/// kept and without it: every viewer is served the items, counts, contents and `member_of` verdicts
+/// one shard holding the same items serves after its own compaction.
+#[test]
+fn a_growth_in_one_shard_survives_another_shards_compaction_and_a_restart() {
+    for (grown, compacted) in [(1, 0), (0, 1)] {
+        for by_ingest in [false, true] {
+            growth_through_another_shards_compaction(grown, compacted, by_ingest);
+        }
+    }
+}
+
+fn growth_through_another_shards_compaction(grown: u32, compacted: u32, by_ingest: bool) {
+    use mosaica_lifecycle::ShardSets;
+    let one = layered_fixture(None);
+    let several = layered_fixture(Some(TWO_SHARD_SIZE));
+    let (one_engine, engine) = (one.open_writing(), several.open_writing());
+    let joining: Vec<u64> = ids_in_shard(&engine, TWO_SHARD_N, grown)
+        .into_iter()
+        .filter(|id| unheld(*id))
+        .collect();
+    assert!(!joining.is_empty(), "shard {grown} holds an item no artifact holds");
+    // A member of another artifact in the compacted shard, so its compaction has a deletion to
+    // reclaim.
+    let deleted = *ids_in_shard(&engine, TWO_SHARD_N, compacted)
+        .iter()
+        .find(|id| **id >= 10 && !unheld(**id))
+        .unwrap();
+    for engine in [&one_engine, &engine] {
+        if by_ingest {
+            for id in &joining {
+                name_item(engine, &format!("join-{id}"), *id, None, Some("c-0"));
+            }
+        } else {
+            let mut growth = IncomingGrowth::from_entities("c-0".into(), Vec::new());
+            growth.joining =
+                ShardSets::of_items(joining.iter().map(|id| item_by_id(engine, *id)));
+            engine
+                .grow_memberships("t".into(), 0, vec![growth])
+                .unwrap();
+        }
+        tick(engine);
+        engine
+            .accept_changes(vec![(item_by_id(engine, deleted).target(), ChangeOp::Delete)])
+            .unwrap();
+    }
+    fold(&one_engine);
+    compact(&engine, Some(shard(compacted)));
+    for engine in [&one_engine, &engine] {
+        reclaim_log(engine);
+    }
+    let at = format!("grown in shard {grown} (by ingest: {by_ingest}), shard {compacted} compacted");
+    let expected = served_layer(&one_engine);
+    assert!(
+        expected[0]
+            .iter()
+            .any(|a| a.0.as_deref() == Some("c-0") && a.1 == 8 + joining.len() as u64),
+        "{at}: the joined items count for their artifact: {expected:?}"
+    );
+    assert_eq!(served_layer(&engine), expected, "{at}");
+
+    drop(engine);
+    let engine = several.open_writing();
+    assert_eq!(served_layer(&engine), expected, "{at}, across a restart");
+    assert_serves_as(&engine, &one_engine, &format!("{at}, the items across a restart"));
+    drop(engine);
+    std::fs::remove_dir_all(&several.cache).unwrap();
+    let engine = several.open_writing();
+    assert_eq!(
+        served_layer(&engine),
+        expected,
+        "{at}, across a restart without the cache"
+    );
+}
+
 /// Dropping a layer at two shards removes every shard's member packs and derived files of its
 /// space, and its space's record, from the next manifest, and a restart agrees.
 #[test]
