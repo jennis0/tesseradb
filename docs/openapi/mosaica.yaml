@@ -1567,9 +1567,9 @@ paths:
         byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk reads' time
         budget. A page, a histogram's apart, holds at most `page_rows` rows and
         `serve.aggregate_page_bytes` (4 MiB by default); one can hold fewer rows than `page_rows`
-        before the table ends. Both budgets count the Arrow column bytes of the rows; the framing,
-        the schema, the dictionary messages and buffer padding add a little to each page on the
-        wire. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every page
+        before the table ends. Both budgets count the Arrow column bytes of the rows and of the
+        page's dictionaries; the framing, the schema and buffer padding add a little to each page
+        on the wire. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every page
         composes the visible set again, so a deletion or suppression accepted during a read applies
         from the next page, and the pages of one table can count different states of a changing
         corpus. Which groups a table lists under `top` is fixed at its first page and carried in the
