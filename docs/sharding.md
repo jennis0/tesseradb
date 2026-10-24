@@ -578,6 +578,14 @@ grant and level, against 128 dense entries held per shard. The eight most extrem
 box name each row's shard beside the row, so they take 256 B an artifact against one shard's 128
 B.
 
+Measured on GeoNames' fourth administrative level (231,645 artifacts, a centroid and a box), for
+the principal who sees every item, twelve repeats of one `/v1/artifacts/viewport` request at zoom
+12 after its first, each server under a 24 GB cap with the machine's one-minute load between 2.6
+and 3.8. With the figures kept per shard, the repeats' median was 1.06 ms at N = 1, 1.51 ms at
+N = 32 and 1.39 s at N = 128, where the 128 entries, 1.19 GB, passed the 1 GiB bound and every
+request read them back from disc. With the sum, it was 1.02 ms, 1.37 ms and 1.66 ms, and the
+figures held in memory were 12.1 MB at every N, against 11.1 MB, 327 MB and 1.19 GB.
+
 ### 3.7 A session's cost
 
 A session's first request builds a projection per shard by today's four routes, each priced for its
