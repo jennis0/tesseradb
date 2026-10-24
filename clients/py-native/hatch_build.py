@@ -124,3 +124,9 @@ class NativeHook(BuildHookInterface):
             rel = path.relative_to(root)
             build_data.setdefault("force_include", {})[os.fspath(path)] = os.fspath(rel)
         build_data.setdefault("artifacts", []).extend(os.fspath(p.relative_to(root)) for p in copied)
+        # The notices of the third-party crates compiled into both artifacts, which their licences
+        # require a redistributed binary to carry.
+        notices = repo / "THIRD_PARTY_LICENSES"
+        if not notices.exists():
+            raise RuntimeError(f"no {notices}: write it with `python3 scripts/third-party-licenses.py`")
+        build_data["force_include"][os.fspath(notices)] = "mosaica_native/THIRD_PARTY_LICENSES"

@@ -180,6 +180,12 @@ jobs:
       # from an opt-in pre-commit hook that is skipped in any worktree without a track marker,
       # which is not a gate.
       - run: bash scripts/check-layers.sh
+      # The licences, banned crates and sources of the Rust dependency graph, against deny.toml.
+      # Advisories read the RustSec database, which changes without a change here, so they are
+      # checked at release (release.yml) rather than on every pull request.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
 
   docs:
     runs-on: ubuntu-latest
