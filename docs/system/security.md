@@ -48,8 +48,7 @@ credential, which authenticates a built-in superuser holding every permission, a
 OIDC access token. Writes, flush and compaction need `write`. Declarations and drops need
 `write-all` beside it. Status and the catalogue need `admin`. A principal holding `write` and not
 `write-all` names only the items, layers, views and artifacts a session holding its terms would be
-served, suppressed items included; anything else answers as absent
-([users and access](../users-and-access.md#writes)). Deleting an artifact also deletes the
+served, suppressed items included; anything else answers as absent. Deleting an artifact also deletes the
 artifacts attached to it outside the writer's terms: every viewer is denied a dependent once what
 it attaches to is deleted, so the cascade removes nothing anyone is shown. The operator holds
 `write-all`.

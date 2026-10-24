@@ -168,8 +168,7 @@ member, each naming its item by a `mosaica_id` and unique values ([accepting a
 deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
 `mosaica-lifecycle` (`resolve.rs`).
 
-A writer without `write-all` names only the items in its scope
-([users and access](../users-and-access.md#writes)). The scope is built off the executor as a
+A writer without `write-all` names only the items in its scope. The scope is built off the executor as a
 session's authorised set is, once per set of terms, and kept (`resolver.rs`, `WriteScope`); a key
 promoted since is judged by the label it indexes. Each item a value or a `mosaica_id` names is
 tested against it by its index keys, read from its buffered row or the flushed entity-to-term

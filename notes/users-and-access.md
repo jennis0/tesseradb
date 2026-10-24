@@ -5,7 +5,7 @@ authenticate them, permissions for what a principal may do, and Accumulo-style a
 for what a principal may see. The catalogue, the three listeners' credentials, sessions and their
 ending, the catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients, access
 expressions and their index, and the removal of the plugin are built, and
-[system/access-control.md](system/access-control.md) describes them; where the build differs from
+[system/access-control.md](../docs/system/access-control.md) describes them; where the build differs from
 this note, the note says so at the claim. Writes are bounded by the writer's terms
 ([Writes](#writes)). **Not built yet:** writes with a session token on the viewer listener, and
 the audit log.
@@ -252,7 +252,7 @@ all of them, below both the build and the ingest paths.
 - `inherited` keeps its meaning for an annotation artifact with no label of its own: the artifact
   is gated by its layer's `visibility` and membership requirement, and its members and counts are
   still computed inside the viewer's visible set
-  ([annotations](system/annotations.md)). It is refused everywhere else.
+  ([annotations](../docs/system/annotations.md)). It is refused everywhere else.
 
 An item labelled `public` is in every session's authorised set, and the label never enters the
 DAG.
@@ -368,11 +368,11 @@ figures are paid at session start and never by a map request.
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
 - The bundle's format changes and its version is bumped (built: 30, and the WAL's 32).
 - Pages in `docs/system/` that this note changes, and which are rewritten when it is built:
-  - [write-path](system/write-path.md), where an item's permission signature is its sorted list of
+  - [write-path](../docs/system/write-path.md), where an item's permission signature is its sorted list of
     terms. Here it is the label id.
-  - [access-control](system/access-control.md), which says the service never refreshes a grant on
+  - [access-control](../docs/system/access-control.md), which says the service never refreshes a grant on
     its own. Here a catalogue change ends the affected sessions.
-  - [security](system/security.md), whose control plane is trusted with every item. Here writers are
+  - [security](../docs/system/security.md), whose control plane is trusted with every item. Here writers are
     principals masked by their own terms, and the unique-field rule under [Writes](#writes) replaces
     its rule that a lookup by value answers an invisible holder as absent.
 
@@ -412,8 +412,8 @@ authorised to be served, suppressed ones included, whether or not the writer hol
 layers, views and artifacts a write may name are those a session holding the terms would be
 served: a layer whose `visibility` admits them, a view whose gate does, and an artifact
 `POST /v1/artifacts` would serve such a session, suppression aside
-([annotations](system/annotations.md#visibility)). How a write is checked against them is in
-[the write path](system/write-path.md#resolving-a-batch).
+([annotations](../docs/system/annotations.md#visibility)). How a write is checked against them is in
+[the write path](../docs/system/write-path.md#resolving-a-batch).
 
 Declaring and dropping need `write-all` beside `write`: a layer, an attribute, the shard size, a
 vocabulary, a view group, a plain view and a view of a group. A writer holding `write` alone is

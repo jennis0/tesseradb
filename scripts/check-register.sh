@@ -10,9 +10,7 @@ cd "$(dirname "$0")/.."
 
 # docs/writing.md is the source of the list and quotes it, so it is checked by neither set.
 STRICT=(CLAUDE.md docs/README.md docs/index.md docs/system docs/start docs/guides docs/reference docs/developer)
-# Files under a STRICT directory that are counted with LOOSE until they are rewritten.
-NOT_STRICT=(docs/guides/views.md)
-LOOSE=(README.md docs/openapi docs/guides/views.md docs/roadmap.md docs/outstanding.md docs/ingest-campaign.md)
+LOOSE=(README.md docs/openapi)
 # The pages a user of Mosaica reads, which USER_PATTERNS also apply to.
 USER_PAGES=(docs/index.md docs/start docs/guides docs/reference)
 
@@ -104,7 +102,6 @@ hits() {  # hits <path>...
   for p in "$@"; do
     [ -e "$p" ] || continue
     find "$p" -name '*.md' -type f | sort | while read -r f; do
-      if [ "${SKIP_NOT_STRICT:-}" = 1 ] && listed "$f" "${NOT_STRICT[@]}"; then continue; fi
       regex=$REGEX
       listed "$f" "${USER_PAGES[@]}" && regex=$USER_REGEX
       awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; print ""; next } fenced { print ""; next } { print }' "$f" |
@@ -113,7 +110,7 @@ hits() {  # hits <path>...
   done
 }
 
-strict=$(SKIP_NOT_STRICT=1 hits "${STRICT[@]}")
+strict=$(hits "${STRICT[@]}")
 if [ -n "$strict" ]; then
   echo "$strict"
   echo "check-register: hits in files held to the register (above)"

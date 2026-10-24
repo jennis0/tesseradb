@@ -299,8 +299,7 @@ next while its count is the same in both.
 ### What a writer may name
 
 A writer holding `write` and not `write-all` names only the layers and artifacts a session holding
-its terms would be served, suppression aside. Any other answers as one that does not exist
-([users and access](../users-and-access.md#writes)). Registering and dropping a layer need
+its terms would be served, suppression aside. Any other answers as one that does not exist. Registering and dropping a layer need
 `write-all`.
 
 ## What an artifact carries

@@ -122,8 +122,7 @@ must not produce an authorisation decision.
 
 A viewer's terms and permissions come from the identity catalogue, a SQLite database outside the
 bundle that holds local principals, their password hashes and API keys, groups, the terms and
-permissions granted to each, and the OIDC providers whose access tokens the service accepts
-([users and access](../users-and-access.md) is the design). The whole catalogue is held in memory,
+permissions granted to each, and the OIDC providers whose access tokens the service accepts. The whole catalogue is held in memory,
 and no request reads SQLite.
 
 A session is minted in one of three ways.

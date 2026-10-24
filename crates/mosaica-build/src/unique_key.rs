@@ -5,7 +5,7 @@
 //! different value, the dictionary holds every value once and the column is a second copy of the
 //! source column plus four bytes a row: the index answers a lookup by that one key and nothing
 //! else. Rung 5 of the ingest campaign indexed a 36-byte `uuid` over 233 million rows, and the
-//! column was 8 GB of a 40 GB bundle (`docs/ingest-campaign.md` §4b).
+//! column was 8 GB of a 40 GB bundle (`notes/ingest-campaign.md` §4b).
 //!
 //! **A warning, never a refusal.** A unique key indexed for the lookup is legitimate, and the
 //! build cannot tell that intent from an oversight. The figures are printed with their

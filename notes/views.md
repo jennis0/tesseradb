@@ -9,8 +9,8 @@ here is built, as of `views.md` r23 (2026-08-31).
 This is a task-oriented walkthrough for the operator declaring a corpus and the client reading it —
 what a view is, when to reach for a view group instead of a plain view, and how to grow a group
 while the service is running. The worked examples are drawn from
-[`test_corpora/multiview/corpus.toml`](../../test_corpora/multiview/corpus.toml), a fixture built
-to exercise this whole surface; its [README](../../test_corpora/multiview/README.md) is a
+[`test_corpora/multiview/corpus.toml`](../test_corpora/multiview/corpus.toml), a fixture built
+to exercise this whole surface; its [README](../test_corpora/multiview/README.md) is a
 feature-by-feature index into it.
 
 ## What a view is
@@ -69,7 +69,7 @@ A corpus with no unique attribute makes each row of each view's points an item o
 
 A build leaves out and reports a row that names two items, names an item or sets a value an earlier
 row of its file already named or set, or, in an attribute file or a members file, names no item
-([data model](../system/data-model.md#unique-fields)).
+([data model](../docs/system/data-model.md#unique-fields)).
 
 ## Declare a group of timeslices
 

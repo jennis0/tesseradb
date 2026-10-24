@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the campaign table from the rungs' `measurements.json` files.
 
-One row per rung, into a marked block of `docs/ingest-campaign.md`. The tracker is edited in place
+One row per rung, into a marked block of `notes/ingest-campaign.md`. The tracker is edited in place
 as rungs land, so the table has to be **regenerated** rather than hand-maintained: three copies of
 a conformance count had already drifted apart in this repository before they were removed, and a
 campaign table hand-updated from six rungs' JSON would go the same way.
@@ -33,7 +33,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 CORPORA = REPO / "test_corpora"
-TRACKER = REPO / "docs" / "ingest-campaign.md"
+TRACKER = REPO / "notes" / "ingest-campaign.md"
 
 #: Bumped whenever a field in `measurements.json` changes meaning or leaves. The schema itself is
 #: written down in `test_corpora/common/README.md`, with each field's unit and how it was measured.

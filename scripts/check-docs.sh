@@ -40,11 +40,9 @@ mkdocs build --strict --site-dir "$site"
 
 bash scripts/check-register.sh
 
-# docs/system is left out until the citations in its Sources sections name files that exist, and
-# docs/guides/views.md until it is rewritten, as check-register.sh leaves it out.
-mapfile -t guides < <(find docs/guides -name '*.md' ! -path docs/guides/views.md | sort)
+# docs/system is left out until the citations in its Sources sections name files that exist.
 python3 scripts/check-doc-links.py --strict \
-  README.md CLAUDE.md docs/index.md docs/start "${guides[@]}" docs/reference docs/developer docs/openapi
+  README.md CLAUDE.md docs/index.md docs/start docs/guides docs/reference docs/developer docs/openapi
 
 # The Python blocks in docs/start and docs/guides, and the harness's own tests.
 (cd docs && python3 -m pytest -q)
