@@ -98,9 +98,11 @@ The [capabilities](../reference/capabilities.md) table names the call for each c
 
 - **A tile is one run of rows.** The build stores each view's items in Morton order, which keeps points that are near each other on the map near each other on disc. Every map tile, at every zoom, is then one contiguous run of rows.
 - **Counts read no rows.** Filters and access are held as compressed bitmaps of row numbers. A tile's count is the size of an intersection between bitmaps and a row range.
-- **One machine.** The build streams its input, so the source files need not fit in memory, and the server runs within a memory cap you set. The [operating guide](../guides/operating.md) explains how to size it.
+- **More data than memory.** The server never loads the data. It maps the files on disc, so the operating system keeps the parts being read in memory and drops the rest when memory runs short. Because a tile is one run of rows, the parts of the map people are looking at stay in memory, and the rest waits on disc.
+- **Small structures stay warm.** What the server reuses on every request, such as each viewer's visible set and the counts of each annotation level, it keeps in caches with limits you set. The visible sets and annotation counts also keep copies on disc, so a restart reads them back rather than working them out again. A machine can therefore serve far more data than it can hold in memory. A memory cap that is too low makes the server slower before it makes it fail.
+- **The build streams.** The build reads its input in one pass and plans its memory before it starts, so the source files need not fit in memory either.
 
-The [queries](queries.md) and [serving](serving.md) chapters explain these in full.
+The [queries](queries.md) and [serving](serving.md) chapters explain these in full, and the [operating guide](../guides/operating.md#memory) explains how to size the caches and the cap.
 
 ## What is built
 
